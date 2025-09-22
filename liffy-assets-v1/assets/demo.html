@@ -1,0 +1,49 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Liffy Assets Demo</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <header class="site-header">
+    <img src="./logo.png" class="logo" alt="Liffy">
+    <div class="title">Liffy Design System — Demo</div>
+  </header>
+
+  <main class="container">
+    <div class="grid grid-3">
+      <div class="card">
+        <h2>Buttons</h2>
+        <p>Primary actions</p>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+          <a class="btn btn-primary" href="#">Primary</a>
+          <a class="btn btn-secondary" href="#">Secondary</a>
+          <a class="btn btn-accent" href="#">Accent</a>
+          <a class="btn btn-outline" href="#">Outline</a>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Form</h2>
+        <label>Email</label>
+        <input placeholder="name@company.com">
+        <label>Segment</label>
+        <select><option>All</option><option>Verified</option></select>
+        <a class="btn btn-primary" href="#">Submit</a>
+      </div>
+      <div class="card">
+        <h2>Table</h2>
+        <table class="table">
+          <thead><tr><th>Email</th><th>Status</th><th>Opens</th></tr></thead>
+          <tbody>
+            <tr><td>alice@ex.co</td><td><span class="badge success">Verified</span></td><td>5</td></tr>
+            <tr><td>bob@ex.co</td><td><span class="badge">Pending</span></td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <footer class="site-footer">© 2025 Liffy</footer>
+</body>
+</html>
