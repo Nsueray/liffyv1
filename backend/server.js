@@ -8,6 +8,7 @@ const db = require('./db');
 const emailTemplatesRouter = require('./routes/emailTemplates');
 const campaignsRouter = require('./routes/campaigns');
 const emailLogsRouter = require('./routes/emailLogs');
+const testEmailRouter = require('./routes/testEmail');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -34,6 +35,7 @@ app.get('/api/health', async (req, res) => {
 app.use(emailTemplatesRouter);
 app.use(campaignsRouter);
 app.use(emailLogsRouter);
+app.use(testEmailRouter);
 
 // 404 fallback (JSON)
 app.use((req, res) => {
