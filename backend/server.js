@@ -11,6 +11,7 @@ const emailLogsRouter = require('./routes/emailLogs');
 const testEmailRouter = require('./routes/testEmail');
 const authRouter = require('./routes/auth');
 const sendersRouter = require('./routes/senders');
+const campaignRecipientsRouter = require('./routes/campaignRecipients');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -40,6 +41,7 @@ app.use(emailLogsRouter);
 app.use(testEmailRouter);
 app.use(authRouter);
 app.use(sendersRouter);
+app.use(campaignRecipientsRouter);
 
 // 404 fallback (JSON)
 app.use((req, res) => {
