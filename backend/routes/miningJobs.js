@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
+const { runUrlMiningJob } = require('../services/urlMiner');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -29,7 +30,6 @@ function authRequired(req, res, next) {
 
 /**
  * POST /api/mining/jobs
- * Create a mining job (url / pdf / excel / word)
  */
 router.post('/api/mining/jobs', authRequired, async (req, res) => {
   try {
@@ -63,7 +63,6 @@ router.post('/api/mining/jobs', authRequired, async (req, res) => {
 
 /**
  * GET /api/mining/jobs
- * List all jobs for the organizer
  */
 router.get('/api/mining/jobs', authRequired, async (req, res) => {
   try {
@@ -78,6 +77,7 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
     );
 
     return res.json({ success: true, jobs: result.rows });
+
   } catch (err) {
     console.error("GET /mining/jobs error:", err);
     return res.status(500).json({ error: err.message });
@@ -86,7 +86,6 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
 
 /**
  * GET /api/mining/jobs/:id
- * Get job details
  */
 router.get('/api/mining/jobs/:id', authRequired, async (req, res) => {
   try {
@@ -108,6 +107,51 @@ router.get('/api/mining/jobs/:id', authRequired, async (req, res) => {
 
   } catch (err) {
     console.error("GET /mining/jobs/:id error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * POST /api/mining/jobs/:id/run
+ * Triggers the mining job
+ */
+router.post('/api/mining/jobs/:id/run', authRequired, async (req, res) => {
+  try {
+    const organizer_id = req.auth.organizer_id;
+    const job_id = req.params.id;
+
+    // Load job
+    const jobRes = await db.query(
+      `SELECT * FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      [job_id, organizer_id]
+    );
+
+    if (jobRes.rows.length === 0) {
+      return res.status(404).json({ error: "Job not found" });
+    }
+
+    const job = jobRes.rows[0];
+
+    if (job.status === 'running') {
+      return res.status(400).json({ error: "Job already running" });
+    }
+
+    if (job.status === 'completed') {
+      return res.status(400).json({ error: "Job already completed" });
+    }
+
+    let result;
+
+    if (job.type === 'url') {
+      result = await runUrlMiningJob(job_id, organizer_id);
+    } else {
+      return res.status(400).json({ error: `Mining type '${job.type}' not implemented yet` });
+    }
+
+    return res.json(result);
+
+  } catch (err) {
+    console.error("POST /mining/jobs/:id/run error:", err);
     return res.status(500).json({ error: err.message });
   }
 });
