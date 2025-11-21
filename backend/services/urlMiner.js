@@ -2,10 +2,9 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const db = require('../db');
 
-/**
- * Simple email regex (case-insensitive)
- */
 const EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+const EXHIBITOR_HINT_REGEX = /(exhibitor|exhibitors|company|profile|stand)/i;
+const MAX_DETAIL_PAGES = 40;
 
 /**
  * Normalize and deduplicate emails
@@ -20,10 +19,7 @@ function extractUniqueEmails(text) {
 }
 
 /**
- * Try to guess company name from HTML:
- * - <title>
- * - <meta name="description">
- * - First <h1> or <h2>
+ * Try to guess company name from HTML
  */
 function guessCompanyName($) {
   const title = $('title').first().text().trim();
@@ -42,54 +38,98 @@ function guessCompanyName($) {
 }
 
 /**
- * Extract additional context from links: anchor text that looks like company names.
- * This is v2 and intentionally simple.
+ * Extract company-ish anchor texts
  */
 function extractPotentialCompanies($) {
   const companies = [];
   $('a').each((_, el) => {
     const text = $(el).text().trim();
-    if (text && text.length > 3 && text.length < 100) {
-      // Heuristic: exclude obvious junk
-      if (!text.match(/(click here|read more|http|www\.)/i)) {
-        companies.push(text);
-      }
-    }
+    if (!text) return;
+    if (text.length < 3 || text.length > 100) return;
+    if (/(click here|read more|home|privacy|about us|contact us|http|www\.)/i.test(text)) return;
+    companies.push(text);
   });
   return Array.from(new Set(companies));
 }
 
 /**
+ * Find exhibitor detail URLs on the root page.
+ * Heuristics:
+ *  - Same hostname as root URL
+ *  - href or anchor text matches exhibitor/company/profile/stand
+ */
+function extractDetailUrls($, rootUrl) {
+  const detailUrls = new Set();
+  let rootHostname;
+
+  try {
+    rootHostname = new URL(rootUrl).hostname;
+  } catch {
+    return [];
+  }
+
+  $('a[href]').each((_, el) => {
+    const href = $(el).attr('href');
+    if (!href) return;
+    if (href.startsWith('mailto:') || href.startsWith('tel:') || href.startsWith('javascript:')) return;
+
+    let full;
+    try {
+      full = new URL(href, rootUrl).href;
+    } catch {
+      return;
+    }
+
+    let u;
+    try {
+      u = new URL(full);
+    } catch {
+      return;
+    }
+
+    if (u.hostname !== rootHostname) return;
+
+    const anchorText = $(el).text().trim();
+    const haystack = `${href} ${anchorText}`.toLowerCase();
+
+    if (EXHIBITOR_HINT_REGEX.test(haystack)) {
+      detailUrls.add(full);
+    }
+  });
+
+  return Array.from(detailUrls).slice(0, MAX_DETAIL_PAGES);
+}
+
+/**
  * Run URL mining job:
- * - Mark job as running
- * - Fetch HTML
- * - Extract emails + company hints
- * - Insert prospects
- * - Create a list and attach members
- * - Mark job as completed or failed
- *
- * Returns: stats object
+ *  - Mark job running
+ *  - Fetch root HTML
+ *  - Extract emails from root
+ *  - Extract exhibitor-like detail URLs
+ *  - For each detail URL, fetch and extract emails
+ *  - Insert prospects
+ *  - Create a list and attach members
+ *  - Mark job completed / failed
  */
 async function runUrlMiningJob(jobId, organizerId) {
   const client = await db.connect();
 
   try {
-    // 1) Load job
+    // Load job
     const jobRes = await client.query(
       `SELECT * FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [jobId, organizerId]
     );
-
     if (jobRes.rows.length === 0) {
       throw new Error('Mining job not found');
     }
-
     const job = jobRes.rows[0];
+
     if (job.type !== 'url') {
       throw new Error(`Mining job type must be 'url', got '${job.type}'`);
     }
 
-    // 2) Mark job as running
+    // Mark job as running
     await client.query(
       `UPDATE mining_jobs
        SET status = 'running', started_at = NOW(), error = NULL
@@ -97,58 +137,95 @@ async function runUrlMiningJob(jobId, organizerId) {
       [jobId]
     );
 
-    const url = job.input;
+    const rootUrl = job.input;
+    let rootHtml;
 
-    // 3) Fetch HTML
-    let html;
+    // Fetch root HTML
     try {
-      const resp = await axios.get(url, {
-        timeout: 12000,
+      const resp = await axios.get(rootUrl, {
+        timeout: 15000,
         headers: {
           'User-Agent': 'Mozilla/5.0 (compatible; LiffyBot/1.0; +https://liffy.app)'
         }
       });
-      html = resp.data;
+      rootHtml = resp.data;
     } catch (err) {
       throw new Error(`Failed to fetch URL: ${err.message}`);
     }
 
-    const $ = cheerio.load(html);
+    const $root = cheerio.load(rootHtml);
+    const rootText = $root.text();
 
-    // 4) Extract emails from full HTML
-    const allText = $.text();
-    const emailsFromText = extractUniqueEmails(allText);
-
-    // Also scan 'href' attributes (mailto and plain)
+    const emailsFromRootText = extractUniqueEmails(rootText);
     const hrefEmails = [];
-    $('a[href]').each((_, el) => {
-      const href = $(el).attr('href');
+    $root('a[href]').each((_, el) => {
+      const href = $root(el).attr('href');
       if (!href) return;
       const found = extractUniqueEmails(href);
       hrefEmails.push(...found);
     });
 
-    const allEmails = Array.from(new Set([...emailsFromText, ...hrefEmails]));
+    const allEmailsSet = new Set([
+      ...emailsFromRootText,
+      ...hrefEmails
+    ]);
 
-    // 5) Company guess
-    const companyGuess = guessCompanyName($);
-    const extraCompanies = extractPotentialCompanies($);
+    const companyGuess = guessCompanyName($root);
+    const extraCompanies = extractPotentialCompanies($root);
+    const detailUrls = extractDetailUrls($root, rootUrl);
+
+    // Crawl exhibitor detail pages
+    const detailEmails = new Set();
+
+    for (const detailUrl of detailUrls) {
+      try {
+        const resp = await axios.get(detailUrl, {
+          timeout: 12000,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; LiffyBot/1.0; +https://liffy.app)'
+          }
+        });
+        const html = resp.data;
+        const $d = cheerio.load(html);
+        const text = $d.text();
+
+        const emailsFromText = extractUniqueEmails(text);
+        emailsFromText.forEach(e => detailEmails.add(e));
+
+        $d('a[href]').each((_, el) => {
+          const href = $d(el).attr('href');
+          if (!href) return;
+          const found = extractUniqueEmails(href);
+          found.forEach(e => detailEmails.add(e));
+        });
+
+      } catch (err) {
+        console.error(`Detail URL fetch error (${detailUrl}):`, err.message);
+        continue;
+      }
+    }
+
+    // Merge detail emails
+    detailEmails.forEach(e => allEmailsSet.add(e));
+    const allEmails = Array.from(allEmailsSet);
 
     const stats = {
-      url,
+      url: rootUrl,
       emails_raw: allEmails.length,
+      emails_from_root: emailsFromRootText.length,
+      emails_from_details: detailEmails.size,
+      detail_urls_considered: detailUrls.length,
       company_guess: companyGuess,
-      extra_companies: extraCompanies.slice(0, 50) // limit to 50
+      extra_companies: extraCompanies.slice(0, 100)
     };
 
-    // 6) Insert prospects
+    // Insert prospects
     let prospectsCreated = 0;
     const prospectIds = [];
 
     for (const email of allEmails) {
-      // Check if prospect already exists for this organizer + email
       const existing = await client.query(
-        `SELECT id FROM prospects 
+        `SELECT id FROM prospects
          WHERE organizer_id = $1 AND email = $2`,
         [organizerId, email]
       );
@@ -167,12 +244,12 @@ async function runUrlMiningJob(jobId, organizerId) {
           organizerId,
           email,
           companyGuess || null,
-          null,               // country unknown at this stage
-          null,               // sector unknown at this stage
+          null,
+          null,
           'url',
-          url,
+          rootUrl,
           'unknown',
-          { extra_companies: extraCompanies.slice(0, 50) }
+          { extra_companies: extraCompanies.slice(0, 100) }
         ]
       );
 
@@ -180,13 +257,21 @@ async function runUrlMiningJob(jobId, organizerId) {
       prospectIds.push(insertRes.rows[0].id);
     }
 
-    // 7) Create a list for this job and attach all prospects
+    // Create list if any prospects
     let listId = null;
     if (prospectIds.length > 0) {
-      const listName = `URL Mining – ${new URL(url).hostname} – ${jobId.slice(0, 8)}`;
+      const hostname = (() => {
+        try {
+          return new URL(rootUrl).hostname;
+        } catch {
+          return 'unknown-host';
+        }
+      })();
+
+      const listName = `URL Mining – ${hostname} – ${jobId.slice(0, 8)}`;
 
       const listRes = await client.query(
-        `INSERT INTO lists 
+        `INSERT INTO lists
          (organizer_id, name, description, type)
          VALUES ($1,$2,$3,$4)
          RETURNING id`,
@@ -217,7 +302,6 @@ async function runUrlMiningJob(jobId, organizerId) {
       );
     }
 
-    // 8) Update job as completed
     await client.query(
       `UPDATE mining_jobs
        SET status = 'completed',
@@ -247,7 +331,6 @@ async function runUrlMiningJob(jobId, organizerId) {
 
   } catch (err) {
     console.error("runUrlMiningJob error:", err.message);
-
     await db.query(
       `UPDATE mining_jobs
        SET status = 'failed',
