@@ -114,7 +114,7 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
     );
 
     const timeline = timelineRes.rows.map(r => ({
-      date: r.day, // ISO date string
+      date: r.day,
       total: parseInt(r.total || 0, 10),
       sent: parseInt(r.sent || 0, 10),
       failed: parseInt(r.failed || 0, 10)
@@ -143,7 +143,7 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
       failed: parseInt(r.failed || 0, 10)
     }));
 
-    // 6) Bounce reasons (basic)
+    // 6) Bounce reasons
     const bounceRes = await db.query(
       `SELECT
          COALESCE(provider_response->>'error', 'unknown') AS reason,
@@ -193,6 +193,153 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
 
   } catch (err) {
     console.error("GET /api/reports/campaign/:id error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/reports/organizer/overview
+ *
+ * High-level metrics for all campaigns of the organizer:
+ * - campaign counts by status
+ * - recipient counts
+ * - email log counts
+ * - timeline (per day)
+ * - domain breakdown
+ * - bounce reasons
+ */
+router.get('/api/reports/organizer/overview', authRequired, async (req, res) => {
+  try {
+    const organizer_id = req.auth.organizer_id;
+
+    // 1) Campaign stats
+    const campRes = await db.query(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) AS draft,
+         SUM(CASE WHEN status = 'scheduled' THEN 1 ELSE 0 END) AS scheduled,
+         SUM(CASE WHEN status = 'sending' THEN 1 ELSE 0 END) AS sending,
+         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+       FROM campaigns
+       WHERE organizer_id = $1`,
+      [organizer_id]
+    );
+    const campStats = campRes.rows[0];
+
+    // 2) Recipient stats (all campaigns)
+    const recRes = await db.query(
+      `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+       FROM campaign_recipients
+       WHERE organizer_id = $1`,
+      [organizer_id]
+    );
+    const recStats = recRes.rows[0];
+
+    // 3) Log stats (all campaigns)
+    const logRes = await db.query(
+      `SELECT
+         COUNT(*) AS total_logs,
+         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS logs_sent,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS logs_failed
+       FROM email_logs
+       WHERE organizer_id = $1`,
+      [organizer_id]
+    );
+    const logStats = logRes.rows[0];
+
+    // 4) Timeline (per day, all campaigns)
+    const timelineRes = await db.query(
+      `SELECT
+         DATE(sent_at) AS day,
+         COUNT(*) AS total,
+         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+       FROM email_logs
+       WHERE organizer_id = $1
+         AND sent_at IS NOT NULL
+       GROUP BY DATE(sent_at)
+       ORDER BY day ASC`,
+      [organizer_id]
+    );
+    const timeline = timelineRes.rows.map(r => ({
+      date: r.day,
+      total: parseInt(r.total || 0, 10),
+      sent: parseInt(r.sent || 0, 10),
+      failed: parseInt(r.failed || 0, 10)
+    }));
+
+    // 5) Domain breakdown (all campaigns)
+    const domainRes = await db.query(
+      `SELECT
+         LOWER(split_part(recipient_email, '@', 2)) AS domain,
+         COUNT(*) AS total,
+         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+       FROM email_logs
+       WHERE organizer_id = $1
+       GROUP BY domain
+       ORDER BY total DESC
+       LIMIT 50`,
+      [organizer_id]
+    );
+    const domains = domainRes.rows.map(r => ({
+      domain: r.domain || 'unknown',
+      total: parseInt(r.total || 0, 10),
+      sent: parseInt(r.sent || 0, 10),
+      failed: parseInt(r.failed || 0, 10)
+    }));
+
+    // 6) Bounce reasons (all campaigns)
+    const bounceRes = await db.query(
+      `SELECT
+         COALESCE(provider_response->>'error', 'unknown') AS reason,
+         COUNT(*) AS count
+       FROM email_logs
+       WHERE organizer_id = $1
+         AND status = 'failed'
+       GROUP BY reason
+       ORDER BY count DESC
+       LIMIT 20`,
+      [organizer_id]
+    );
+    const bounce_reasons = bounceRes.rows.map(r => ({
+      reason: r.reason,
+      count: parseInt(r.count || 0, 10)
+    }));
+
+    return res.json({
+      success: true,
+      campaigns: {
+        total: parseInt(campStats.total || 0, 10),
+        draft: parseInt(campStats.draft || 0, 10),
+        scheduled: parseInt(campStats.scheduled || 0, 10),
+        sending: parseInt(campStats.sending || 0, 10),
+        completed: parseInt(campStats.completed || 0, 10),
+        failed: parseInt(campStats.failed || 0, 10)
+      },
+      recipients: {
+        total: parseInt(recStats.total || 0, 10),
+        pending: parseInt(recStats.pending || 0, 10),
+        sent: parseInt(recStats.sent || 0, 10),
+        failed: parseInt(recStats.failed || 0, 10)
+      },
+      logs: {
+        total: parseInt(logStats.total_logs || 0, 10),
+        sent: parseInt(logStats.logs_sent || 0, 10),
+        failed: parseInt(logStats.logs_failed || 0, 10)
+      },
+      timeline,
+      domains,
+      bounce_reasons
+    });
+
+  } catch (err) {
+    console.error("GET /api/reports/organizer/overview error:", err);
     return res.status(500).json({ error: err.message });
   }
 });
