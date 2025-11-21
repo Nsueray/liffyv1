@@ -15,6 +15,7 @@ const campaignRecipientsRouter = require('./routes/campaignRecipients');
 const campaignSendRouter = require('./routes/campaignSend');
 const reportsRouter = require('./routes/reports');
 const prospectsRouter = require('./routes/prospects');
+const miningJobsRouter = require('./routes/miningJobs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -48,6 +49,7 @@ app.use(campaignRecipientsRouter);
 app.use(campaignSendRouter);
 app.use(reportsRouter);
 app.use(prospectsRouter);
+app.use(miningJobsRouter);
 
 // 404 fallback (JSON)
 app.use((req, res) => {
