@@ -38,6 +38,9 @@ function authRequired(req, res, next) {
  * - campaign info
  * - recipient counts by status (pending/sent/failed)
  * - email_logs counts by status
+ * - timeline (per day)
+ * - domain breakdown
+ * - bounce reasons
  */
 router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
   try {
@@ -94,6 +97,72 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
 
     const logStats = logRes.rows[0];
 
+    // 4) Timeline (per day)
+    const timelineRes = await db.query(
+      `SELECT
+         DATE(sent_at) AS day,
+         COUNT(*) AS total,
+         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+       FROM email_logs
+       WHERE campaign_id = $1
+         AND organizer_id = $2
+         AND sent_at IS NOT NULL
+       GROUP BY DATE(sent_at)
+       ORDER BY day ASC`,
+      [campaign_id, organizer_id]
+    );
+
+    const timeline = timelineRes.rows.map(r => ({
+      date: r.day, // ISO date string
+      total: parseInt(r.total || 0, 10),
+      sent: parseInt(r.sent || 0, 10),
+      failed: parseInt(r.failed || 0, 10)
+    }));
+
+    // 5) Domain breakdown
+    const domainRes = await db.query(
+      `SELECT
+         LOWER(split_part(recipient_email, '@', 2)) AS domain,
+         COUNT(*) AS total,
+         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+       FROM email_logs
+       WHERE campaign_id = $1
+         AND organizer_id = $2
+       GROUP BY domain
+       ORDER BY total DESC
+       LIMIT 50`,
+      [campaign_id, organizer_id]
+    );
+
+    const domains = domainRes.rows.map(r => ({
+      domain: r.domain || 'unknown',
+      total: parseInt(r.total || 0, 10),
+      sent: parseInt(r.sent || 0, 10),
+      failed: parseInt(r.failed || 0, 10)
+    }));
+
+    // 6) Bounce reasons (basic)
+    const bounceRes = await db.query(
+      `SELECT
+         COALESCE(provider_response->>'error', 'unknown') AS reason,
+         COUNT(*) AS count
+       FROM email_logs
+       WHERE campaign_id = $1
+         AND organizer_id = $2
+         AND status = 'failed'
+       GROUP BY reason
+       ORDER BY count DESC
+       LIMIT 20`,
+      [campaign_id, organizer_id]
+    );
+
+    const bounce_reasons = bounceRes.rows.map(r => ({
+      reason: r.reason,
+      count: parseInt(r.count || 0, 10)
+    }));
+
     return res.json({
       success: true,
       campaign: {
@@ -116,7 +185,10 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
         total: parseInt(logStats.total_logs || 0, 10),
         sent: parseInt(logStats.logs_sent || 0, 10),
         failed: parseInt(logStats.logs_failed || 0, 10)
-      }
+      },
+      timeline,
+      domains,
+      bounce_reasons
     });
 
   } catch (err) {
