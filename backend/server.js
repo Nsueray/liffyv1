@@ -9,6 +9,7 @@ const emailTemplatesRouter = require('./routes/emailTemplates');
 const campaignsRouter = require('./routes/campaigns');
 const emailLogsRouter = require('./routes/emailLogs');
 const testEmailRouter = require('./routes/testEmail');
+const authRouter = require('./routes/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -36,6 +37,7 @@ app.use(emailTemplatesRouter);
 app.use(campaignsRouter);
 app.use(emailLogsRouter);
 app.use(testEmailRouter);
+app.use(authRouter);
 
 // 404 fallback (JSON)
 app.use((req, res) => {
