@@ -4,9 +4,13 @@ const db = require('../db');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
-// JWT secret (ileride .env'e taşıyacağız)
+// TODO: JWT secret'i ileride .env'e taşıyacağız
 const JWT_SECRET = "liffy_secret_key_change_me";
 
+/**
+ * REGISTER
+ * Organizer + owner user + default sender identity
+ */
 router.post('/api/auth/register', async (req, res) => {
   try {
     const {
@@ -23,7 +27,6 @@ router.post('/api/auth/register', async (req, res) => {
       sender_label
     } = req.body;
 
-    // basic validation
     if (
       !organizer_name ||
       !user_email ||
@@ -35,7 +38,7 @@ router.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // PASS HASH
+    // Şifre hash
     const password_hash = await bcrypt.hash(user_password, 10);
 
     // 1) ORGANIZER
@@ -96,6 +99,69 @@ router.post('/api/auth/register', async (req, res) => {
       success: true,
       organizer_id: organizer.id,
       user_id: user.id,
+      token
+    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * LOGIN
+ * Mevcut kullanıcı girer: email + password
+ * Karşılığında token döner
+ */
+router.post('/api/auth/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: "email and password are required" });
+    }
+
+    // User'ı bul
+    const userResult = await db.query(
+      `SELECT u.*, o.id as organizer_id
+       FROM users u
+       JOIN organizers o ON u.organizer_id = o.id
+       WHERE u.email = $1`,
+       [email]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+
+    const user = userResult.rows[0];
+
+    // Şifre kontrol
+    const match = await bcrypt.compare(password, user.password_hash);
+    if (!match) {
+      return res.status(401).json({ error: "Invalid email or password" });
+    }
+
+    if (!user.is_active) {
+      return res.status(403).json({ error: "User is inactive" });
+    }
+
+    // Token üret
+    const token = jwt.sign(
+      {
+        user_id: user.id,
+        organizer_id: user.organizer_id,
+        role: user.role
+      },
+      JWT_SECRET,
+      { expiresIn: "7d" }
+    );
+
+    return res.json({
+      success: true,
+      organizer_id: user.organizer_id,
+      user_id: user.id,
+      role: user.role,
       token
     });
 
