@@ -3,7 +3,6 @@ const helmet = require('helmet');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const db = require('./db');
-const { testBrowser } = require('./services/playwrightClient');
 
 // Routers
 const emailTemplatesRouter = require('./routes/emailTemplates');
@@ -62,10 +61,6 @@ app.use((req, res) => {
 app.listen(PORT, () => {
   console.log(`Liffy server running on port ${PORT}`);
 });
-
-if (process.env.PLAYWRIGHT_TEST === '1') {
-  testBrowser();
-}
 
 const { runMiningTest } = require('./services/miningWorker');
 
