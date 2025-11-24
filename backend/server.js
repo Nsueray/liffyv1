@@ -3,6 +3,7 @@ const helmet = require('helmet');
 const cors = require('cors');
 const bodyParser = require('body-parser');
 const db = require('./db');
+const { testBrowser } = require('./services/playwrightClient');
 
 // Routers
 const emailTemplatesRouter = require('./routes/emailTemplates');
@@ -16,6 +17,7 @@ const campaignSendRouter = require('./routes/campaignSend');
 const reportsRouter = require('./routes/reports');
 const prospectsRouter = require('./routes/prospects');
 const miningJobsRouter = require('./routes/miningJobs');
+const miningResultsRouter = require('./routes/miningResults');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -50,6 +52,7 @@ app.use(campaignSendRouter);
 app.use(reportsRouter);
 app.use(prospectsRouter);
 app.use(miningJobsRouter);
+app.use(miningResultsRouter);
 
 // 404 fallback (JSON)
 app.use((req, res) => {
@@ -59,3 +62,13 @@ app.use((req, res) => {
 app.listen(PORT, () => {
   console.log(`Liffy server running on port ${PORT}`);
 });
+
+if (process.env.PLAYWRIGHT_TEST === '1') {
+  testBrowser();
+}
+
+const { runMiningTest } = require('./services/miningWorker');
+
+if (process.env.MINING_TEST === "1") {
+  runMiningTest();
+}
