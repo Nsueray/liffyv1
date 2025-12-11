@@ -29,6 +29,14 @@ function authRequired(req, res, next) {
 }
 
 /**
+ * Basit UUID kontrolü
+ * Postgres'te uuid sütununa "undefined" göndermeyi engellemek için.
+ */
+function isValidUuid(id) {
+  return typeof id === "string" && /^[0-9a-fA-F-]{36}$/.test(id);
+}
+
+/**
  * POST /api/mining/jobs
  */
 router.post('/api/mining/jobs', authRequired, async (req, res) => {
@@ -140,6 +148,11 @@ router.get('/api/mining/jobs/:id', authRequired, async (req, res) => {
   try {
     const organizer_id = req.auth.organizer_id;
     const job_id = req.params.id;
+
+    // UUID olmayan veya "undefined" gelen id'lerde DB'ye gitmeyelim
+    if (!job_id || job_id === 'undefined' || !isValidUuid(job_id)) {
+      return res.status(400).json({ error: "Invalid job id" });
+    }
 
     const result = await db.query(
       `SELECT *
@@ -367,6 +380,11 @@ router.post('/api/mining/jobs/:id/run', authRequired, async (req, res) => {
   try {
     const organizer_id = req.auth.organizer_id;
     const job_id = req.params.id;
+
+    // UUID olmayan veya "undefined" gelen id'lerde DB'ye gitmeyelim
+    if (!job_id || job_id === 'undefined' || !isValidUuid(job_id)) {
+      return res.status(400).json({ error: "Invalid job id" });
+    }
 
     // Load job
     const jobRes = await db.query(
