@@ -2,9 +2,31 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
+const { validateJobId } = require('../utils/validation');
 const { runUrlMiningJob } = require('../services/urlMiner');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
+const MAX_LOG_LIMIT = 1000;
+
+function parsePagination(query, defaultLimit, maxLimit) {
+  const page = Math.max(parseInt(query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(query.limit, 10) || defaultLimit, 1), maxLimit);
+  const offset = (page - 1) * limit;
+  return { page, limit, offset };
+}
+
+function mapLogRow(row) {
+  const timestamp = row.log_ts || row.timestamp || row.created_at || null;
+
+  return {
+    id: row.id,
+    job_id: row.job_id,
+    timestamp: timestamp ? new Date(timestamp).toISOString() : null,
+    level: row.level || 'info',
+    message: row.message || '',
+    details: row.details || null
+  };
+}
 
 /**
  * Auth middleware
@@ -24,37 +46,11 @@ function authRequired(req, res, next) {
       organizer_id: payload.organizer_id,
       role: payload.role
     };
+    req.user = req.auth;
     next();
   } catch (err) {
     return res.status(401).json({ error: "Invalid or expired token" });
   }
-}
-
-/**
- * UUID validation helper
- */
-function isValidUuid(id) {
-  if (!id || typeof id !== 'string') return false;
-  // Standard UUID v4 format: 8-4-4-4-12 hex characters
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  return uuidRegex.test(id);
-}
-
-/**
- * Middleware to validate job ID parameter
- */
-function validateJobId(req, res, next) {
-  const jobId = req.params.id;
-  
-  // Check for common invalid values
-  if (!jobId || jobId === 'undefined' || jobId === 'null' || !isValidUuid(jobId)) {
-    return res.status(400).json({ 
-      error: "Invalid job ID format",
-      details: `Job ID must be a valid UUID, received: ${jobId}`
-    });
-  }
-  
-  next();
 }
 
 /**
@@ -520,6 +516,7 @@ router.get('/api/mining/jobs/:id/logs', authRequired, validateJobId, async (req,
   try {
     const organizer_id = req.auth.organizer_id;
     const job_id = req.params.id;
+    const { page, limit, offset } = parsePagination(req.query, 200, MAX_LOG_LIMIT);
 
     const jobRes = await db.query(
       `SELECT id FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
@@ -533,13 +530,40 @@ router.get('/api/mining/jobs/:id/logs', authRequired, validateJobId, async (req,
       });
     }
 
-    // TODO: Implement actual log retrieval
-    // For now, return empty logs
+    const logsRes = await db.query(
+      `SELECT 
+         id,
+         job_id,
+         COALESCE(timestamp, created_at, NOW()) AS log_ts,
+         level,
+         message,
+         details,
+         created_at
+       FROM mining_job_logs
+       WHERE job_id = $1
+       ORDER BY log_ts ASC, created_at ASC
+       LIMIT $2 OFFSET $3`,
+      [job_id, limit, offset]
+    );
+
+    const countRes = await db.query(
+      `SELECT COUNT(*)::int AS total
+       FROM mining_job_logs
+       WHERE job_id = $1`,
+      [job_id]
+    );
+
+    const logs = logsRes.rows.map(mapLogRow);
+    const total = countRes.rows[0]?.total || 0;
+
     return res.json({ 
-      logs: [],
-      job_id: job_id
+      logs,
+      pagination: {
+        page,
+        limit,
+        total
+      }
     });
-    
   } catch (err) {
     console.error("GET /mining/jobs/:id/logs error:", err);
     return res.status(500).json({ 

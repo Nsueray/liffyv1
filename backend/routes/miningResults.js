@@ -1,6 +1,7 @@
 const express = require('express');
 const db = require('../db');
 const jwt = require('jsonwebtoken');
+const { validateJobId, validateResultId } = require('../utils/validation');
 
 const router = express.Router();
 
@@ -21,6 +22,7 @@ function authRequired(req, res, next) {
       organizer_id: payload.organizer_id,
       role: payload.role
     };
+    req.user = req.auth;
     next();
   } catch (err) {
     console.error("Auth error:", err.message);
@@ -30,23 +32,46 @@ function authRequired(req, res, next) {
 
 function mapResultRow(row) {
   const raw = row.raw || {};
+  const toIsoOrNull = (value) => {
+    if (!value) return null;
+    const date = value instanceof Date ? value : new Date(value);
+    return Number.isNaN(date.getTime()) ? null : date.toISOString();
+  };
+  const rawEmails = raw.emails || [];
+  const parsedEmails = Array.isArray(row.emails)
+    ? row.emails
+    : Array.isArray(rawEmails)
+      ? rawEmails
+      : typeof row.emails === 'string'
+        ? [row.emails]
+        : [];
+
+  const confidence = row.confidence_score ?? raw.confidence_score ?? raw.confidenceScore;
+  let parsedConfidence = null;
+
+  if (confidence !== null && confidence !== undefined) {
+    const num = Number(confidence);
+    parsedConfidence = Number.isFinite(num) ? Math.min(Math.max(num, 0), 100) : null;
+  }
 
   return {
     id: row.id,
     job_id: row.job_id,
-    source_url: row.source_url,
-    company_name: row.company_name || raw.companyName || null,
-    contact_name: row.contact_name || raw.contactName || null,
-    job_title: row.job_title || raw.jobTitle || null,
-    emails: row.emails || raw.emails || [],
-    website: row.website || raw.website || row.source_url || null,
-    phone: row.phone || raw.phone || null,
-    country: row.country || raw.country || null,
-    city: row.city || raw.city || null,
-    confidence_score: row.confidence_score || raw.confidence_score || null,
-    verification_status: row.verification_status || raw.verification_status || null,
-    status: row.status || raw.status || null,
-    raw: row.raw || null
+    company_name: row.company_name ?? raw.companyName ?? null,
+    contact_name: row.contact_name ?? raw.contactName ?? null,
+    job_title: row.job_title ?? raw.jobTitle ?? null,
+    emails: parsedEmails.filter((email) => typeof email === 'string'),
+    website: row.website ?? raw.website ?? raw.sourceUrl ?? row.source_url ?? null,
+    phone: row.phone ?? raw.phone ?? null,
+    country: row.country ?? raw.country ?? null,
+    city: row.city ?? raw.city ?? null,
+    address: row.address ?? raw.address ?? null,
+    source_url: row.source_url ?? raw.sourceUrl ?? null,
+    confidence_score: parsedConfidence,
+    verification_status: row.verification_status || raw.verification_status || raw.verificationStatus || 'unverified',
+    status: row.status || raw.status || 'new',
+    created_at: toIsoOrNull(row.created_at || raw.created_at),
+    updated_at: toIsoOrNull(row.updated_at || raw.updated_at)
   };
 }
 
@@ -79,7 +104,7 @@ function mapResultRow(row) {
  *   }
  * }
  */
-router.post('/api/mining/jobs/:id/results', authRequired, async (req, res) => {
+router.post('/api/mining/jobs/:id/results', authRequired, validateJobId, async (req, res) => {
   const jobId = req.params.id;
   const { results, summary } = req.body || {};
 
@@ -205,10 +230,14 @@ router.post('/api/mining/jobs/:id/results', authRequired, async (req, res) => {
 /**
  * GET /api/mining/jobs/:id/results
  */
-router.get('/api/mining/jobs/:id/results', authRequired, async (req, res) => {
+router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (req, res) => {
   try {
     const jobId = req.params.id;
     const organizerId = req.auth.organizer_id;
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 500);
+    const offset = (page - 1) * limit;
+    const { has_email, status, verification_status, country, search } = req.query;
 
     const jobRes = await db.query(
       `SELECT id FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
@@ -219,25 +248,110 @@ router.get('/api/mining/jobs/:id/results', authRequired, async (req, res) => {
       return res.status(404).json({ error: "Job not found" });
     }
 
+    const where = ['mj.organizer_id = $1', 'mr.job_id = $2'];
+    const params = [organizerId, jobId];
+    let idx = 3;
+    const emailLengthExpr = `CASE 
+      WHEN jsonb_typeof(COALESCE(mr.emails::jsonb, '[]'::jsonb)) = 'array'
+      THEN jsonb_array_length(COALESCE(mr.emails::jsonb, '[]'::jsonb))
+      ELSE 0
+    END`;
+
+    if (has_email === 'with') {
+      where.push(`${emailLengthExpr} > 0`);
+    } else if (has_email === 'without') {
+      where.push(`${emailLengthExpr} = 0`);
+    }
+
+    if (status && status !== 'all') {
+      where.push(`COALESCE(mr.status, 'new') = $${idx}`);
+      params.push(status);
+      idx++;
+    }
+
+    if (verification_status && verification_status !== 'all') {
+      where.push(`COALESCE(mr.verification_status, 'unverified') = $${idx}`);
+      params.push(verification_status);
+      idx++;
+    }
+
+    if (country) {
+      where.push(`mr.country ILIKE $${idx}`);
+      params.push(`%${country}%`);
+      idx++;
+    }
+
+    if (search) {
+      where.push(`(
+        COALESCE(mr.company_name, '') ILIKE $${idx} OR
+        COALESCE(mr.contact_name, '') ILIKE $${idx} OR
+        COALESCE(mr.website, '') ILIKE $${idx} OR
+        COALESCE(mr.source_url, '') ILIKE $${idx} OR
+        COALESCE((mr.emails)::jsonb::text, '') ILIKE $${idx}
+      )`);
+      params.push(`%${search}%`);
+      idx++;
+    }
+
+    const whereSql = where.join(' AND ');
+
     const resultsRes = await db.query(
-      `SELECT * FROM mining_results WHERE job_id = $1 AND organizer_id = $2 ORDER BY created_at DESC`,
-      [jobId, organizerId]
+      `SELECT 
+         mr.id,
+         mr.job_id,
+         mr.company_name,
+         mr.contact_name,
+         mr.job_title,
+         mr.emails,
+         mr.website,
+         mr.phone,
+         mr.country,
+         mr.city,
+         mr.address,
+         mr.source_url,
+         mr.confidence_score,
+         mr.verification_status,
+         mr.status,
+         mr.created_at,
+         mr.updated_at,
+         mr.raw
+       FROM mining_results mr
+       JOIN mining_jobs mj ON mj.id = mr.job_id
+       WHERE ${whereSql}
+       ORDER BY mr.created_at DESC, mr.id DESC
+       LIMIT $${idx} OFFSET $${idx + 1}`,
+      [...params, limit, offset]
     );
+
+    const countRes = await db.query(
+      `SELECT COUNT(*)::int AS total
+       FROM mining_results mr
+       JOIN mining_jobs mj ON mj.id = mr.job_id
+       WHERE ${whereSql}`,
+      params
+    );
+
+    const total = countRes.rows[0]?.total || 0;
 
     return res.json({
       results: resultsRes.rows.map(mapResultRow),
-      total: resultsRes.rowCount
+      pagination: {
+        page,
+        limit,
+        total,
+        total_pages: Math.ceil(total / limit)
+      }
     });
   } catch (err) {
     console.error("GET /mining/jobs/:id/results error:", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: "Failed to fetch results" });
   }
 });
 
 /**
  * PATCH /api/mining/results/:id
  */
-router.patch('/api/mining/results/:id', authRequired, async (req, res) => {
+router.patch('/api/mining/results/:id', authRequired, validateResultId, async (req, res) => {
   try {
     const resultId = req.params.id;
     const organizerId = req.auth.organizer_id;
@@ -258,15 +372,16 @@ router.patch('/api/mining/results/:id', authRequired, async (req, res) => {
       'company_name',
       'contact_name',
       'job_title',
+      'emails',
+      'website',
       'phone',
       'country',
       'city',
-      'website',
-      'emails',
-      'status',
-      'verification_status',
+      'address',
+      'source_url',
       'confidence_score',
-      'raw'
+      'verification_status',
+      'status'
     ];
 
     const sets = [];
@@ -275,8 +390,17 @@ router.patch('/api/mining/results/:id', authRequired, async (req, res) => {
 
     allowedFields.forEach((field) => {
       if (Object.prototype.hasOwnProperty.call(req.body, field)) {
+        let value = req.body[field];
+        if (field === 'emails') {
+          const emails = Array.isArray(value) ? value.filter((e) => typeof e === 'string') : [];
+          value = emails;
+        }
+        if (field === 'confidence_score') {
+          const numVal = Number(value);
+          value = Number.isFinite(numVal) ? numVal : null;
+        }
         sets.push(`${field} = $${idx}`);
-        values.push(req.body[field]);
+        values.push(value);
         idx++;
       }
     });
@@ -285,27 +409,36 @@ router.patch('/api/mining/results/:id', authRequired, async (req, res) => {
       return res.status(400).json({ error: "No valid fields to update" });
     }
 
+    sets.push(`updated_at = NOW()`);
+
     values.push(resultId, organizerId);
 
     const updateRes = await db.query(
-      `UPDATE mining_results
+      `UPDATE mining_results mr
        SET ${sets.join(', ')}
-       WHERE id = $${idx} AND organizer_id = $${idx + 1}
-       RETURNING *`,
+       FROM mining_jobs mj
+       WHERE mr.job_id = mj.id
+         AND mr.id = $${idx}
+         AND mj.organizer_id = $${idx + 1}
+       RETURNING mr.*`,
       values
     );
+
+    if (updateRes.rowCount === 0) {
+      return res.status(404).json({ error: "Result not found" });
+    }
 
     return res.json({ result: mapResultRow(updateRes.rows[0]) });
   } catch (err) {
     console.error("PATCH /mining/results/:id error:", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: "Failed to update result" });
   }
 });
 
 /**
  * DELETE /api/mining/results/:id
  */
-router.delete('/api/mining/results/:id', authRequired, async (req, res) => {
+router.delete('/api/mining/results/:id', authRequired, validateResultId, async (req, res) => {
   try {
     const resultId = req.params.id;
     const organizerId = req.auth.organizer_id;
@@ -323,14 +456,18 @@ router.delete('/api/mining/results/:id', authRequired, async (req, res) => {
     }
 
     await db.query(
-      `DELETE FROM mining_results WHERE id = $1 AND organizer_id = $2`,
+      `DELETE FROM mining_results mr
+       USING mining_jobs mj
+       WHERE mr.job_id = mj.id
+         AND mr.id = $1
+         AND mj.organizer_id = $2`,
       [resultId, organizerId]
     );
 
-    return res.json({ deleted: true });
+    return res.json({ message: "Result deleted successfully" });
   } catch (err) {
     console.error("DELETE /mining/results/:id error:", err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: "Failed to delete result" });
   }
 });
 
