@@ -54,6 +54,95 @@ function authRequired(req, res, next) {
 }
 
 /**
+<<<<<<< HEAD
+=======
+ * UUID validation helper
+ */
+function isValidUuid(id) {
+  if (!id || typeof id !== 'string') return false;
+  // Standard UUID v4 format: 8-4-4-4-12 hex characters
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  return uuidRegex.test(id);
+}
+
+/**
+ * Middleware to validate job ID parameter
+ */
+function validateJobId(req, res, next) {
+  const jobId = req.params.id;
+  
+  // Check for common invalid values
+  if (!jobId || jobId === 'undefined' || jobId === 'null' || !isValidUuid(jobId)) {
+    return res.status(400).json({ 
+      error: "Invalid job ID format",
+      details: `Job ID must be a valid UUID, received: ${jobId}`
+    });
+  }
+  
+  next();
+}
+
+/**
+ * Helper: Start a mining job asynchronously (fire-and-forget)
+ * This queues the job for processing without blocking the API response
+ */
+function queueJobForProcessing(job_id, organizer_id, job_type) {
+  // Şu an sadece URL mining otomatik başlatılıyor
+  if (job_type !== 'url') {
+    console.log(
+      `[MiningJobs] Auto-start skipped for job ${job_id}: unsupported type '${job_type}'`
+    );
+    return;
+  }
+
+  console.log(`[MiningJobs] Queueing job ${job_id} for processing...`);
+
+  // Fire-and-forget: API cevabını bekletmeden arka planda çalıştır
+  setImmediate(async () => {
+    try {
+      // Job hâlâ pending ise running'e çek
+      await db.query(
+        `UPDATE mining_jobs
+         SET status = 'running',
+             started_at = COALESCE(started_at, NOW()),
+             updated_at = NOW()
+         WHERE id = $1 AND organizer_id = $2
+           AND status IN ('pending', 'failed')`,
+        [job_id, organizer_id]
+      );
+
+      const result = await runUrlMiningJob(job_id, organizer_id);
+      console.log(
+        `[MiningJobs] Job ${job_id} finished with status: ${result?.status || 'unknown'}`
+      );
+    } catch (err) {
+      console.error(
+        `[MiningJobs] Error while processing job ${job_id}:`,
+        err?.message || err
+      );
+
+      // En azından job'ı failed olarak işaretlemeye çalış
+      try {
+        await db.query(
+          `UPDATE mining_jobs
+           SET status = 'failed',
+               error = $1,
+               updated_at = NOW()
+           WHERE id = $2 AND organizer_id = $3`,
+          [err?.message || 'Job processing failed', job_id, organizer_id]
+        );
+      } catch (updateErr) {
+        console.error(
+          `[MiningJobs] Additionally failed to mark job ${job_id} as failed:`,
+          updateErr?.message || updateErr
+        );
+      }
+    }
+  });
+}
+
+/**
+>>>>>>> 95dabf7 (Auto-start mining jobs and add logs fetching)
  * POST /api/mining/jobs
  * Create a new mining job
  */
@@ -93,9 +182,15 @@ router.post('/api/mining/jobs', authRequired, async (req, res) => {
       ]
     );
 
+    const job = result.rows[0];
+
+    // Auto-start: job'ı hemen kuyruğa al
+    queueJobForProcessing(job.id, organizer_id, type);
+
     return res.json({ 
       success: true, 
-      job: result.rows[0] 
+      job,
+      message: "Job created and queued for processing"
     });
 
   } catch (err) {
@@ -270,7 +365,7 @@ router.patch('/api/mining/jobs/:id', authRequired, validateJobId, async (req, re
     let hasUpdates = false;
 
     for (const field of allowedFields) {
-      if (req.body.hasOwnProperty(field)) {
+      if (Object.prototype.hasOwnProperty.call(req.body, field)) {
         updates[field] = req.body[field];
         hasUpdates = true;
       }
@@ -396,15 +491,20 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
       ]
     );
 
+    const newJob = newJobRes.rows[0];
+
     // Update original job with retry reference
     await db.query(
       `UPDATE mining_jobs SET retry_job_id = $1 WHERE id = $2`,
-      [newJobRes.rows[0].id, job_id]
+      [newJob.id, job_id]
     );
 
+    // Auto-start retry job
+    queueJobForProcessing(newJob.id, organizer_id, originalJob.type);
+
     return res.json({ 
-      new_job_id: newJobRes.rows[0].id, 
-      job: newJobRes.rows[0] 
+      new_job_id: newJob.id, 
+      job: newJob 
     });
     
   } catch (err) {
@@ -511,6 +611,7 @@ router.post('/api/mining/jobs/:id/cancel', authRequired, validateJobId, async (r
 
 /**
  * GET /api/mining/jobs/:id/logs
+ * Fetch logs from mining_job_logs table
  */
 router.get('/api/mining/jobs/:id/logs', authRequired, validateJobId, async (req, res) => {
   try {
@@ -518,6 +619,7 @@ router.get('/api/mining/jobs/:id/logs', authRequired, validateJobId, async (req,
     const job_id = req.params.id;
     const { page, limit, offset } = parsePagination(req.query, 200, MAX_LOG_LIMIT);
 
+    // Önce job gerçekten var mı ve bu organizera mı ait kontrol et
     const jobRes = await db.query(
       `SELECT id FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [job_id, organizer_id]
@@ -530,6 +632,7 @@ router.get('/api/mining/jobs/:id/logs', authRequired, validateJobId, async (req,
       });
     }
 
+<<<<<<< HEAD
     const logsRes = await db.query(
       `SELECT 
          id,
@@ -563,6 +666,34 @@ router.get('/api/mining/jobs/:id/logs', authRequired, validateJobId, async (req,
         limit,
         total
       }
+=======
+    let logsRes;
+    try {
+      logsRes = await db.query(
+        `SELECT id, job_id, level, message, meta, created_at
+         FROM mining_job_logs
+         WHERE job_id = $1
+         ORDER BY created_at ASC`,
+        [job_id]
+      );
+    } catch (err) {
+      // Tablo yoksa (örneğin migration henüz uygulanmadıysa) boş log dön
+      if (err.code === '42P01') { // undefined_table
+        console.warn('[MiningJobs] mining_job_logs table does not exist yet');
+        return res.json({
+          logs: [],
+          job_id,
+          count: 0
+        });
+      }
+      throw err;
+    }
+
+    return res.json({ 
+      logs: logsRes.rows,
+      job_id,
+      count: logsRes.rows.length
+>>>>>>> 95dabf7 (Auto-start mining jobs and add logs fetching)
     });
   } catch (err) {
     console.error("GET /mining/jobs/:id/logs error:", err);
