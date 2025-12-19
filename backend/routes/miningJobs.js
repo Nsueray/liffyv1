@@ -64,16 +64,10 @@ function validateJobId(req, res, next) {
 
 /**
  * Helper: Start a mining job asynchronously (fire-and-forget)
- *
- * ÖNEMLİ:
- *  - Sadece type === 'url' VE strategy === 'http' ise urlMiner çalıştırılır.
- *  - Diğer tüm stratejiler (auto / playwright / vb.) için hiçbir şey yapılmaz,
- *    bu işler eskisi gibi external miningWorker.js tarafından işlenir.
+ * Sadece mevcut kolonları kullanır (updated_at yok!)
  */
-function queueJobForProcessing(jobId, organizerId, jobType, jobStrategy) {
-  const normalizedStrategy = (jobStrategy || 'auto').toLowerCase();
-
-  // Şu an sadece URL mining destekliyoruz
+function queueJobForProcessing(jobId, organizerId, jobType) {
+  // Şu anda sadece URL mining destekleniyor
   if (jobType !== 'url') {
     console.log(
       `[MiningJobs] Auto-start skipped for job ${jobId}: unsupported type '${jobType}'`
@@ -81,18 +75,7 @@ function queueJobForProcessing(jobId, organizerId, jobType, jobStrategy) {
     return;
   }
 
-  // Sadece strategy === http olduğunda basit HTTP miner'ı çalıştır
-  if (normalizedStrategy !== 'http') {
-    console.log(
-      `[MiningJobs] Auto-start skipped for job ${jobId}: strategy='${jobStrategy || 'auto'}'` +
-        ` (only 'http' is handled by urlMiner; other strategies are for miningWorker.js)`
-    );
-    return;
-  }
-
-  console.log(
-    `[MiningJobs] Queueing job ${jobId} for processing with urlMiner (strategy=http)...`
-  );
+  console.log(`[MiningJobs] Queueing job ${jobId} for processing...`);
 
   // Fire-and-forget
   setImmediate(async () => {
@@ -107,11 +90,11 @@ function queueJobForProcessing(jobId, organizerId, jobType, jobStrategy) {
         [jobId, organizerId]
       );
 
-      // Basit URL miner; kendi içinde status/completed vs update ediyor
+      // Asıl miner işi; kendi içinde status/completed vs update ediyor
       await runUrlMiningJob(jobId, organizerId);
 
       console.log(
-        `[MiningJobs] Job ${jobId} finished by urlMiner (check mining_jobs row for final status)`
+        `[MiningJobs] Job ${jobId} finished (check mining_jobs.row for final status)`
       );
     } catch (err) {
       console.error(
@@ -119,7 +102,7 @@ function queueJobForProcessing(jobId, organizerId, jobType, jobStrategy) {
         err && err.message ? err.message : err
       );
 
-      // Best effort: job'u failed olarak işaretle
+      // Best effort: job'u failed olarak işaretle (updated_at yok!)
       try {
         await db.query(
           `UPDATE mining_jobs
@@ -162,8 +145,6 @@ router.post('/api/mining/jobs', authRequired, async (req, res) => {
       });
     }
 
-    const finalStrategy = strategy || 'auto';
-
     const result = await db.query(
       `INSERT INTO mining_jobs
        (organizer_id, type, input, name, strategy, site_profile, config, status)
@@ -174,7 +155,7 @@ router.post('/api/mining/jobs', authRequired, async (req, res) => {
         type,
         input,
         name || `Mining Job ${new Date().toISOString()}`,
-        finalStrategy,
+        strategy || 'auto',
         site_profile || null,
         config || {},
       ]
@@ -182,8 +163,8 @@ router.post('/api/mining/jobs', authRequired, async (req, res) => {
 
     const job = result.rows[0];
 
-    // 🔥 Auto-start: sadece strategy=http ise job'ı arka planda başlat
-    queueJobForProcessing(job.id, organizer_id, type, finalStrategy);
+    // 🔥 Auto-start: job'ı arka planda başlat
+    queueJobForProcessing(job.id, organizer_id, job.type);
 
     return res.json({
       success: true,
@@ -476,7 +457,7 @@ router.post(
           originalJob.type,
           originalJob.input,
           `${originalJob.name} (Retry)`,
-          originalJob.strategy || 'auto',
+          originalJob.strategy,
           originalJob.site_profile,
           originalJob.config,
           job_id,
@@ -490,13 +471,8 @@ router.post(
         [newJob.id, job_id]
       );
 
-      // 🔥 Auto-start retry job (sadece strategy=http ise)
-      queueJobForProcessing(
-        newJob.id,
-        organizer_id,
-        newJob.type,
-        newJob.strategy || 'auto'
-      );
+      // 🔥 Auto-start retry job
+      queueJobForProcessing(newJob.id, organizer_id, originalJob.type);
 
       return res.json({
         new_job_id: newJob.id,
@@ -635,7 +611,6 @@ router.post(
 /**
  * GET /api/mining/jobs/:id/logs
  * Mevcut mining_job_logs tablosunu okur.
- * DB'de ekstra kolonlar varsa otomatik gelir; meta zorunlu değil.
  */
 router.get(
   '/api/mining/jobs/:id/logs',
@@ -676,10 +651,9 @@ router.get(
           timestamp: row.created_at,
           level: row.level || 'info',
           message: row.message || '',
-          meta: row.meta || null, // meta kolonu yoksa undefined olur, sorun değil
+          meta: row.meta || null,
         }));
       } catch (logErr) {
-        // Tablo yoksa vs. hata verirse, UI'ya boş liste dönelim (eski davranış)
         console.error('GET /mining/jobs/:id/logs db error:', logErr.message);
         logs = [];
       }
@@ -701,9 +675,6 @@ router.get(
 /**
  * POST /api/mining/jobs/:id/run
  * Manual start/trigger
- *
- * Burada da sadece strategy=http ise urlMiner çalışır.
- * Diğer stratejiler için 400 döner ve miningWorker.js kullanman gerektiğini söyler.
  */
 router.post(
   '/api/mining/jobs/:id/run',
@@ -727,7 +698,6 @@ router.post(
       }
 
       const job = jobRes.rows[0];
-      const strategy = (job.strategy || 'auto').toLowerCase();
 
       if (job.status === 'running') {
         return res.status(400).json({
@@ -743,17 +713,6 @@ router.post(
         });
       }
 
-      // Eğer strategy http değilse, bu iş Playwright/miningWorker içindir
-      if (job.type === 'url' && strategy !== 'http') {
-        return res.status(400).json({
-          error: 'Job is configured for miningWorker (Playwright)',
-          details:
-            "This job does not use the simple HTTP miner. Run it via miningWorker.js " +
-            "or create a new job with strategy='http' to use the built-in urlMiner.",
-        });
-      }
-
-      // burada da updated_at kullanmıyoruz
       await db.query(
         `UPDATE mining_jobs 
          SET status = 'running', started_at = NOW()
@@ -762,7 +721,7 @@ router.post(
       );
 
       let result;
-      if (job.type === 'url' && strategy === 'http') {
+      if (job.type === 'url') {
         try {
           result = await runUrlMiningJob(job_id, organizer_id);
         } catch (runErr) {
