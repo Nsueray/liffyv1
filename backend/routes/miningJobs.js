@@ -2,29 +2,41 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
-const { validateJobId } = require('../utils/validation');
 const { runUrlMiningJob } = require('../services/urlMiner');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
-const MAX_LOG_LIMIT = 1000;
 
-function parsePagination(query, defaultLimit, maxLimit) {
+/**
+ * Pagination helper
+ */
+function parsePagination(query, defaultLimit = 20, maxLimit = 100) {
   const page = Math.max(parseInt(query.page, 10) || 1, 1);
-  const limit = Math.min(Math.max(parseInt(query.limit, 10) || defaultLimit, 1), maxLimit);
+  const rawLimit = parseInt(query.limit, 10);
+  const limit = Math.min(Math.max(rawLimit || defaultLimit, 1), maxLimit);
   const offset = (page - 1) * limit;
   return { page, limit, offset };
 }
 
+/**
+ * Log row mapper
+ */
 function mapLogRow(row) {
-  const timestamp = row.log_ts || row.timestamp || row.created_at || null;
+  const ts = row.created_at || row.log_ts || row.timestamp || null;
+  const timestamp = ts
+    ? (ts instanceof Date ? ts.toISOString() : new Date(ts).toISOString())
+    : null;
+
+  const meta = row.meta || row.details || null;
 
   return {
     id: row.id,
     job_id: row.job_id,
-    timestamp: timestamp ? new Date(timestamp).toISOString() : null,
+    timestamp,
     level: row.level || 'info',
     message: row.message || '',
-    details: row.details || null
+    meta,
+    // front-end "details" bekliyorsa diye aynı veriyi burada da tutuyoruz
+    details: meta
   };
 }
 
@@ -46,7 +58,10 @@ function authRequired(req, res, next) {
       organizer_id: payload.organizer_id,
       role: payload.role
     };
+
+    // Bazı kodlar req.user bekliyor olabilir, uyumluluk için:
     req.user = req.auth;
+
     next();
   } catch (err) {
     return res.status(401).json({ error: "Invalid or expired token" });
@@ -54,8 +69,6 @@ function authRequired(req, res, next) {
 }
 
 /**
-<<<<<<< HEAD
-=======
  * UUID validation helper
  */
 function isValidUuid(id) {
@@ -70,21 +83,21 @@ function isValidUuid(id) {
  */
 function validateJobId(req, res, next) {
   const jobId = req.params.id;
-  
+
   // Check for common invalid values
   if (!jobId || jobId === 'undefined' || jobId === 'null' || !isValidUuid(jobId)) {
-    return res.status(400).json({ 
+    return res.status(400).json({
       error: "Invalid job ID format",
       details: `Job ID must be a valid UUID, received: ${jobId}`
     });
   }
-  
+
   next();
 }
 
 /**
  * Helper: Start a mining job asynchronously (fire-and-forget)
- * This queues the job for processing without blocking the API response
+ * Bu, API cevabını bekletmeden job'ı arka planda çalıştırır
  */
 function queueJobForProcessing(job_id, organizer_id, job_type) {
   // Şu an sadece URL mining otomatik başlatılıyor
@@ -100,28 +113,48 @@ function queueJobForProcessing(job_id, organizer_id, job_type) {
   // Fire-and-forget: API cevabını bekletmeden arka planda çalıştır
   setImmediate(async () => {
     try {
-      // Job hâlâ pending ise running'e çek
+      // Job hâlâ var mı ve durumu uygun mu?
+      const jobRes = await db.query(
+        `SELECT * FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+        [job_id, organizer_id]
+      );
+
+      if (jobRes.rows.length === 0) {
+        console.warn(`[MiningJobs] Job ${job_id} not found when auto-starting, skipping`);
+        return;
+      }
+
+      const job = jobRes.rows[0];
+
+      if (job.status === 'running') {
+        console.log(`[MiningJobs] Job ${job_id} already running, skipping auto-start`);
+        return;
+      }
+
+      if (['completed', 'cancelled'].includes(job.status)) {
+        console.log(
+          `[MiningJobs] Job ${job_id} has status '${job.status}', skipping auto-start`
+        );
+        return;
+      }
+
+      // Durumu running'e çek
       await db.query(
         `UPDATE mining_jobs
          SET status = 'running',
              started_at = COALESCE(started_at, NOW()),
              updated_at = NOW()
-         WHERE id = $1 AND organizer_id = $2
-           AND status IN ('pending', 'failed')`,
+         WHERE id = $1 AND organizer_id = $2`,
         [job_id, organizer_id]
       );
 
-      const result = await runUrlMiningJob(job_id, organizer_id);
-      console.log(
-        `[MiningJobs] Job ${job_id} finished with status: ${result?.status || 'unknown'}`
-      );
-    } catch (err) {
-      console.error(
-        `[MiningJobs] Error while processing job ${job_id}:`,
-        err?.message || err
-      );
+      // Asıl mining işlemini çalıştır
+      await runUrlMiningJob(job_id, organizer_id);
 
-      // En azından job'ı failed olarak işaretlemeye çalış
+    } catch (err) {
+      console.error(`[MiningJobs] Auto-start error for job ${job_id}:`, err);
+
+      // Hata durumda job'ı failed yapmaya çalış
       try {
         await db.query(
           `UPDATE mining_jobs
@@ -129,12 +162,12 @@ function queueJobForProcessing(job_id, organizer_id, job_type) {
                error = $1,
                updated_at = NOW()
            WHERE id = $2 AND organizer_id = $3`,
-          [err?.message || 'Job processing failed', job_id, organizer_id]
+          [err.message || 'Auto-start error', job_id, organizer_id]
         );
-      } catch (updateErr) {
+      } catch (dbErr) {
         console.error(
-          `[MiningJobs] Additionally failed to mark job ${job_id} as failed:`,
-          updateErr?.message || updateErr
+          `[MiningJobs] Failed to update job ${job_id} status after auto-start error:`,
+          dbErr
         );
       }
     }
@@ -142,7 +175,6 @@ function queueJobForProcessing(job_id, organizer_id, job_type) {
 }
 
 /**
->>>>>>> 95dabf7 (Auto-start mining jobs and add logs fetching)
  * POST /api/mining/jobs
  * Create a new mining job
  */
@@ -152,7 +184,7 @@ router.post('/api/mining/jobs', authRequired, async (req, res) => {
     const { type, input, name, strategy, site_profile, config } = req.body;
 
     if (!type || !input) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "Missing required fields",
         details: "Both 'type' and 'input' are required"
       });
@@ -160,7 +192,7 @@ router.post('/api/mining/jobs', authRequired, async (req, res) => {
 
     const allowedTypes = ['url', 'pdf', 'excel', 'word', 'file', 'other'];
     if (!allowedTypes.includes(type)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "Invalid type",
         details: `Type must be one of: ${allowedTypes.join(', ')}`
       });
@@ -172,9 +204,9 @@ router.post('/api/mining/jobs', authRequired, async (req, res) => {
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
        RETURNING *`,
       [
-        organizer_id, 
-        type, 
-        input, 
+        organizer_id,
+        type,
+        input,
         name || `Mining Job ${new Date().toISOString()}`,
         strategy || 'auto',
         site_profile || null,
@@ -184,18 +216,18 @@ router.post('/api/mining/jobs', authRequired, async (req, res) => {
 
     const job = result.rows[0];
 
-    // Auto-start: job'ı hemen kuyruğa al
+    // 🔥 Yeni job'ı otomatik başlat
     queueJobForProcessing(job.id, organizer_id, type);
 
-    return res.json({ 
-      success: true, 
+    return res.json({
+      success: true,
       job,
       message: "Job created and queued for processing"
     });
 
   } catch (err) {
     console.error("POST /mining/jobs error:", err);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: "Failed to create mining job",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
@@ -209,9 +241,7 @@ router.post('/api/mining/jobs', authRequired, async (req, res) => {
 router.get('/api/mining/jobs', authRequired, async (req, res) => {
   try {
     const organizer_id = req.auth.organizer_id;
-    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
-    const offset = (page - 1) * limit;
+    const { page, limit, offset } = parsePagination(req.query, 20, 100);
     const { search, status } = req.query;
 
     const where = ['organizer_id = $1'];
@@ -226,8 +256,8 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
 
     if (search) {
       where.push(`(
-        name ILIKE $${idx} OR 
-        input ILIKE $${idx} OR 
+        name ILIKE $${idx} OR
+        input ILIKE $${idx} OR
         CAST(id AS TEXT) ILIKE $${idx}
       )`);
       params.push(`%${search}%`);
@@ -279,7 +309,7 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
 
   } catch (err) {
     console.error("GET /mining/jobs error:", err);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: "Failed to fetch mining jobs",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
@@ -303,28 +333,28 @@ router.get('/api/mining/jobs/:id', authRequired, validateJobId, async (req, res)
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         error: "Job not found",
         details: `No job found with ID: ${job_id}`
       });
     }
 
-    return res.json({ 
-      job: result.rows[0] 
+    return res.json({
+      job: result.rows[0]
     });
 
   } catch (err) {
     console.error("GET /mining/jobs/:id error:", err);
-    
+
     // Handle PostgreSQL invalid UUID error specifically
     if (err.message && err.message.includes('invalid input syntax for type uuid')) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "Invalid job ID format",
         details: "Job ID must be a valid UUID"
       });
     }
-    
-    return res.status(500).json({ 
+
+    return res.status(500).json({
       error: "Failed to fetch job",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
@@ -372,7 +402,7 @@ router.patch('/api/mining/jobs/:id', authRequired, validateJobId, async (req, re
     }
 
     if (!hasUpdates) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "No valid fields to update",
         details: `Allowed fields: ${allowedFields.join(', ')}`
       });
@@ -382,7 +412,7 @@ router.patch('/api/mining/jobs/:id', authRequired, validateJobId, async (req, re
     const setClause = Object.keys(updates)
       .map((field, idx) => `${field} = $${idx + 3}`)
       .join(', ');
-    
+
     const values = [job_id, organizer_id, ...Object.values(updates)];
 
     const result = await db.query(
@@ -394,19 +424,19 @@ router.patch('/api/mining/jobs/:id', authRequired, validateJobId, async (req, re
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         error: "Job not found",
         details: `No job found with ID: ${job_id}`
       });
     }
 
-    return res.json({ 
-      job: result.rows[0] 
+    return res.json({
+      job: result.rows[0]
     });
-    
+
   } catch (err) {
     console.error("PATCH /mining/jobs/:id error:", err);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: "Failed to update job",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
@@ -431,20 +461,20 @@ router.delete('/api/mining/jobs/:id', authRequired, validateJobId, async (req, r
     );
 
     if (result.rows.length === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         error: "Job not found",
         details: `No job found with ID: ${job_id}`
       });
     }
 
-    return res.json({ 
-      job: result.rows[0], 
-      deleted: true 
+    return res.json({
+      job: result.rows[0],
+      deleted: true
     });
-    
+
   } catch (err) {
     console.error("DELETE /mining/jobs/:id error:", err);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: "Failed to delete job",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
@@ -466,7 +496,7 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
     );
 
     if (jobRes.rows.length === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         error: "Job not found",
         details: `No job found with ID: ${job_id}`
       });
@@ -475,13 +505,13 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
     const originalJob = jobRes.rows[0];
 
     const newJobRes = await db.query(
-      `INSERT INTO mining_jobs 
+      `INSERT INTO mining_jobs
        (organizer_id, type, input, name, strategy, site_profile, config, status, parent_job_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
        RETURNING *`,
       [
-        organizer_id, 
-        originalJob.type, 
+        organizer_id,
+        originalJob.type,
         originalJob.input,
         `${originalJob.name} (Retry)`,
         originalJob.strategy,
@@ -499,17 +529,18 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
       [newJob.id, job_id]
     );
 
-    // Auto-start retry job
+    // 🔥 Retry job'ı da otomatik başlat
     queueJobForProcessing(newJob.id, organizer_id, originalJob.type);
 
-    return res.json({ 
-      new_job_id: newJob.id, 
-      job: newJob 
+    return res.json({
+      new_job_id: newJob.id,
+      job: newJob,
+      message: "Retry job created and queued for processing"
     });
-    
+
   } catch (err) {
     console.error("POST /mining/jobs/:id/retry error:", err);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: "Failed to retry job",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
@@ -521,7 +552,7 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
  */
 async function updateJobStatus(job_id, organizer_id, status) {
   const validStatuses = ['pending', 'running', 'paused', 'completed', 'failed', 'cancelled'];
-  
+
   if (!validStatuses.includes(status)) {
     throw new Error(`Invalid status: ${status}`);
   }
@@ -552,13 +583,13 @@ router.post('/api/mining/jobs/:id/pause', authRequired, validateJobId, async (re
     return res.json({ job });
   } catch (err) {
     if (err.code === 'NOT_FOUND') {
-      return res.status(404).json({ 
+      return res.status(404).json({
         error: "Job not found",
         details: `No job found with ID: ${req.params.id}`
       });
     }
     console.error("POST /mining/jobs/:id/pause error:", err);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: "Failed to pause job",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
@@ -574,13 +605,13 @@ router.post('/api/mining/jobs/:id/resume', authRequired, validateJobId, async (r
     return res.json({ job });
   } catch (err) {
     if (err.code === 'NOT_FOUND') {
-      return res.status(404).json({ 
+      return res.status(404).json({
         error: "Job not found",
         details: `No job found with ID: ${req.params.id}`
       });
     }
     console.error("POST /mining/jobs/:id/resume error:", err);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: "Failed to resume job",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
@@ -596,13 +627,13 @@ router.post('/api/mining/jobs/:id/cancel', authRequired, validateJobId, async (r
     return res.json({ job });
   } catch (err) {
     if (err.code === 'NOT_FOUND') {
-      return res.status(404).json({ 
+      return res.status(404).json({
         error: "Job not found",
         details: `No job found with ID: ${req.params.id}`
       });
     }
     console.error("POST /mining/jobs/:id/cancel error:", err);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: "Failed to cancel job",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
@@ -617,87 +648,44 @@ router.get('/api/mining/jobs/:id/logs', authRequired, validateJobId, async (req,
   try {
     const organizer_id = req.auth.organizer_id;
     const job_id = req.params.id;
-    const { page, limit, offset } = parsePagination(req.query, 200, MAX_LOG_LIMIT);
 
-    // Önce job gerçekten var mı ve bu organizera mı ait kontrol et
+    // Önce job gerçekten bu organizere ait mi kontrol et
     const jobRes = await db.query(
-      `SELECT id FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      `SELECT id, status
+       FROM mining_jobs
+       WHERE id = $1 AND organizer_id = $2`,
       [job_id, organizer_id]
     );
 
     if (jobRes.rows.length === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         error: "Job not found",
         details: `No job found with ID: ${job_id}`
       });
     }
 
-<<<<<<< HEAD
+    const job = jobRes.rows[0];
+
     const logsRes = await db.query(
-      `SELECT 
-         id,
-         job_id,
-         COALESCE(timestamp, created_at, NOW()) AS log_ts,
-         level,
-         message,
-         details,
-         created_at
+      `SELECT id, job_id, level, message, meta, created_at
        FROM mining_job_logs
        WHERE job_id = $1
-       ORDER BY log_ts ASC, created_at ASC
-       LIMIT $2 OFFSET $3`,
-      [job_id, limit, offset]
-    );
-
-    const countRes = await db.query(
-      `SELECT COUNT(*)::int AS total
-       FROM mining_job_logs
-       WHERE job_id = $1`,
+       ORDER BY created_at ASC`,
       [job_id]
     );
 
     const logs = logsRes.rows.map(mapLogRow);
-    const total = countRes.rows[0]?.total || 0;
 
-    return res.json({ 
+    return res.json({
       logs,
-      pagination: {
-        page,
-        limit,
-        total
-      }
-=======
-    let logsRes;
-    try {
-      logsRes = await db.query(
-        `SELECT id, job_id, level, message, meta, created_at
-         FROM mining_job_logs
-         WHERE job_id = $1
-         ORDER BY created_at ASC`,
-        [job_id]
-      );
-    } catch (err) {
-      // Tablo yoksa (örneğin migration henüz uygulanmadıysa) boş log dön
-      if (err.code === '42P01') { // undefined_table
-        console.warn('[MiningJobs] mining_job_logs table does not exist yet');
-        return res.json({
-          logs: [],
-          job_id,
-          count: 0
-        });
-      }
-      throw err;
-    }
-
-    return res.json({ 
-      logs: logsRes.rows,
       job_id,
-      count: logsRes.rows.length
->>>>>>> 95dabf7 (Auto-start mining jobs and add logs fetching)
+      job_status: job.status,
+      count: logs.length
     });
+
   } catch (err) {
     console.error("GET /mining/jobs/:id/logs error:", err);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: "Failed to fetch logs",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
@@ -706,7 +694,7 @@ router.get('/api/mining/jobs/:id/logs', authRequired, validateJobId, async (req,
 
 /**
  * POST /api/mining/jobs/:id/run
- * Start/trigger the mining job execution
+ * Start/trigger the mining job execution (manual trigger)
  */
 router.post('/api/mining/jobs/:id/run', authRequired, validateJobId, async (req, res) => {
   try {
@@ -720,7 +708,7 @@ router.post('/api/mining/jobs/:id/run', authRequired, validateJobId, async (req,
     );
 
     if (jobRes.rows.length === 0) {
-      return res.status(404).json({ 
+      return res.status(404).json({
         error: "Job not found",
         details: `No job found with ID: ${job_id}`
       });
@@ -730,14 +718,14 @@ router.post('/api/mining/jobs/:id/run', authRequired, validateJobId, async (req,
 
     // Check job status
     if (job.status === 'running') {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "Job already running",
         details: "Cannot start a job that is already running"
       });
     }
 
     if (job.status === 'completed') {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "Job already completed",
         details: "Use retry to run this job again"
       });
@@ -745,7 +733,7 @@ router.post('/api/mining/jobs/:id/run', authRequired, validateJobId, async (req,
 
     // Update job status to running
     await db.query(
-      `UPDATE mining_jobs 
+      `UPDATE mining_jobs
        SET status = 'running', started_at = NOW(), updated_at = NOW()
        WHERE id = $1`,
       [job_id]
@@ -759,7 +747,7 @@ router.post('/api/mining/jobs/:id/run', authRequired, validateJobId, async (req,
       } catch (runErr) {
         // If job execution fails, update status to failed
         await db.query(
-          `UPDATE mining_jobs 
+          `UPDATE mining_jobs
            SET status = 'failed', error = $1, updated_at = NOW()
            WHERE id = $2`,
           [runErr.message, job_id]
@@ -767,7 +755,7 @@ router.post('/api/mining/jobs/:id/run', authRequired, validateJobId, async (req,
         throw runErr;
       }
     } else {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: "Not implemented",
         details: `Mining type '${job.type}' is not implemented yet`
       });
@@ -777,7 +765,7 @@ router.post('/api/mining/jobs/:id/run', authRequired, validateJobId, async (req,
 
   } catch (err) {
     console.error("POST /mining/jobs/:id/run error:", err);
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: "Failed to run job",
       details: process.env.NODE_ENV === 'development' ? err.message : undefined
     });
