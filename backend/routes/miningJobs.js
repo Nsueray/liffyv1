@@ -4,7 +4,7 @@ const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
 const { runUrlMiningJob } = require('../services/urlMiner');
-const { runPlaywrightMiningJob } = require('../services/playwrightMinerAdapter');
+const PlaywrightMinerAdapter = require('../services/playwrightMinerAdapter');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
 
@@ -102,7 +102,8 @@ function queueJobForProcessing(jobId, organizerId, jobType, strategy) {
 
       // Asıl miner işi; kendi içinde status/completed vs update ediyor
       if (shouldUsePlaywright(jobType, strategy)) {
-        await runPlaywrightMiningJob(jobId);
+        const adapter = new PlaywrightMinerAdapter(db);
+        await adapter.startJob(jobId);
       } else {
         await runUrlMiningJob(jobId, organizerId);
       }
@@ -743,7 +744,8 @@ router.post(
       if (job.type === 'url') {
         try {
           if (shouldUsePlaywright(job.type, job.strategy)) {
-            await runPlaywrightMiningJob(job_id);
+            const adapter = new PlaywrightMinerAdapter(db);
+            await adapter.startJob(job_id);
             result = { success: true };
           } else {
             result = await runUrlMiningJob(job_id, organizer_id);
