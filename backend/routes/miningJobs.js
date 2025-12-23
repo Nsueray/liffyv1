@@ -4,7 +4,7 @@ const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
 const { runUrlMiningJob } = require('../services/urlMiner');
-const PlaywrightMinerAdapter = require('../services/playwrightMinerAdapter');
+const { PlaywrightMinerAdapter } = require('../services/playwrightMinerAdapter');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
 
