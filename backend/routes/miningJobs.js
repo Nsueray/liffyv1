@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
 const { runUrlMiningJob } = require('../services/urlMiner');
+const { runPlaywrightMiningJob } = require('../services/playwrightMinerAdapter');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
 
@@ -66,7 +67,16 @@ function validateJobId(req, res, next) {
  * Helper: Start a mining job asynchronously (fire-and-forget)
  * Sadece mevcut kolonları kullanır (updated_at yok!)
  */
-function queueJobForProcessing(jobId, organizerId, jobType) {
+function shouldUsePlaywright(jobType, strategy) {
+  if (jobType !== 'url') {
+    return false;
+  }
+
+  const normalizedStrategy = (strategy || 'auto').toLowerCase();
+  return normalizedStrategy === 'auto' || normalizedStrategy === 'playwright';
+}
+
+function queueJobForProcessing(jobId, organizerId, jobType, strategy) {
   // Şu anda sadece URL mining destekleniyor
   if (jobType !== 'url') {
     console.log(
@@ -91,7 +101,11 @@ function queueJobForProcessing(jobId, organizerId, jobType) {
       );
 
       // Asıl miner işi; kendi içinde status/completed vs update ediyor
-      await runUrlMiningJob(jobId, organizerId);
+      if (shouldUsePlaywright(jobType, strategy)) {
+        await runPlaywrightMiningJob(jobId);
+      } else {
+        await runUrlMiningJob(jobId, organizerId);
+      }
 
       console.log(
         `[MiningJobs] Job ${jobId} finished (check mining_jobs.row for final status)`
@@ -164,7 +178,7 @@ router.post('/api/mining/jobs', authRequired, async (req, res) => {
     const job = result.rows[0];
 
     // 🔥 Auto-start: job'ı arka planda başlat
-    queueJobForProcessing(job.id, organizer_id, job.type);
+    queueJobForProcessing(job.id, organizer_id, job.type, job.strategy);
 
     return res.json({
       success: true,
@@ -472,7 +486,12 @@ router.post(
       );
 
       // 🔥 Auto-start retry job
-      queueJobForProcessing(newJob.id, organizer_id, originalJob.type);
+      queueJobForProcessing(
+        newJob.id,
+        organizer_id,
+        originalJob.type,
+        originalJob.strategy
+      );
 
       return res.json({
         new_job_id: newJob.id,
@@ -723,7 +742,12 @@ router.post(
       let result;
       if (job.type === 'url') {
         try {
-          result = await runUrlMiningJob(job_id, organizer_id);
+          if (shouldUsePlaywright(job.type, job.strategy)) {
+            await runPlaywrightMiningJob(job_id);
+            result = { success: true };
+          } else {
+            result = await runUrlMiningJob(job_id, organizer_id);
+          }
         } catch (runErr) {
           await db.query(
             `UPDATE mining_jobs 
