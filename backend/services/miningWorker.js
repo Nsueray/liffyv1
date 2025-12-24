@@ -168,25 +168,39 @@ function guessWebsiteFromEmail(emails) {
 }
 
 /**
- * Extract exhibitor detail links from HTML
+ * Extract exhibitor detail links from HTML - enhanced for generic discovery
  */
 function extractExhibitorLinks(html, baseUrl, config = {}) {
   const links = [];
   const hrefRegex = /href="([^"]+)"/gi;
   let match;
-
-  // Use pattern from config or default
-  const pattern = config.detail_url_pattern || "/Exhibitor/ExbDetails/";
-
+  
+  // If config has detail_url_pattern, use ONLY that. Otherwise use generic patterns.
+  const patterns = config.detail_url_pattern ? 
+    [config.detail_url_pattern] : 
+    [
+      "/Exhibitor/", "/exhibitor/", "/company/", "/profile/",
+      "/details/", "/view/", "/show/", "ExbDetails", 
+      "exhibitor-detail", "company-profile", "/booth/", "/stand/"
+    ];
+  
   while ((match = hrefRegex.exec(html)) !== null) {
     let url = match[1];
-
-    // Skip if doesn't match pattern
-    if (!url.includes(pattern)) continue;
-
+    
     // Decode HTML entities
     url = url.replace(/&amp;/g, "&");
-
+    
+    // Check if URL matches any pattern
+    let matchesPattern = false;
+    for (const pattern of patterns) {
+      if (url.toLowerCase().includes(pattern.toLowerCase())) {
+        matchesPattern = true;
+        break;
+      }
+    }
+    
+    if (!matchesPattern) continue;
+    
     // Convert to absolute URL
     try {
       if (url.startsWith("http")) {
@@ -199,7 +213,7 @@ function extractExhibitorLinks(html, baseUrl, config = {}) {
       // Skip invalid URLs
     }
   }
-
+  
   return Array.from(new Set(links));
 }
 
@@ -399,67 +413,6 @@ async function extractExhibitorMeta(page, exUrl, exHtml, exEmails) {
 }
 
 /**
- * Wait for exhibitor links to appear in DOM
- */
-async function waitForExhibitorLinks(page, config = {}) {
-  // Generic selectors that work across different exhibition sites
-  const genericSelectors = [
-    'a[href*="/Exhibitor/"]',
-    'a[href*="/exhibitor/"]',
-    'a[href*="/profile/"]',
-    'a[href*="/company/"]',
-    'a[href*="/details/"]',
-    'a[href*="/view/"]',
-    'a[href*="/show/"]',
-    'a[href*="ExbDetails"]',
-    'a[href*="exhibitor-detail"]',
-    'a[href*="company-profile"]'
-  ];
-
-  // Also check for pattern from config if provided
-  if (config.detail_url_pattern) {
-    genericSelectors.unshift(`a[href*="${config.detail_url_pattern}"]`);
-  }
-
-  // Try each selector with a shorter timeout
-  for (const selector of genericSelectors) {
-    try {
-      await page.waitForSelector(selector, { 
-        timeout: 5000,
-        state: 'attached'
-      });
-      console.log(`  ✅ Found exhibitor links with selector: ${selector}`);
-      return true;
-    } catch (e) {
-      // Try next selector
-    }
-  }
-
-  // If no specific exhibitor links found, wait for any meaningful content
-  try {
-    await page.waitForFunction(
-      () => {
-        const links = document.querySelectorAll('a[href]');
-        const meaningfulLinks = Array.from(links).filter(a => {
-          const href = a.getAttribute('href') || '';
-          return href.length > 10 && 
-                 !href.startsWith('#') && 
-                 !href.includes('javascript:') &&
-                 (href.includes('/') || href.includes('http'));
-        });
-        return meaningfulLinks.length > 5;
-      },
-      { timeout: 10000 }
-    );
-    console.log(`  ⚠️ No specific exhibitor selectors matched, but found general links`);
-    return true;
-  } catch (e) {
-    console.log(`  ⚠️ Warning: Could not detect exhibitor links after waiting`);
-    return false;
-  }
-}
-
-/**
  * Smart pagination handler with multiple strategies
  */
 async function getAllExhibitorLinks(page, baseUrl, config = {}) {
@@ -468,46 +421,78 @@ async function getAllExhibitorLinks(page, baseUrl, config = {}) {
 
   const maxPages = config.max_pages || 20;
   const delayMs = config.list_page_delay_ms || 2000;
-  const detailPattern = config.detail_url_pattern || "/Exhibitor/ExbDetails/";
+  const detailPattern = config.detail_url_pattern || null;
 
   console.log("📄 Starting pagination crawler...");
-  console.log(`  Config: max_pages=${maxPages}, delay=${delayMs}ms, pattern="${detailPattern}"`);
+  console.log(`  Config: max_pages=${maxPages}, delay=${delayMs}ms`);
 
   // Load first page
-  await page.goto(baseUrl, { waitUntil: "networkidle" });
+  await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
   
-  // Wait for JS-rendered content on initial page
-  console.log("  ⏳ Waiting for exhibitor links to load...");
-  await waitForExhibitorLinks(page, config);
+  // Looped scroll to trigger lazy loading
+  console.log("  ⏳ Scrolling to trigger lazy loading...");
+  for (let i = 0; i < 10; i++) {
+    await page.mouse.wheel(0, 2000);
+    await page.waitForTimeout(800);
+  }
   
-  // Additional wait for dynamic content
-  await page.waitForTimeout(1000);
+  // Wait for content to settle BEFORE extracting
+  await page.waitForTimeout(2000);
 
   // Detect pagination info
   const paginationInfo = await page.evaluate(() => {
     const result = {
       totalExhibitors: null,
+      paginationType: null,
+      hasLoadMore: false,
       hasNextButton: false,
       hasPageNumbers: false,
+      visiblePageNumbers: [],
       lastPageNumber: 1
     };
 
     const bodyText = document.body.innerText || "";
     
-    // Look for total count
+    // Look for "Showing X to Y of Z" pattern
     const showingMatch = bodyText.match(/showing\s+(\d+)\s+to\s+(\d+)\s+of\s+(\d+)/i);
     if (showingMatch) {
       result.totalExhibitors = parseInt(showingMatch[3]);
     }
-
+    
+    // Alternative patterns
+    if (!result.totalExhibitors) {
+      const patterns = [
+        /(\d+)\s+(?:total\s+)?(?:results?|exhibitors?|companies?)/i,
+        /total[:\s]+(\d+)/i
+      ];
+      
+      for (const pattern of patterns) {
+        const match = bodyText.match(pattern);
+        if (match && match[1]) {
+          result.totalExhibitors = parseInt(match[1]);
+          break;
+        }
+      }
+    }
+    
+    // Check for "Load More" button
+    const loadMoreButtons = Array.from(document.querySelectorAll("button, a"))
+      .filter(el => {
+        const text = (el.textContent || "").toLowerCase();
+        return text.includes("load more") || text.includes("show more");
+      });
+    result.hasLoadMore = loadMoreButtons.length > 0;
+    
     // Check for Next button
     const nextButtons = Array.from(document.querySelectorAll("a, button"))
       .filter(el => {
         const text = (el.textContent || "").toLowerCase().trim();
-        return text === "next" || text === ">" || text === "»";
+        const className = (el.className || "").toLowerCase();
+        return text === "next" || text === ">" || text === "»" || 
+               className.includes("next");
       });
     result.hasNextButton = nextButtons.length > 0;
-
+    
     // Check for page numbers
     const pageLinks = Array.from(document.querySelectorAll("a, button"));
     for (const link of pageLinks) {
@@ -515,126 +500,212 @@ async function getAllExhibitorLinks(page, baseUrl, config = {}) {
       if (/^[1-9]\d*$/.test(text)) {
         const num = parseInt(text);
         if (num > 0 && num < 100) {
+          result.visiblePageNumbers.push(num);
           result.lastPageNumber = Math.max(result.lastPageNumber, num);
-          result.hasPageNumbers = true;
         }
       }
+      
+      // Check hrefs for page parameters
+      const href = link.getAttribute("href") || "";
+      const pageMatch = href.match(/[?&]page=(\d+)/);
+      if (pageMatch) {
+        const num = parseInt(pageMatch[1]);
+        result.lastPageNumber = Math.max(result.lastPageNumber, num);
+      }
     }
-
+    
+    result.hasPageNumbers = result.visiblePageNumbers.length > 0;
+    
+    // Determine pagination type
+    if (result.hasLoadMore) {
+      result.paginationType = "loadmore";
+    } else if (result.hasPageNumbers || result.hasNextButton) {
+      result.paginationType = "pages";
+    } else {
+      result.paginationType = "single";
+    }
+    
     return result;
   });
 
   console.log(`📊 Pagination detection:`, paginationInfo);
 
   // Calculate total pages
-  let totalPages = 1;
+  let estimatedPages = 1;
   if (paginationInfo.totalExhibitors) {
-    totalPages = Math.ceil(paginationInfo.totalExhibitors / 24); // Assume 24 per page
+    estimatedPages = Math.ceil(paginationInfo.totalExhibitors / 24);
+    console.log(`📄 Calculated ${estimatedPages} pages from ${paginationInfo.totalExhibitors} total exhibitors`);
   }
-  totalPages = Math.max(
-    totalPages,
+  
+  let totalPages = Math.max(
     paginationInfo.lastPageNumber,
+    estimatedPages,
     config.force_page_count || 1
   );
   totalPages = Math.min(totalPages, maxPages);
-
+  
   console.log(`📖 Will crawl ${totalPages} pages`);
 
-  // Crawl all pages
-  for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-    if (pageNum > 1) {
-      // Try URL parameter method
-      const paramUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}page=${pageNum}`;
-      
-      try {
-        console.log(`  🔄 Loading page ${pageNum}: ${paramUrl}`);
-        await page.goto(paramUrl, { waitUntil: "networkidle", timeout: 15000 });
-        
-        // Wait for JS-rendered content on paginated page
-        console.log(`  ⏳ Waiting for exhibitor links on page ${pageNum}...`);
-        await waitForExhibitorLinks(page, config);
-        await page.waitForTimeout(1000);
-        
-      } catch (e) {
-        console.log(`  ⚠️ Failed to load page ${pageNum}: ${e.message}`);
-        
-        // Try clicking Next button as fallback
-        try {
-          const clicked = await page.evaluate(() => {
-            const links = Array.from(document.querySelectorAll("a, button"));
-            for (const link of links) {
-              const text = (link.textContent || "").toLowerCase().trim();
-              if (text === "next" || text === ">" || text === "»") {
-                link.click();
-                return true;
-              }
-            }
-            return false;
-          });
-          
-          if (clicked) {
-            console.log(`  ⏳ Clicked Next button, waiting for content...`);
-            await page.waitForTimeout(delayMs);
-            await waitForExhibitorLinks(page, config);
-          } else {
-            console.log(`  ❌ Could not navigate to page ${pageNum}`);
-            break;
-          }
-        } catch (e) {
-          console.log(`  ❌ Navigation failed: ${e.message}`);
-          break;
-        }
-      }
-      
-      await page.waitForTimeout(delayMs);
-    } else {
-      // First page already loaded and waited for
-      await page.waitForTimeout(500);
-    }
-
-    // Extract links from current page
-    const links = extractExhibitorLinks(await page.content(), baseUrl, config);
+  // Handle pagination
+  if (paginationInfo.paginationType === "loadmore") {
+    console.log("⚡ Using Load More strategy");
     
-    if (links.length > 0) {
-      const hash = links.slice(0, 5).sort().join("|");
-      if (!seenHashes.has(hash)) {
-        seenHashes.add(hash);
-        allExhibitorLinks.push(...links);
-        console.log(`  ✅ Page ${pageNum}: found ${links.length} exhibitors`);
-      } else {
-        console.log(`  ⚠️ Page ${pageNum} has duplicate content`);
-      }
-    } else {
-      console.log(`  ⚠️ Page ${pageNum}: no exhibitors found`);
+    let previousCount = 0;
+    let attempts = 0;
+    
+    while (attempts < totalPages) {
+      const links = extractExhibitorLinks(await page.content(), baseUrl, config);
+      const currentCount = links.length;
       
-      // Try alternative extraction if pattern-based extraction failed
-      const alternativeLinks = await page.evaluate(() => {
-        const links = [];
-        const anchors = document.querySelectorAll('a[href]');
-        anchors.forEach(a => {
-          const href = a.getAttribute('href') || '';
-          if (href.match(/\/(exhibitor|Exhibitor|profile|company|details|view|show)[\/\-]/i) ||
-              href.match(/ExbDetails|exhibitor-detail|company-profile/i)) {
-            links.push(href);
-          }
-        });
-        return links;
+      if (currentCount === previousCount) {
+        console.log(`  ✅ No new exhibitors after Load More, total: ${links.length}`);
+        allExhibitorLinks.push(...links);
+        break;
+      }
+      
+      previousCount = currentCount;
+      
+      // Try to click Load More
+      const clicked = await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll("button, a"))
+          .filter(el => {
+            const text = (el.textContent || "").toLowerCase();
+            return text.includes("load more") || text.includes("show more");
+          });
+        
+        if (buttons.length > 0 && !buttons[0].disabled) {
+          buttons[0].click();
+          return true;
+        }
+        return false;
       });
       
-      if (alternativeLinks.length > 0) {
-        console.log(`  🔄 Found ${alternativeLinks.length} exhibitors using alternative extraction`);
-        for (const link of alternativeLinks) {
+      if (!clicked) {
+        console.log(`  ✅ Load More button not available, total: ${links.length}`);
+        allExhibitorLinks.push(...links);
+        break;
+      }
+      
+      console.log(`  ⏳ Clicked Load More, waiting for new content...`);
+      await page.waitForTimeout(delayMs);
+      attempts++;
+    }
+    
+  } else {
+    // Traditional pagination
+    console.log(`⚡ Using traditional pagination strategy for ${totalPages} pages`);
+    
+    for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+      if (pageNum > 1) {
+        const paramUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}page=${pageNum}`;
+        
+        let loaded = false;
+        
+        try {
+          console.log(`  🔄 Loading page ${pageNum}: ${paramUrl}`);
+          await page.goto(paramUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+          
+          // Looped scroll to trigger lazy loading
+          for (let i = 0; i < 10; i++) {
+            await page.mouse.wheel(0, 2000);
+            await page.waitForTimeout(800);
+          }
+          
+          // Wait for content to settle BEFORE extracting
+          await page.waitForTimeout(2000);
+          
+          const links = extractExhibitorLinks(await page.content(), baseUrl, config);
+          if (links.length > 0) {
+            const hash = links.slice(0, 5).sort().join("|");
+            if (!seenHashes.has(hash)) {
+              seenHashes.add(hash);
+              allExhibitorLinks.push(...links);
+              console.log(`  ✅ Page ${pageNum}: found ${links.length} exhibitors (URL method)`);
+              loaded = true;
+            } else {
+              console.log(`  ⚠️ Page ${pageNum} has duplicate content`);
+            }
+          }
+        } catch (e) {
+          console.log(`  ⚠️ Failed to load page ${pageNum} via URL: ${e.message}`);
+        }
+        
+        // Try clicking page number or next button
+        if (!loaded) {
           try {
-            if (link.startsWith("http")) {
-              allExhibitorLinks.push(link);
-            } else if (link.startsWith("/")) {
-              const base = new URL(baseUrl);
-              allExhibitorLinks.push(`${base.protocol}//${base.host}${link}`);
+            if (pageNum === 2) {
+              await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+              
+              // Scroll and wait after reload
+              for (let i = 0; i < 10; i++) {
+                await page.mouse.wheel(0, 2000);
+                await page.waitForTimeout(800);
+              }
+              await page.waitForTimeout(2000);
+            }
+            
+            const clicked = await page.evaluate((num) => {
+              const links = Array.from(document.querySelectorAll("a, button"));
+              for (const link of links) {
+                const text = (link.textContent || "").trim();
+                if (text === String(num)) {
+                  link.click();
+                  return true;
+                }
+              }
+              
+              if (num > 1) {
+                for (const link of links) {
+                  const text = (link.textContent || "").toLowerCase().trim();
+                  if (text === "next" || text === ">" || text === "»") {
+                    link.click();
+                    return true;
+                  }
+                }
+              }
+              
+              return false;
+            }, pageNum);
+            
+            if (clicked) {
+              await page.waitForTimeout(delayMs * 1.5);
+              
+              // Looped scroll after click
+              for (let i = 0; i < 10; i++) {
+                await page.mouse.wheel(0, 2000);
+                await page.waitForTimeout(800);
+              }
+              
+              // Wait for content to settle BEFORE extracting
+              await page.waitForTimeout(2000);
+              
+              const links = extractExhibitorLinks(await page.content(), baseUrl, config);
+              const hash = links.slice(0, 5).sort().join("|");
+              
+              if (!seenHashes.has(hash) && links.length > 0) {
+                seenHashes.add(hash);
+                allExhibitorLinks.push(...links);
+                console.log(`  ✅ Page ${pageNum}: found ${links.length} exhibitors (click method)`);
+                loaded = true;
+              }
             }
           } catch (e) {
-            // Skip invalid URLs
+            console.log(`  ⚠️ Failed to click page ${pageNum}: ${e.message}`);
           }
         }
+        
+        if (!loaded) {
+          console.log(`  ❌ Failed to load page ${pageNum} with all methods`);
+        }
+        
+        await page.waitForTimeout(delayMs);
+      } else {
+        // First page - content already loaded and scrolled
+        const links = extractExhibitorLinks(await page.content(), baseUrl, config);
+        const hash = links.slice(0, 5).sort().join("|");
+        seenHashes.add(hash);
+        allExhibitorLinks.push(...links);
+        console.log(`  ✅ Page 1: found ${links.length} exhibitors`);
       }
     }
   }
@@ -642,6 +713,10 @@ async function getAllExhibitorLinks(page, baseUrl, config = {}) {
   // Remove duplicates
   const uniqueLinks = Array.from(new Set(allExhibitorLinks));
   console.log(`\n✅ Total unique exhibitor links collected: ${uniqueLinks.length}`);
+
+  if (paginationInfo.totalExhibitors && uniqueLinks.length < paginationInfo.totalExhibitors * 0.8) {
+    console.log(`⚠️ Warning: Expected ~${paginationInfo.totalExhibitors} but found ${uniqueLinks.length}`);
+  }
 
   return uniqueLinks;
 }
@@ -675,7 +750,19 @@ async function runPlaywrightStrategy(job) {
     const exhibitorLinks = await getAllExhibitorLinks(page, url, config);
 
     if (exhibitorLinks.length === 0) {
-      console.log("⚠️ No exhibitor links found");
+      console.log("⚠️ No exhibitor links found - marking job as failed");
+      
+      // Mark job as failed if no links found
+      const failClient = await db.connect();
+      try {
+        await failClient.query(
+          'UPDATE mining_jobs SET status = $1, error = $2, completed_at = NOW() WHERE id = $3',
+          ['failed', 'No exhibitor links found on the target page', job.id]
+        );
+      } finally {
+        failClient.release();
+      }
+      
       return;
     }
 
@@ -699,7 +786,7 @@ async function runPlaywrightStrategy(job) {
       console.log(`   ${exUrl.substring(exUrl.lastIndexOf('/') + 1)}`);
       
       try {
-        await page.goto(exUrl, { waitUntil: "networkidle", timeout: 30000 });
+        await page.goto(exUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
         
         const html = await page.content();
         const emails = extractEmails(html);
