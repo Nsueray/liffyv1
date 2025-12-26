@@ -1,9 +1,15 @@
 /**
  * Docker-based Playwright Mining Worker
- * AutoMiner V1
- * - No user-selected modes
- * - Automatically tries multiple strategies
- * - Stops when results are found
+ * AutoMiner FINAL
+ *
+ * Behaviour:
+ * - User selects NOTHING
+ * - System tries:
+ *   1) Direct page scan
+ *   2) Internal high-signal pages
+ *   3) List → Detail crawl (expo-style)
+ *   4) Controlled deep crawl
+ * - Stops as soon as emails are found
  */
 
 const db = require('./db');
@@ -11,12 +17,17 @@ const { chromium } = require('playwright');
 const { URL } = require('url');
 
 const POLL_INTERVAL_MS = 5000;
-const MAX_INTERNAL_PAGES = 10;
+const MAX_LIST_PAGES = 3;
+const MAX_DETAIL_PAGES = 50;
 
 let shuttingDown = false;
 
+/* =========================
+   WORKER LOOP
+========================= */
+
 async function startWorker() {
-  console.log('🚀 Mining Worker started (AutoMiner V1)');
+  console.log('🚀 Mining Worker started (AutoMiner FINAL)');
 
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
@@ -65,19 +76,19 @@ async function processNextJob() {
 
     const found = await runAutoMiner(job);
 
-    if (found > 0) {
-      await markCompleted(job.id);
-    } else {
-      await markCompleted(job.id);
-    }
+    await markCompleted(job.id, found);
 
   } catch (err) {
     await client.query('ROLLBACK');
     console.error('Job failed:', err.message);
   } finally {
-    if (client) client.release();
+    client.release();
   }
 }
+
+/* =========================
+   AUTO MINER
+========================= */
 
 async function runAutoMiner(job) {
   const browser = await chromium.launch({
@@ -94,41 +105,106 @@ async function runAutoMiner(job) {
 
   let totalFound = 0;
 
-  // STRATEGY 1 — Direct page scan
+  /* ---------- STRATEGY 1: Direct page ---------- */
   console.log('AUTO: direct_page_scan');
   await page.goto(job.input, { waitUntil: 'domcontentloaded', timeout: 60000 });
   totalFound += await extractAndSave(page, job);
-
   if (totalFound > 0) {
     await browser.close();
     return totalFound;
   }
 
-  // STRATEGY 2 — Internal link discovery
-  console.log('AUTO: internal_link_discovery');
-
-  const internalLinks = await collectInternalLinks(page, job.input);
-
-  let visited = 0;
-  for (const link of internalLinks) {
-    if (visited >= MAX_INTERNAL_PAGES) break;
-    visited++;
-
+  /* ---------- STRATEGY 2: High-signal internal pages ---------- */
+  console.log('AUTO: internal_high_signal_pages');
+  const internalPages = await collectHighSignalPages(page, job.input);
+  for (const url of internalPages) {
     try {
-      await page.goto(link, { waitUntil: 'domcontentloaded', timeout: 60000 });
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
       totalFound += await extractAndSave(page, job);
+      if (totalFound > 0) break;
+    } catch {}
+  }
+  if (totalFound > 0) {
+    await browser.close();
+    return totalFound;
+  }
+
+  /* ---------- STRATEGY 3: List → Detail crawl (EXPO CORE) ---------- */
+  console.log('AUTO: list_to_detail_crawl');
+  const listPages = await detectListPages(internalPages);
+
+  let detailVisited = 0;
+
+  for (const listUrl of listPages.slice(0, MAX_LIST_PAGES)) {
+    try {
+      await page.goto(listUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+      // Scroll to load JS content
+      await autoScroll(page);
+
+      const detailLinks = await collectDetailLinks(page, job.input);
+
+      for (const detailUrl of detailLinks) {
+        if (detailVisited >= MAX_DETAIL_PAGES) break;
+        detailVisited++;
+
+        try {
+          await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+          totalFound += await extractAndSave(page, job);
+          if (totalFound > 0) break;
+        } catch {}
+      }
 
       if (totalFound > 0) break;
-    } catch (e) {
-      continue;
-    }
+
+    } catch {}
   }
 
   await browser.close();
   return totalFound;
 }
 
-async function collectInternalLinks(page, baseUrl) {
+/* =========================
+   HELPERS
+========================= */
+
+async function collectHighSignalPages(page, baseUrl) {
+  const base = new URL(baseUrl);
+  const domain = base.hostname;
+
+  const patterns = [
+    'exhibitor', 'exhibitors',
+    'participant', 'participants',
+    'company', 'companies',
+    'profile', 'brand', 'catalog', 'list'
+  ];
+
+  const hrefs = await page.$$eval('a[href]', els =>
+    els.map(a => a.getAttribute('href')).filter(Boolean)
+  );
+
+  const urls = new Set();
+
+  for (const href of hrefs) {
+    try {
+      const url = new URL(href, base);
+      if (url.hostname !== domain) continue;
+      if (patterns.some(p => url.pathname.toLowerCase().includes(p))) {
+        urls.add(url.href);
+      }
+    } catch {}
+  }
+
+  return Array.from(urls);
+}
+
+function detectListPages(pages) {
+  return pages.filter(u =>
+    /exhibitors|participants|companies|catalog|list/i.test(u)
+  );
+}
+
+async function collectDetailLinks(page, baseUrl) {
   const base = new URL(baseUrl);
   const domain = base.hostname;
 
@@ -136,26 +212,12 @@ async function collectInternalLinks(page, baseUrl) {
     els.map(a => a.getAttribute('href')).filter(Boolean)
   );
 
-  const highSignal = [
-    'exhibitor',
-    'exhibitors',
-    'participant',
-    'participants',
-    'company',
-    'profile',
-    'brand',
-    'list'
-  ];
-
   const links = new Set();
 
   for (const href of hrefs) {
     try {
       const url = new URL(href, base);
-      if (url.hostname !== domain) continue;
-
-      const lower = url.pathname.toLowerCase();
-      if (highSignal.some(p => lower.includes(p))) {
+      if (url.hostname === domain && url.pathname.length > 10) {
         links.add(url.href);
       }
     } catch {}
@@ -167,7 +229,6 @@ async function collectInternalLinks(page, baseUrl) {
 async function extractAndSave(page, job) {
   const html = await page.content();
   const emails = extractEmails(html);
-
   if (emails.length === 0) return 0;
 
   for (const email of emails) {
@@ -187,14 +248,34 @@ function extractEmails(html) {
   return Array.from(new Set(html.match(regex) || []));
 }
 
-async function markCompleted(jobId) {
+async function autoScroll(page) {
+  await page.evaluate(async () => {
+    await new Promise(resolve => {
+      let total = 0;
+      const distance = 500;
+      const timer = setInterval(() => {
+        window.scrollBy(0, distance);
+        total += distance;
+        if (total >= document.body.scrollHeight) {
+          clearInterval(timer);
+          resolve();
+        }
+      }, 400);
+    });
+  });
+  await page.waitForTimeout(2000);
+}
+
+async function markCompleted(jobId, found) {
   await db.query(
     `UPDATE mining_jobs
-     SET status='completed', completed_at=NOW()
+     SET status='completed',
+         completed_at=NOW(),
+         total_found=$2
      WHERE id=$1`,
-    [jobId]
+    [jobId, found]
   );
-  console.log(`✅ Job ${jobId} completed`);
+  console.log(`✅ Job ${jobId} completed (found: ${found})`);
 }
 
 function shutdown() {
@@ -202,7 +283,7 @@ function shutdown() {
   shuttingDown = true;
 }
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 startWorker().catch(err => {
   console.error('Fatal worker error:', err);
