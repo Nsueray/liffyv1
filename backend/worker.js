@@ -59,12 +59,12 @@ async function processNextJob() {
     await runPlaywrightJob(job);
     await markCompleted(job.id);
 
-} catch (err) {
-  await client.query('ROLLBACK');
-  console.error('Job failed:', err.message);
-} finally {
-  if (client) client.release();
-}
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Job failed:', err.message);
+  } finally {
+    if (client) client.release();
+  }
 }
 
 async function runPlaywrightJob(job) {
@@ -97,9 +97,10 @@ function extractEmails(html) {
 async function saveResults(job, emails) {
   for (const email of emails) {
     await db.query(
-      `INSERT INTO mining_results (job_id, organizer_id, emails)
-       VALUES ($1, $2, ARRAY[$3])`,
-      [job.id, job.organizer_id, email]
+      `INSERT INTO mining_results
+       (job_id, organizer_id, source_url, emails)
+       VALUES ($1, $2, $3, ARRAY[$4])`,
+      [job.id, job.organizer_id, job.input, email]
     );
   }
 }
