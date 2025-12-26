@@ -59,13 +59,12 @@ async function processNextJob() {
     await runPlaywrightJob(job);
     await markCompleted(job.id);
 
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Job failed:', err.message);
-    if (client && client.release) client.release();
-  } finally {
-    client.release();
-  }
+} catch (err) {
+  await client.query('ROLLBACK');
+  console.error('Job failed:', err.message);
+} finally {
+  if (client) client.release();
+}
 }
 
 async function runPlaywrightJob(job) {
