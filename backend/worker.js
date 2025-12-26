@@ -1,13 +1,6 @@
 /**
- * LIFFY – LEGACY ID-AWARE EXPO WORKER
- *
- * Purpose:
- * - Reproduce the old "170 email" behavior
- * - Extract exhibitor IDs from DOM
- * - Generate detail URLs manually
- * - Crawl detail pages and extract emails
- *
- * This is a PROOF worker, not a universal engine.
+ * LIFFY BIG5-COMPATIBLE WORKER
+ * Direct link extraction (no ID parsing needed)
  */
 
 const db = require("./db");
@@ -16,18 +9,11 @@ const { chromium } = require("playwright");
 const POLL_INTERVAL_MS = 5000;
 const MAX_LIST_PAGES = 10;
 const MAX_DETAIL_PAGES = 300;
-const SCROLL_ROUNDS = 12;
-const SCROLL_DELAY_MS = 800;
-const PAGE_DELAY_MS = 1200;
 
 let shuttingDown = false;
 
-/* ======================
-   WORKER LOOP
-====================== */
-
 async function startWorker() {
-  console.log("🚀 Liffy Legacy ID-Aware Worker started");
+  console.log("🚀 Liffy Worker started (Big5 Compatible)");
 
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
@@ -36,7 +22,7 @@ async function startWorker() {
     try {
       await processNextJob();
     } catch (err) {
-      console.error("Worker loop error:", err.message);
+      console.error("Worker error:", err.message);
     }
     await sleep(POLL_INTERVAL_MS);
   }
@@ -49,8 +35,7 @@ async function processNextJob() {
     await client.query("BEGIN");
 
     const res = await client.query(`
-      SELECT *
-      FROM mining_jobs
+      SELECT * FROM mining_jobs
       WHERE status = 'pending'
       ORDER BY created_at ASC
       LIMIT 1
@@ -63,18 +48,16 @@ async function processNextJob() {
     }
 
     const job = res.rows[0];
-    console.log(`⛏️ Processing job ${job.id}`);
+    console.log(`\n⛏️ Processing job ${job.id}`);
+    console.log(`📌 URL: ${job.input}`);
 
     await client.query(
-      `UPDATE mining_jobs
-       SET status='running', started_at=NOW(), error=NULL
-       WHERE id=$1`,
+      `UPDATE mining_jobs SET status='running', started_at=NOW() WHERE id=$1`,
       [job.id]
     );
-
     await client.query("COMMIT");
 
-    const stats = await runLegacyMiner(job);
+    const stats = await mineBig5Site(job);
     await markCompleted(job.id, stats);
 
   } catch (err) {
@@ -85,130 +68,144 @@ async function processNextJob() {
   }
 }
 
-/* ======================
-   LEGACY MINER (ID-AWARE)
-====================== */
-
-async function runLegacyMiner(job) {
+async function mineBig5Site(job) {
   const browser = await chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-dev-shm-usage"]
   });
 
-  const context = await browser.newContext({
-    viewport: { width: 1920, height: 1080 }
-  });
-
-  const page = await context.newPage();
-
-  const exhibitorIds = new Set();
-  let visited = 0;
+  const page = await browser.newPage();
+  const allDetailLinks = new Set();
   let emailCount = 0;
 
   try {
+    console.log("📄 Collecting exhibitor links...");
+
+    // STEP 1: Collect all exhibitor links from paginated list
     for (let pageNum = 1; pageNum <= MAX_LIST_PAGES; pageNum++) {
-      const listUrl = `${job.input}?page=${pageNum}`;
-      console.log(`📄 Listing page ${pageNum}: ${listUrl}`);
-
-      await page.goto(listUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-
-      // Scroll hard to ensure DOM JS runs
-      for (let i = 0; i < SCROLL_ROUNDS; i++) {
-        await page.mouse.wheel(0, 2000);
-        await page.waitForTimeout(SCROLL_DELAY_MS);
+      // Build correct URL for pagination
+      let listUrl = job.input;
+      
+      if (pageNum > 1) {
+        // Check if base URL already has parameters
+        const separator = listUrl.includes('?') ? '&' : '?';
+        listUrl = `${job.input}${separator}page=${pageNum}`;
       }
-
-      // 🔑 EXTRACT EXHIBITOR IDS
-      const idsOnPage = await page.evaluate(() => {
-        const ids = new Set();
-
-        // 1️⃣ onclick handlers
-        document.querySelectorAll("[onclick]").forEach(el => {
-          const v = el.getAttribute("onclick") || "";
-          const match = v.match(/(\d{3,})/);
-          if (match) ids.add(match[1]);
-        });
-
-        // 2️⃣ data-* attributes
-        document.querySelectorAll("[data-exhibitor-id],[data-id]").forEach(el => {
-          const v =
-            el.getAttribute("data-exhibitor-id") ||
-            el.getAttribute("data-id");
-          if (v && /^\d+$/.test(v)) ids.add(v);
-        });
-
-        // 3️⃣ inline JS references in HTML
-        const html = document.documentElement.innerHTML;
-        const regex = /ExbDetails\/(\d{3,})/g;
-        let m;
-        while ((m = regex.exec(html)) !== null) {
-          ids.add(m[1]);
-        }
-
-        return Array.from(ids);
+      
+      console.log(`  Page ${pageNum}: ${listUrl}`);
+      
+      // Navigate and wait for content
+      await page.goto(listUrl, { 
+        waitUntil: "networkidle",  // ← CRITICAL: Wait for JS to load
+        timeout: 60000 
       });
-
-      if (idsOnPage.length === 0) {
-        console.log("⚠️ No IDs found on this page, stopping pagination");
+      
+      // Aggressive scroll to trigger lazy loading
+      console.log("    Scrolling to load content...");
+      for (let i = 0; i < 10; i++) {
+        await page.mouse.wheel(0, 2000);
+        await page.waitForTimeout(800);
+      }
+      
+      // Wait for exhibitor links to appear
+      await page.waitForTimeout(2000);
+      
+      // Extract exhibitor detail links directly (no ID parsing)
+      const links = await page.$$eval(
+        'a[href*="/Exhibitor/"], a[href*="/exhibitor/"], a[href*="ExbDetails"]',
+        els => els.map(el => el.href).filter(href => 
+          href.includes('/Exhibitor/') || 
+          href.includes('/exhibitor/') || 
+          href.includes('ExbDetails')
+        )
+      );
+      
+      console.log(`    Found ${links.length} exhibitor links`);
+      
+      if (links.length === 0) {
+        // Try alternative: check if we're on an empty page
+        const hasContent = await page.$eval('body', el => 
+          el.innerText.includes('Exhibitor') || 
+          el.innerText.includes('Company')
+        ).catch(() => false);
+        
+        if (!hasContent) {
+          console.log("    No content on this page, stopping");
+          break;
+        }
+      }
+      
+      // Add to set (removes duplicates)
+      links.forEach(link => allDetailLinks.add(link));
+      
+      // Try to find next page button
+      const hasNext = await page.$('a:has-text("Next"), a:has-text(">")');
+      if (!hasNext && pageNum > 1 && links.length === 0) {
+        console.log("    No more pages");
         break;
       }
-
-      idsOnPage.forEach(id => exhibitorIds.add(id));
-      await page.waitForTimeout(PAGE_DELAY_MS);
     }
-
-    console.log(`🔑 Total exhibitor IDs collected: ${exhibitorIds.size}`);
-
-    // 🔍 VISIT DETAIL PAGES
-    for (const id of exhibitorIds) {
+    
+    console.log(`\n🔗 Total unique exhibitor links: ${allDetailLinks.size}`);
+    
+    // STEP 2: Visit each detail page
+    let visited = 0;
+    for (const detailUrl of allDetailLinks) {
       if (visited >= MAX_DETAIL_PAGES) break;
       visited++;
-
-      const detailUrl = `${job.input.replace("/ExhibitorsList", "")}/Exhibitor/ExbDetails/${id}`;
-      console.log(`➡️ [${visited}] ${detailUrl}`);
-
+      
       try {
-        await page.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-        await page.waitForTimeout(PAGE_DELAY_MS);
-
+        console.log(`[${visited}/${allDetailLinks.size}] ${detailUrl.split('/').pop()}`);
+        
+        await page.goto(detailUrl, { 
+          waitUntil: "domcontentloaded",
+          timeout: 30000 
+        });
+        
+        await page.waitForTimeout(1000);
+        
         const html = await page.content();
         const emails = extractEmails(html);
-
+        
         if (emails.length > 0) {
           await saveResult(job, detailUrl, emails);
           emailCount += emails.length;
+          console.log(`  ✅ Found: ${emails.join(', ')}`);
         }
-
-      } catch {}
+        
+      } catch (err) {
+        console.log(`  ⚠️ Failed: ${err.message}`);
+      }
     }
-
+    
   } finally {
     await browser.close();
   }
 
-  return { results: visited, emails: emailCount };
+  return { 
+    results: allDetailLinks.size, 
+    emails: emailCount 
+  };
 }
 
-/* ======================
-   HELPERS
-====================== */
-
 function extractEmails(text) {
-  const regex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-  return Array.from(new Set(
+  const regex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
+  return [...new Set(
     (text.match(regex) || []).filter(e =>
       !e.includes(".png") &&
       !e.includes(".jpg") &&
-      !e.includes("@2x")
+      !e.includes("@2x") &&
+      e.length < 100
     )
-  ));
+  )];
 }
 
 async function saveResult(job, source, emails) {
   await db.query(
     `INSERT INTO mining_results
      (job_id, organizer_id, source_url, emails)
-     VALUES ($1, $2, $3, $4)`,
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT DO NOTHING`,
     [job.id, job.organizer_id, source, emails]
   );
 }
@@ -216,17 +213,15 @@ async function saveResult(job, source, emails) {
 async function markCompleted(jobId, stats) {
   await db.query(
     `UPDATE mining_jobs
-     SET status='completed',
-         completed_at=NOW(),
-         total_found=$2,
-         total_emails_raw=$3
+     SET status='completed', completed_at=NOW(),
+         total_found=$2, total_emails_raw=$3
      WHERE id=$1`,
     [jobId, stats.results, stats.emails]
   );
 
-  console.log(
-    `✅ Job ${jobId} completed (pages: ${stats.results}, emails: ${stats.emails})`
-  );
+  console.log(`\n✅ Job completed`);
+  console.log(`   Links visited: ${stats.results}`);
+  console.log(`   Emails found: ${stats.emails}`);
 }
 
 function shutdown() {
@@ -237,6 +232,6 @@ function shutdown() {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 startWorker().catch(err => {
-  console.error("Fatal worker error:", err);
+  console.error("Fatal error:", err);
   process.exit(1);
 });
