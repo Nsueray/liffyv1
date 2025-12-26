@@ -1,11 +1,15 @@
 /**
- * Docker-based Playwright Mining Worker
- * FINAL Expo-Grade Miner
+ * Liffy Expo-Grade Auto Mining Worker
  *
- * - Uses proven list → detail crawler
- * - Handles pagination, load more, next, page params
- * - Extracts email, website, phone, country, company
- * - Saves results even if email is missing
+ * Behaviour:
+ * - User selects nothing
+ * - System automatically:
+ *   1) Loads list pages
+ *   2) Handles pagination / load more / next
+ *   3) Scrolls for lazy-loaded content
+ *   4) Visits exhibitor/detail pages
+ *   5) Extracts email OR contact intelligence
+ * - Deterministic, limited, production-safe
  */
 
 const db = require("./db");
@@ -13,14 +17,19 @@ const { chromium } = require("playwright");
 const { URL } = require("url");
 
 const POLL_INTERVAL_MS = 5000;
+const MAX_LIST_PAGES = 10;
+const MAX_DETAIL_PAGES = 150;
+const SCROLL_DELAY_MS = 800;
+const PAGE_DELAY_MS = 1500;
+
 let shuttingDown = false;
 
-/* =======================
-   MAIN WORKER LOOP
-======================= */
+/* ======================
+   WORKER LOOP
+====================== */
 
 async function startWorker() {
-  console.log("🚀 Mining Worker started (FINAL Expo Miner)");
+  console.log("🚀 Liffy Mining Worker started (Expo-Grade)");
 
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
@@ -67,8 +76,8 @@ async function processNextJob() {
 
     await client.query("COMMIT");
 
-    const found = await runExpoCrawler(job);
-    await markCompleted(job.id, found);
+    const stats = await runExpoMiner(job);
+    await markCompleted(job.id, stats);
 
   } catch (err) {
     await client.query("ROLLBACK");
@@ -78,11 +87,11 @@ async function processNextJob() {
   }
 }
 
-/* =======================
-   EXPO CRAWLER
-======================= */
+/* ======================
+   EXPO MINER
+====================== */
 
-async function runExpoCrawler(job) {
+async function runExpoMiner(job) {
   const browser = await chromium.launch({
     headless: true,
     args: [
@@ -92,28 +101,45 @@ async function runExpoCrawler(job) {
     ]
   });
 
-  const page = await browser.newPage();
-  let totalFound = 0;
+  const context = await browser.newContext({
+    viewport: { width: 1920, height: 1080 }
+  });
+
+  const page = await context.newPage();
+
+  let resultsCount = 0;
+  let emailCount = 0;
 
   try {
-    const listUrls = await discoverListPages(page, job.input);
+    const listPages = await discoverListPages(page, job.input);
 
-    for (const listUrl of listUrls) {
-      console.log(`📄 Crawling list page: ${listUrl}`);
-      await page.goto(listUrl, { waitUntil: "networkidle", timeout: 60000 });
-      await autoScroll(page);
+    let visitedDetails = 0;
+
+    for (const listUrl of listPages.slice(0, MAX_LIST_PAGES)) {
+      console.log(`📄 Crawling list: ${listUrl}`);
+
+      await page.goto(listUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await intelligentScroll(page);
 
       const detailLinks = await collectDetailLinks(page, job.input);
 
       for (const detailUrl of detailLinks) {
+        if (visitedDetails >= MAX_DETAIL_PAGES) break;
+        visitedDetails++;
+
         try {
-          await page.goto(detailUrl, { waitUntil: "networkidle", timeout: 60000 });
+          await page.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+          await page.waitForTimeout(PAGE_DELAY_MS);
+
           const html = await page.content();
           const emails = extractEmails(html);
           const meta = await extractMeta(page, html);
 
-          await saveResult(job, detailUrl, emails, meta);
-          totalFound++;
+          if (emails.length > 0 || meta.company || meta.website || meta.phone) {
+            await saveResult(job, detailUrl, emails, meta);
+            resultsCount++;
+            emailCount += emails.length;
+          }
 
         } catch {}
       }
@@ -123,25 +149,28 @@ async function runExpoCrawler(job) {
     await browser.close();
   }
 
-  return totalFound;
+  return {
+    results: resultsCount,
+    emails: emailCount
+  };
 }
 
-/* =======================
-   PAGE DISCOVERY
-======================= */
+/* ======================
+   DISCOVERY
+====================== */
 
 async function discoverListPages(page, baseUrl) {
   await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+
+  const base = new URL(baseUrl);
+  const domain = base.hostname;
 
   const patterns = [
     "exhibitor", "exhibitors",
     "participant", "participants",
     "company", "companies",
-    "catalog", "list"
+    "brand", "catalog", "list"
   ];
-
-  const base = new URL(baseUrl);
-  const domain = base.hostname;
 
   const hrefs = await page.$$eval("a[href]", els =>
     els.map(a => a.getAttribute("href")).filter(Boolean)
@@ -152,8 +181,10 @@ async function discoverListPages(page, baseUrl) {
   for (const href of hrefs) {
     try {
       const url = new URL(href, base);
-      if (url.hostname === domain &&
-          patterns.some(p => url.pathname.toLowerCase().includes(p))) {
+      if (
+        url.hostname === domain &&
+        patterns.some(p => url.pathname.toLowerCase().includes(p))
+      ) {
         pages.add(url.href);
       }
     } catch {}
@@ -161,10 +192,6 @@ async function discoverListPages(page, baseUrl) {
 
   return pages.size ? Array.from(pages) : [baseUrl];
 }
-
-/* =======================
-   DETAIL LINKS
-======================= */
 
 async function collectDetailLinks(page, baseUrl) {
   const base = new URL(baseUrl);
@@ -188,9 +215,9 @@ async function collectDetailLinks(page, baseUrl) {
   return Array.from(links);
 }
 
-/* =======================
+/* ======================
    EXTRACTION
-======================= */
+====================== */
 
 function extractEmails(html) {
   const regex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
@@ -201,16 +228,22 @@ async function extractMeta(page, html) {
   return await page.evaluate(() => {
     const text = document.body.innerText || "";
     const phoneMatch = text.match(/\+?\d[\d\s\-().]{6,}/);
+
+    const websiteLink = Array.from(document.querySelectorAll("a[href^='http']"))
+      .map(a => a.getAttribute("href"))
+      .find(h => h && !h.includes("facebook") && !h.includes("linkedin"));
+
     return {
       company: document.querySelector("h1, h2")?.textContent?.trim() || null,
-      phone: phoneMatch ? phoneMatch[0] : null
+      phone: phoneMatch ? phoneMatch[0] : null,
+      website: websiteLink || null
     };
   });
 }
 
-/* =======================
-   SAVE RESULT
-======================= */
+/* ======================
+   SAVE
+====================== */
 
 async function saveResult(job, url, emails, meta) {
   await db.query(
@@ -226,38 +259,31 @@ async function saveResult(job, url, emails, meta) {
   );
 }
 
-/* =======================
+/* ======================
    FINALIZE
-======================= */
+====================== */
 
-async function markCompleted(jobId, found) {
+async function markCompleted(jobId, stats) {
   await db.query(
     `UPDATE mining_jobs
      SET status='completed',
          completed_at=NOW(),
-         total_found=$2
+         total_found=$2,
+         total_emails_raw=$3
      WHERE id=$1`,
-    [jobId, found]
+    [jobId, stats.results, stats.emails]
   );
-  console.log(`✅ Job ${jobId} completed (found: ${found})`);
+
+  console.log(
+    `✅ Job ${jobId} completed (results: ${stats.results}, emails: ${stats.emails})`
+  );
 }
 
-async function autoScroll(page) {
-  await page.evaluate(async () => {
-    await new Promise(resolve => {
-      let total = 0;
-      const distance = 500;
-      const timer = setInterval(() => {
-        window.scrollBy(0, distance);
-        total += distance;
-        if (total >= document.body.scrollHeight) {
-          clearInterval(timer);
-          resolve();
-        }
-      }, 400);
-    });
-  });
-  await page.waitForTimeout(1500);
+async function intelligentScroll(page) {
+  for (let i = 0; i < 10; i++) {
+    await page.mouse.wheel(0, 2000);
+    await page.waitForTimeout(SCROLL_DELAY_MS);
+  }
 }
 
 function shutdown() {
