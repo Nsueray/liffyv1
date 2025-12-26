@@ -1,26 +1,23 @@
 /**
- * Liffy Expo-Grade Auto Mining Worker
+ * Liffy FINAL Hybrid Auto Mining Worker
  *
- * Behaviour:
- * - User selects nothing
- * - System automatically:
- *   1) Loads list pages
- *   2) Handles pagination / load more / next
- *   3) Scrolls for lazy-loaded content
- *   4) Visits exhibitor/detail pages
- *   5) Extracts email OR contact intelligence
+ * Core principles:
+ * - User selects NOTHING
+ * - XHR interception is PRIMARY source
+ * - Pagination + Scroll are used to trigger XHR calls
+ * - DOM parsing is secondary fallback
  * - Deterministic, limited, production-safe
  */
 
 const db = require("./db");
 const { chromium } = require("playwright");
-const { URL } = require("url");
 
 const POLL_INTERVAL_MS = 5000;
 const MAX_LIST_PAGES = 10;
-const MAX_DETAIL_PAGES = 150;
-const SCROLL_DELAY_MS = 800;
-const PAGE_DELAY_MS = 1500;
+const SCROLL_ROUNDS = 8;
+const SCROLL_DELAY_MS = 1000;
+const PAGE_DELAY_MS = 2000;
+const MAX_RESULTS = 500;
 
 let shuttingDown = false;
 
@@ -29,7 +26,7 @@ let shuttingDown = false;
 ====================== */
 
 async function startWorker() {
-  console.log("🚀 Liffy Mining Worker started (Expo-Grade)");
+  console.log("🚀 Liffy Mining Worker started (FINAL Hybrid)");
 
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
@@ -76,7 +73,7 @@ async function processNextJob() {
 
     await client.query("COMMIT");
 
-    const stats = await runExpoMiner(job);
+    const stats = await runHybridMiner(job);
     await markCompleted(job.id, stats);
 
   } catch (err) {
@@ -88,10 +85,10 @@ async function processNextJob() {
 }
 
 /* ======================
-   EXPO MINER
+   HYBRID MINER
 ====================== */
 
-async function runExpoMiner(job) {
+async function runHybridMiner(job) {
   const browser = await chromium.launch({
     headless: true,
     args: [
@@ -101,167 +98,117 @@ async function runExpoMiner(job) {
     ]
   });
 
-  const context = await browser.newContext({
-    viewport: { width: 1920, height: 1080 }
+  const page = await browser.newPage();
+  const collected = new Map();
+
+  /* ---- XHR INTERCEPTOR ---- */
+  page.on("response", async (response) => {
+    try {
+      const ct = response.headers()["content-type"] || "";
+      if (!ct.includes("application/json")) return;
+
+      const data = await response.json().catch(() => null);
+      if (!data) return;
+
+      extractFromJSON(data, collected);
+    } catch {}
   });
 
-  const page = await context.newPage();
-
-  let resultsCount = 0;
-  let emailCount = 0;
-
   try {
-    const listPages = await discoverListPages(page, job.input);
+    console.log(`🌐 Navigating to ${job.input}`);
+    await page.goto(job.input, { waitUntil: "networkidle", timeout: 60000 });
 
-    let visitedDetails = 0;
+    for (let pageIndex = 1; pageIndex <= MAX_LIST_PAGES; pageIndex++) {
+      console.log(`📄 Triggering page ${pageIndex}`);
 
-    for (const listUrl of listPages.slice(0, MAX_LIST_PAGES)) {
-      console.log(`📄 Crawling list: ${listUrl}`);
-
-      await page.goto(listUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
-      await intelligentScroll(page);
-
-      const detailLinks = await collectDetailLinks(page, job.input);
-
-      for (const detailUrl of detailLinks) {
-        if (visitedDetails >= MAX_DETAIL_PAGES) break;
-        visitedDetails++;
-
-        try {
-          await page.goto(detailUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-          await page.waitForTimeout(PAGE_DELAY_MS);
-
-          const html = await page.content();
-          const emails = extractEmails(html);
-          const meta = await extractMeta(page, html);
-
-          if (emails.length > 0 || meta.company || meta.website || meta.phone) {
-            await saveResult(job, detailUrl, emails, meta);
-            resultsCount++;
-            emailCount += emails.length;
-          }
-
-        } catch {}
+      // Scroll to trigger lazy-loaded XHRs
+      for (let i = 0; i < SCROLL_ROUNDS; i++) {
+        await page.mouse.wheel(0, 2000);
+        await page.waitForTimeout(SCROLL_DELAY_MS);
       }
+
+      // Try "Next" pagination if exists
+      const hasNext = await clickNextIfExists(page);
+      if (!hasNext) break;
+
+      await page.waitForTimeout(PAGE_DELAY_MS);
     }
 
   } finally {
     await browser.close();
   }
 
-  return {
-    results: resultsCount,
-    emails: emailCount
-  };
-}
+  let saved = 0;
+  let emails = 0;
 
-/* ======================
-   DISCOVERY
-====================== */
+  for (const item of collected.values()) {
+    if (saved >= MAX_RESULTS) break;
 
-async function discoverListPages(page, baseUrl) {
-  await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await db.query(
+      `INSERT INTO mining_results
+       (job_id, organizer_id, source_url, emails)
+       VALUES ($1, $2, $3, $4)`,
+      [
+        job.id,
+        job.organizer_id,
+        item.source || job.input,
+        item.emails || []
+      ]
+    );
 
-  const base = new URL(baseUrl);
-  const domain = base.hostname;
-
-  const patterns = [
-    "exhibitor", "exhibitors",
-    "participant", "participants",
-    "company", "companies",
-    "brand", "catalog", "list"
-  ];
-
-  const hrefs = await page.$$eval("a[href]", els =>
-    els.map(a => a.getAttribute("href")).filter(Boolean)
-  );
-
-  const pages = new Set();
-
-  for (const href of hrefs) {
-    try {
-      const url = new URL(href, base);
-      if (
-        url.hostname === domain &&
-        patterns.some(p => url.pathname.toLowerCase().includes(p))
-      ) {
-        pages.add(url.href);
-      }
-    } catch {}
+    saved++;
+    emails += item.emails.length;
   }
 
-  return pages.size ? Array.from(pages) : [baseUrl];
+  return { results: saved, emails };
 }
 
-async function collectDetailLinks(page, baseUrl) {
-  const base = new URL(baseUrl);
-  const domain = base.hostname;
+/* ======================
+   HELPERS
+====================== */
 
-  const hrefs = await page.$$eval("a[href]", els =>
-    els.map(a => a.getAttribute("href")).filter(Boolean)
-  );
-
-  const links = new Set();
-
-  for (const href of hrefs) {
-    try {
-      const url = new URL(href, base);
-      if (url.hostname === domain && url.pathname.length > 10) {
-        links.add(url.href);
-      }
-    } catch {}
+function extractFromJSON(data, collected) {
+  if (Array.isArray(data)) {
+    data.forEach(d => extractFromJSON(d, collected));
+    return;
   }
 
-  return Array.from(links);
+  if (typeof data !== "object" || !data) return;
+
+  const emails = [];
+  for (const val of Object.values(data)) {
+    if (typeof val === "string" && val.includes("@")) {
+      const found = val.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi);
+      if (found) emails.push(...found);
+    }
+  }
+
+  if (emails.length > 0) {
+    const key = data.id || data.companyId || JSON.stringify(data).slice(0, 50);
+    if (!collected.has(key)) {
+      collected.set(key, {
+        emails: Array.from(new Set(emails)),
+        source: data.website || data.url || null
+      });
+    }
+  }
+
+  Object.values(data).forEach(v => extractFromJSON(v, collected));
 }
 
-/* ======================
-   EXTRACTION
-====================== */
+async function clickNextIfExists(page) {
+  try {
+    const nextButton = await page.$(
+      'a:has-text("Next"), button:has-text("Next"), a:has-text(">"), a.next'
+    );
+    if (!nextButton) return false;
 
-function extractEmails(html) {
-  const regex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-  return Array.from(new Set(html.match(regex) || []));
+    await nextButton.click();
+    return true;
+  } catch {
+    return false;
+  }
 }
-
-async function extractMeta(page, html) {
-  return await page.evaluate(() => {
-    const text = document.body.innerText || "";
-    const phoneMatch = text.match(/\+?\d[\d\s\-().]{6,}/);
-
-    const websiteLink = Array.from(document.querySelectorAll("a[href^='http']"))
-      .map(a => a.getAttribute("href"))
-      .find(h => h && !h.includes("facebook") && !h.includes("linkedin"));
-
-    return {
-      company: document.querySelector("h1, h2")?.textContent?.trim() || null,
-      phone: phoneMatch ? phoneMatch[0] : null,
-      website: websiteLink || null
-    };
-  });
-}
-
-/* ======================
-   SAVE
-====================== */
-
-async function saveResult(job, url, emails, meta) {
-  await db.query(
-    `INSERT INTO mining_results
-     (job_id, organizer_id, source_url, emails)
-     VALUES ($1, $2, $3, $4)`,
-    [
-      job.id,
-      job.organizer_id,
-      url,
-      emails.length ? emails : []
-    ]
-  );
-}
-
-/* ======================
-   FINALIZE
-====================== */
 
 async function markCompleted(jobId, stats) {
   await db.query(
@@ -277,13 +224,6 @@ async function markCompleted(jobId, stats) {
   console.log(
     `✅ Job ${jobId} completed (results: ${stats.results}, emails: ${stats.emails})`
   );
-}
-
-async function intelligentScroll(page) {
-  for (let i = 0; i < 10; i++) {
-    await page.mouse.wheel(0, 2000);
-    await page.waitForTimeout(SCROLL_DELAY_MS);
-  }
 }
 
 function shutdown() {
