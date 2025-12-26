@@ -1,12 +1,11 @@
 /**
- * Liffy FINAL Hybrid Auto Mining Worker
+ * Liffy FINAL Hybrid Auto Mining Worker (V2.1)
  *
- * Core principles:
- * - User selects NOTHING
- * - XHR interception is PRIMARY source
- * - Pagination + Scroll are used to trigger XHR calls
- * - DOM parsing is secondary fallback
- * - Deterministic, limited, production-safe
+ * Improvements:
+ * - XHR interception + pagination + scroll
+ * - Browser context isolation per job
+ * - Email regex cleanup (no images / @2x)
+ * - Initial wait for heavy JS sites
  */
 
 const db = require("./db");
@@ -26,7 +25,7 @@ let shuttingDown = false;
 ====================== */
 
 async function startWorker() {
-  console.log("🚀 Liffy Mining Worker started (FINAL Hybrid)");
+  console.log("🚀 Liffy Mining Worker started (FINAL Hybrid v2.1)");
 
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
@@ -98,7 +97,12 @@ async function runHybridMiner(job) {
     ]
   });
 
-  const page = await browser.newPage();
+  // 🔒 Context isolation
+  const context = await browser.newContext({
+    viewport: { width: 1920, height: 1080 }
+  });
+
+  const page = await context.newPage();
   const collected = new Map();
 
   /* ---- XHR INTERCEPTOR ---- */
@@ -118,6 +122,9 @@ async function runHybridMiner(job) {
     console.log(`🌐 Navigating to ${job.input}`);
     await page.goto(job.input, { waitUntil: "networkidle", timeout: 60000 });
 
+    // ⏳ Initial wait for heavy JS sites
+    await page.waitForTimeout(2500);
+
     for (let pageIndex = 1; pageIndex <= MAX_LIST_PAGES; pageIndex++) {
       console.log(`📄 Triggering page ${pageIndex}`);
 
@@ -127,7 +134,7 @@ async function runHybridMiner(job) {
         await page.waitForTimeout(SCROLL_DELAY_MS);
       }
 
-      // Try "Next" pagination if exists
+      // Try pagination
       const hasNext = await clickNextIfExists(page);
       if (!hasNext) break;
 
@@ -179,7 +186,20 @@ function extractFromJSON(data, collected) {
   for (const val of Object.values(data)) {
     if (typeof val === "string" && val.includes("@")) {
       const found = val.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi);
-      if (found) emails.push(...found);
+      if (found) {
+        found.forEach(e => {
+          const lower = e.toLowerCase();
+          if (
+            !lower.endsWith(".png") &&
+            !lower.endsWith(".jpg") &&
+            !lower.endsWith(".jpeg") &&
+            !lower.endsWith(".svg") &&
+            !lower.includes("@2x")
+          ) {
+            emails.push(e);
+          }
+        });
+      }
     }
   }
 
