@@ -1,21 +1,17 @@
 /**
- * LIFFY – LEGACY EXPO WORKER (EMAIL OPTIONAL)
- *
- * Key rule:
- * - Email is OPTIONAL
- * - Exhibitor presence = valid result
- * - Pagination & crawl NEVER stop because of missing email
+ * LIFFY – DEBUG EXPO WORKER
+ * Purpose: Observe DOM behavior on Big5 Nigeria
+ * Email optional, full crawl logging enabled
  */
 
 const db = require("./db");
 const { chromium } = require("playwright");
 
 const POLL_INTERVAL_MS = 5000;
-const MAX_LIST_PAGES = 10;
-const MAX_DETAIL_PAGES = 300;
-const SCROLL_ROUNDS = 12;
+const MAX_LIST_PAGES = 5;     // Debug için düşük
+const SCROLL_ROUNDS = 8;
 const SCROLL_DELAY_MS = 800;
-const PAGE_DELAY_MS = 1200;
+const PAGE_DELAY_MS = 1500;
 
 let shuttingDown = false;
 
@@ -24,7 +20,7 @@ let shuttingDown = false;
 ====================== */
 
 async function startWorker() {
-  console.log("🚀 Liffy Worker started (Email-Optional Mode)");
+  console.log("🧪 Liffy DEBUG Worker started");
 
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
@@ -33,7 +29,7 @@ async function startWorker() {
     try {
       await processNextJob();
     } catch (err) {
-      console.error("Worker error:", err.message);
+      console.error("❌ Worker loop error:", err);
     }
     await sleep(POLL_INTERVAL_MS);
   }
@@ -60,7 +56,10 @@ async function processNextJob() {
     }
 
     const job = res.rows[0];
-    console.log(`⛏️ Processing job ${job.id}`);
+    console.log("\n==============================");
+    console.log(`⛏️ DEBUG JOB START: ${job.id}`);
+    console.log(`🌐 INPUT URL: ${job.input}`);
+    console.log("==============================");
 
     await client.query(
       `UPDATE mining_jobs
@@ -70,146 +69,123 @@ async function processNextJob() {
     );
     await client.query("COMMIT");
 
-    const stats = await runLegacyMiner(job);
-    await markCompleted(job.id, stats);
+    await runDebugMiner(job);
+
+    await markCompleted(job.id);
 
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("Job failed:", err.message);
+    console.error("❌ Job failed:", err);
   } finally {
     client.release();
   }
 }
 
 /* ======================
-   LEGACY MINER
+   DEBUG MINER
 ====================== */
 
-async function runLegacyMiner(job) {
+async function runDebugMiner(job) {
   const browser = await chromium.launch({
     headless: true,
     args: ["--no-sandbox", "--disable-dev-shm-usage"]
   });
 
-  const context = await browser.newContext({
-    viewport: { width: 1920, height: 1080 }
-  });
-
-  const page = await context.newPage();
-
-  const detailLinks = new Set();
-  let visited = 0;
-  let emailCount = 0;
+  const page = await browser.newPage();
 
   try {
-    /* -------- LISTING PAGES -------- */
     for (let pageNum = 1; pageNum <= MAX_LIST_PAGES; pageNum++) {
       const listUrl = `${job.input}?page=${pageNum}`;
-      console.log(`📄 Listing page ${pageNum}: ${listUrl}`);
+      console.log(`\n📄 OPEN LIST PAGE ${pageNum}`);
+      console.log(`➡️ ${listUrl}`);
 
-      await page.goto(listUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+      await page.goto(listUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: 60000
+      });
 
+      await page.waitForTimeout(2000);
+
+      /* ---- DOM SNAPSHOT BEFORE SCROLL ---- */
+      const initialStats = await page.evaluate(() => {
+        return {
+          anchors: document.querySelectorAll("a").length,
+          hrefAnchors: document.querySelectorAll("a[href]").length,
+          bodyTextSample: document.body.innerText.slice(0, 300)
+        };
+      });
+
+      console.log("🔎 BEFORE SCROLL:");
+      console.log("   <a> count:", initialStats.anchors);
+      console.log("   <a href> count:", initialStats.hrefAnchors);
+      console.log("   body sample:", JSON.stringify(initialStats.bodyTextSample));
+
+      /* ---- SCROLL ---- */
       for (let i = 0; i < SCROLL_ROUNDS; i++) {
         await page.mouse.wheel(0, 2000);
         await page.waitForTimeout(SCROLL_DELAY_MS);
       }
 
-      const links = await extractDetailLinks(page);
-      if (links.length === 0) {
-        console.log("⚠️ No links on this page, stopping pagination");
-        break;
+      /* ---- DOM SNAPSHOT AFTER SCROLL ---- */
+      const afterScrollStats = await page.evaluate(() => {
+        const hrefs = Array.from(document.querySelectorAll("a[href]"))
+          .map(a => a.getAttribute("href"))
+          .slice(0, 20);
+
+        return {
+          anchors: document.querySelectorAll("a").length,
+          hrefAnchors: document.querySelectorAll("a[href]").length,
+          sampleHrefs: hrefs
+        };
+      });
+
+      console.log("🔎 AFTER SCROLL:");
+      console.log("   <a> count:", afterScrollStats.anchors);
+      console.log("   <a href> count:", afterScrollStats.hrefAnchors);
+      console.log("   sample hrefs:", afterScrollStats.sampleHrefs);
+
+      /* ---- EXHIBITOR-LIKE LINKS ---- */
+      const exhibitorLinks = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll("a[href]"))
+          .map(a => a.getAttribute("href"))
+          .filter(h =>
+            h &&
+            (h.includes("Exhibitor") ||
+             h.includes("exhibitor") ||
+             h.includes("company") ||
+             h.includes("profile"))
+          );
+      });
+
+      console.log("🔗 Exhibitor-like hrefs found:", exhibitorLinks.length);
+      console.log("   sample:", exhibitorLinks.slice(0, 10));
+
+      if (exhibitorLinks.length === 0) {
+        console.log("⚠️ NO exhibitor-like links on this page");
       }
 
-      links.forEach(l => detailLinks.add(l));
       await page.waitForTimeout(PAGE_DELAY_MS);
-    }
-
-    console.log(`🔗 Total detail pages: ${detailLinks.size}`);
-
-    /* -------- DETAIL PAGES -------- */
-    for (const link of detailLinks) {
-      if (visited >= MAX_DETAIL_PAGES) break;
-      visited++;
-
-      try {
-        console.log(`[${visited}/${detailLinks.size}] ${link}`);
-
-        await page.goto(link, { waitUntil: "domcontentloaded", timeout: 30000 });
-        await page.waitForTimeout(PAGE_DELAY_MS);
-
-        const html = await page.content();
-        const emails = extractEmails(html);
-        emailCount += emails.length;
-
-        // SAVE RESULT EVEN IF emails = []
-        await saveResult(job, link, emails);
-
-      } catch (err) {
-        console.log(`⚠️ Failed detail page: ${err.message}`);
-      }
     }
 
   } finally {
     await browser.close();
   }
-
-  return {
-    results: visited,
-    emails: emailCount
-  };
 }
 
 /* ======================
-   HELPERS
+   FINALIZE
 ====================== */
 
-async function extractDetailLinks(page) {
-  const links = await page.$$eval(
-    'a[href*="/Exhibitor/"], a[href*="ExbDetails"]',
-    els => els.map(e => e.href)
-  );
-  return Array.from(new Set(links));
-}
-
-function extractEmails(text) {
-  const regex = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
-  return Array.from(new Set(
-    (text.match(regex) || []).filter(e =>
-      !e.includes(".png") &&
-      !e.includes(".jpg") &&
-      !e.includes("@2x")
-    )
-  ));
-}
-
-async function saveResult(job, source, emails) {
-  await db.query(
-    `INSERT INTO mining_results
-     (job_id, organizer_id, source_url, emails)
-     VALUES ($1, $2, $3, $4)`,
-    [
-      job.id,
-      job.organizer_id,
-      source,
-      emails || []
-    ]
-  );
-}
-
-async function markCompleted(jobId, stats) {
+async function markCompleted(jobId) {
   await db.query(
     `UPDATE mining_jobs
      SET status='completed',
-         completed_at=NOW(),
-         total_found=$2,
-         total_emails_raw=$3
+         completed_at=NOW()
      WHERE id=$1`,
-    [jobId, stats.results, stats.emails]
+    [jobId]
   );
 
-  console.log(`✅ Job completed`);
-  console.log(`   Exhibitors visited: ${stats.results}`);
-  console.log(`   Emails found: ${stats.emails}`);
+  console.log("✅ DEBUG JOB COMPLETED");
 }
 
 function shutdown() {
@@ -220,6 +196,6 @@ function shutdown() {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 startWorker().catch(err => {
-  console.error("Fatal error:", err);
+  console.error("💥 Fatal error:", err);
   process.exit(1);
 });
