@@ -1,14 +1,14 @@
 /**
  * LIFFY – DEBUG EXPO WORKER
- * Purpose: Observe DOM behavior on Big5 Nigeria
- * Email optional, full crawl logging enabled
+ * STEP 1 FINAL: Block Detection + Deep Logging
+ * (Claude fixes applied)
  */
 
 const db = require("./db");
 const { chromium } = require("playwright");
 
 const POLL_INTERVAL_MS = 5000;
-const MAX_LIST_PAGES = 5;     // Debug için düşük
+const MAX_LIST_PAGES = 5;
 const SCROLL_ROUNDS = 8;
 const SCROLL_DELAY_MS = 800;
 const PAGE_DELAY_MS = 1500;
@@ -20,7 +20,7 @@ let shuttingDown = false;
 ====================== */
 
 async function startWorker() {
-  console.log("🧪 Liffy DEBUG Worker started");
+  console.log("🧪 Liffy DEBUG Worker started (BLOCK DETECTION FINAL)");
 
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
@@ -69,7 +69,23 @@ async function processNextJob() {
     );
     await client.query("COMMIT");
 
-    await runDebugMiner(job);
+    const blocked = await runDebugMiner(job);
+
+    if (blocked) {
+      console.log("🚫 BLOCK DETECTED – marking job as manual_required");
+
+      await db.query(
+        `UPDATE mining_jobs
+         SET manual_required = true,
+             manual_reason = 'blocked_source',
+             manual_started_at = NOW()
+         WHERE id = $1`,
+        [job.id]
+      );
+
+      console.log("🟡 Job left in RUNNING state for manual assist");
+      return;
+    }
 
     await markCompleted(job.id);
 
@@ -82,7 +98,7 @@ async function processNextJob() {
 }
 
 /* ======================
-   DEBUG MINER
+   DEBUG MINER + BLOCK DETECTION
 ====================== */
 
 async function runDebugMiner(job) {
@@ -93,32 +109,77 @@ async function runDebugMiner(job) {
 
   const page = await browser.newPage();
 
+  let blockSignals = {
+    http403: false,
+    forbiddenText: false,
+    zeroAnchorsBefore: false,
+    zeroAnchorsAfter: false,
+    cloudflare: false
+  };
+
   try {
     for (let pageNum = 1; pageNum <= MAX_LIST_PAGES; pageNum++) {
-      const listUrl = `${job.input}?page=${pageNum}`;
+
+      const listUrl =
+        pageNum === 1
+          ? job.input
+          : `${job.input}${job.input.includes("?") ? "&" : "?"}page=${pageNum}`;
+
       console.log(`\n📄 OPEN LIST PAGE ${pageNum}`);
       console.log(`➡️ ${listUrl}`);
 
-      await page.goto(listUrl, {
+      const response = await page.goto(listUrl, {
         waitUntil: "domcontentloaded",
         timeout: 60000
       });
 
+      /* ---- HTTP STATUS CHECK ---- */
+      if (response) {
+        const status = response.status();
+        if (status === 403 || status === 401) {
+          blockSignals.http403 = true;
+          console.log("🚨 HTTP STATUS BLOCK:", status);
+        }
+      }
+
       await page.waitForTimeout(2000);
 
-      /* ---- DOM SNAPSHOT BEFORE SCROLL ---- */
-      const initialStats = await page.evaluate(() => {
+      /* ---- BODY + CLOUDFLARE CHECK ---- */
+      const bodyStats = await page.evaluate(() => {
+        const text = document.body ? document.body.innerText : "";
         return {
-          anchors: document.querySelectorAll("a").length,
-          hrefAnchors: document.querySelectorAll("a[href]").length,
-          bodyTextSample: document.body.innerText.slice(0, 300)
+          sample: text.slice(0, 300),
+          hasCloudflare:
+            text.toLowerCase().includes("cloudflare") ||
+            document.querySelector(".cf-error-details") !== null
         };
       });
 
-      console.log("🔎 BEFORE SCROLL:");
-      console.log("   <a> count:", initialStats.anchors);
-      console.log("   <a href> count:", initialStats.hrefAnchors);
-      console.log("   body sample:", JSON.stringify(initialStats.bodyTextSample));
+      console.log("🧾 BODY SAMPLE:", JSON.stringify(bodyStats.sample));
+
+      if (
+        bodyStats.sample.includes("403") ||
+        bodyStats.sample.toLowerCase().includes("forbidden")
+      ) {
+        blockSignals.forbiddenText = true;
+        console.log("🚨 FORBIDDEN TEXT DETECTED IN BODY");
+      }
+
+      if (bodyStats.hasCloudflare) {
+        blockSignals.cloudflare = true;
+        console.log("🚨 CLOUDFLARE BLOCK PAGE DETECTED");
+      }
+
+      /* ---- DOM SNAPSHOT BEFORE SCROLL ---- */
+      const beforeScroll = await page.evaluate(() => {
+        return document.querySelectorAll("a").length;
+      });
+
+      console.log("🔎 BEFORE SCROLL <a> count:", beforeScroll);
+
+      if (beforeScroll === 0) {
+        blockSignals.zeroAnchorsBefore = true;
+      }
 
       /* ---- SCROLL ---- */
       for (let i = 0; i < SCROLL_ROUNDS; i++) {
@@ -127,41 +188,25 @@ async function runDebugMiner(job) {
       }
 
       /* ---- DOM SNAPSHOT AFTER SCROLL ---- */
-      const afterScrollStats = await page.evaluate(() => {
-        const hrefs = Array.from(document.querySelectorAll("a[href]"))
-          .map(a => a.getAttribute("href"))
-          .slice(0, 20);
-
-        return {
-          anchors: document.querySelectorAll("a").length,
-          hrefAnchors: document.querySelectorAll("a[href]").length,
-          sampleHrefs: hrefs
-        };
+      const afterScroll = await page.evaluate(() => {
+        return document.querySelectorAll("a").length;
       });
 
-      console.log("🔎 AFTER SCROLL:");
-      console.log("   <a> count:", afterScrollStats.anchors);
-      console.log("   <a href> count:", afterScrollStats.hrefAnchors);
-      console.log("   sample hrefs:", afterScrollStats.sampleHrefs);
+      console.log("🔎 AFTER SCROLL <a> count:", afterScroll);
 
-      /* ---- EXHIBITOR-LIKE LINKS ---- */
-      const exhibitorLinks = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll("a[href]"))
-          .map(a => a.getAttribute("href"))
-          .filter(h =>
-            h &&
-            (h.includes("Exhibitor") ||
-             h.includes("exhibitor") ||
-             h.includes("company") ||
-             h.includes("profile"))
-          );
-      });
+      if (afterScroll === 0) {
+        blockSignals.zeroAnchorsAfter = true;
+      }
 
-      console.log("🔗 Exhibitor-like hrefs found:", exhibitorLinks.length);
-      console.log("   sample:", exhibitorLinks.slice(0, 10));
+      /* ---- BLOCK DECISION ---- */
+      const signalCount = Object.values(blockSignals).filter(Boolean).length;
 
-      if (exhibitorLinks.length === 0) {
-        console.log("⚠️ NO exhibitor-like links on this page");
+      console.log("📊 BLOCK SIGNALS:", blockSignals);
+      console.log("📊 SIGNAL COUNT:", signalCount);
+
+      if (signalCount >= 2) {
+        console.log("⛔ BLOCK CONFIRMED (>=2 signals)");
+        return true;
       }
 
       await page.waitForTimeout(PAGE_DELAY_MS);
@@ -170,6 +215,9 @@ async function runDebugMiner(job) {
   } finally {
     await browser.close();
   }
+
+  console.log("✅ NO BLOCK DETECTED – site appears crawlable");
+  return false;
 }
 
 /* ======================
@@ -185,7 +233,7 @@ async function markCompleted(jobId) {
     [jobId]
   );
 
-  console.log("✅ DEBUG JOB COMPLETED");
+  console.log("✅ DEBUG JOB COMPLETED (NO BLOCK)");
 }
 
 function shutdown() {
