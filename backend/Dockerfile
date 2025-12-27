@@ -10,3 +10,5 @@ COPY . .
 
 ENV NODE_ENV=production
 
+# 👇 Worker entrypoint (ZORUNLU)
+CMD ["node", "worker.js"]
