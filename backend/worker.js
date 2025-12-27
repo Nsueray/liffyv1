@@ -1,36 +1,58 @@
 /**
  * LIFFY – DEBUG EXPO WORKER
- * STEP 1 FINAL: Block Detection + Deep Logging
- * (Claude fixes applied)
+ * STEP 1 FINAL (IDLE-SAFE):
+ * Block Detection + Deep Logging + Render Safe Loop
  */
 
 const db = require("./db");
 const { chromium } = require("playwright");
 
 const POLL_INTERVAL_MS = 5000;
+const HEARTBEAT_INTERVAL_MS = 30000;
+
 const MAX_LIST_PAGES = 5;
 const SCROLL_ROUNDS = 8;
 const SCROLL_DELAY_MS = 800;
 const PAGE_DELAY_MS = 1500;
 
+// ⚠️ Render-safe: worker ASLA kendi kendine kapanmaz
 let shuttingDown = false;
+
+/* ======================
+   HEARTBEAT (IDLE SAFE)
+====================== */
+
+setInterval(() => {
+  console.log("💓 Worker heartbeat – alive");
+}, HEARTBEAT_INTERVAL_MS);
+
+/* ======================
+   SIGNAL HANDLING
+====================== */
+
+// ⚠️ Background worker için SIGTERM = ignore
+process.on("SIGTERM", () => {
+  console.log("⚠️ SIGTERM received – ignored (background worker stays alive)");
+});
+
+process.on("SIGINT", () => {
+  console.log("⚠️ SIGINT received – ignored");
+});
 
 /* ======================
    WORKER LOOP
 ====================== */
 
 async function startWorker() {
-  console.log("🧪 Liffy DEBUG Worker started (BLOCK DETECTION FINAL)");
+  console.log("🧪 Liffy DEBUG Worker started (BLOCK DETECTION FINAL – IDLE SAFE)");
 
-  process.on("SIGTERM", shutdown);
-  process.on("SIGINT", shutdown);
-
-  while (!shuttingDown) {
+  while (true) {
     try {
       await processNextJob();
     } catch (err) {
       console.error("❌ Worker loop error:", err);
     }
+
     await sleep(POLL_INTERVAL_MS);
   }
 }
@@ -56,6 +78,7 @@ async function processNextJob() {
     }
 
     const job = res.rows[0];
+
     console.log("\n==============================");
     console.log(`⛏️ DEBUG JOB START: ${job.id}`);
     console.log(`🌐 INPUT URL: ${job.input}`);
@@ -67,6 +90,7 @@ async function processNextJob() {
        WHERE id=$1`,
       [job.id]
     );
+
     await client.query("COMMIT");
 
     const blocked = await runDebugMiner(job);
@@ -236,14 +260,8 @@ async function markCompleted(jobId) {
   console.log("✅ DEBUG JOB COMPLETED (NO BLOCK)");
 }
 
-function shutdown() {
-  console.log("🛑 Worker shutting down");
-  shuttingDown = true;
-}
-
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 startWorker().catch(err => {
   console.error("💥 Fatal error:", err);
-  process.exit(1);
 });
