@@ -1,11 +1,6 @@
-/**
- * LIFFY – DEBUG EXPO WORKER
- * STEP 1 FINAL (IDLE-SAFE):
- * Block Detection + Deep Logging + Render Safe Loop
- */
-
 const db = require("./db");
 const { chromium } = require("playwright");
+const { sendEmail } = require("./mailer");
 
 const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 30000;
@@ -98,14 +93,39 @@ async function processNextJob() {
     if (blocked) {
       console.log("🚫 BLOCK DETECTED – marking job as manual_required");
 
-      await db.query(
+      // 1) Update ONLY if manual_started_at is NULL
+      // This prevents multiple emails if the job is picked up again
+      const updateRes = await db.query(
         `UPDATE mining_jobs
          SET manual_required = true,
              manual_reason = 'blocked_source',
              manual_started_at = NOW()
-         WHERE id = $1`,
+         WHERE id = $1 AND manual_started_at IS NULL
+         RETURNING id`,
         [job.id]
       );
+
+      // 2) Send email ONLY if the update actually happened (first time)
+      if (updateRes.rows.length > 0) {
+        const token = process.env.MANUAL_MINER_TOKEN;
+        const command = `node mine.js \\
+  --job-id ${job.id} \\
+  --api https://api.liffy.app/api \\
+  --token ${token}`;
+
+        try {
+          await sendEmail({
+            to: "suer@elan-expo.com",
+            subject: `Manual Mining Required for Job #${job.id}`,
+            text: command
+          });
+          console.log("📧 Admin email sent with manual command.");
+        } catch (emailErr) {
+          console.error("❌ Failed to send admin email:", emailErr);
+        }
+      } else {
+        console.log("📧 Email skipped (already sent/marked).");
+      }
 
       console.log("🟡 Job left in RUNNING state for manual assist");
       return;
