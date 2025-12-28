@@ -10,9 +10,6 @@ const SCROLL_ROUNDS = 8;
 const SCROLL_DELAY_MS = 800;
 const PAGE_DELAY_MS = 1500;
 
-// ⚠️ Render-safe: worker ASLA kendi kendine kapanmaz
-let shuttingDown = false;
-
 /* ======================
    HEARTBEAT (IDLE SAFE)
 ====================== */
@@ -25,9 +22,8 @@ setInterval(() => {
    SIGNAL HANDLING
 ====================== */
 
-// ⚠️ Background worker için SIGTERM = ignore
 process.on("SIGTERM", () => {
-  console.log("⚠️ SIGTERM received – ignored (background worker stays alive)");
+  console.log("⚠️ SIGTERM received – ignored");
 });
 
 process.on("SIGINT", () => {
@@ -47,7 +43,6 @@ async function startWorker() {
     } catch (err) {
       console.error("❌ Worker loop error:", err);
     }
-
     await sleep(POLL_INTERVAL_MS);
   }
 }
@@ -91,10 +86,8 @@ async function processNextJob() {
     const blocked = await runDebugMiner(job);
 
     if (blocked) {
-      console.log("🚫 BLOCK DETECTED – marking job as manual_required");
+      console.log("🚫 BLOCK DETECTED – manual assist required");
 
-      // 1) Update ONLY if manual_started_at is NULL
-      // This prevents multiple emails if the job is picked up again
       const updateRes = await db.query(
         `UPDATE mining_jobs
          SET manual_required = true,
@@ -105,29 +98,35 @@ async function processNextJob() {
         [job.id]
       );
 
-      // 2) Send email ONLY if the update actually happened (first time)
       if (updateRes.rows.length > 0) {
         const token = process.env.MANUAL_MINER_TOKEN;
-        const command = `node mine.js \\
-  --job-id ${job.id} \\
-  --api https://api.liffy.app/api \\
-  --token ${token}`;
 
-        try {
-          await sendEmail({
-            to: "suer@elan-expo.com",
-            subject: `Manual Mining Required for Job #${job.id}`,
-            text: command
-          });
-          console.log("📧 Admin email sent with manual command.");
-        } catch (emailErr) {
-          console.error("❌ Failed to send admin email:", emailErr);
+        if (!token) {
+          console.error("❌ MANUAL_MINER_TOKEN is NOT set. Email skipped.");
+        } else {
+          const command = [
+            "node mine.js \\",
+            `  --job-id ${job.id} \\`,
+            "  --api https://api.liffy.app/api \\",
+            `  --token ${token}`
+          ].join("\n");
+
+          try {
+            await sendEmail({
+              to: "suer@elan-expo.com",
+              subject: `Manual Mining Required for Job ${job.id}`,
+              text: command
+            });
+            console.log("📧 Manual mining email sent.");
+          } catch (err) {
+            console.error("❌ Failed to send manual mining email:", err);
+          }
         }
       } else {
-        console.log("📧 Email skipped (already sent/marked).");
+        console.log("📧 Email already sent earlier, skipping.");
       }
 
-      console.log("🟡 Job left in RUNNING state for manual assist");
+      console.log("🟡 Job left RUNNING for manual assist");
       return;
     }
 
@@ -142,7 +141,7 @@ async function processNextJob() {
 }
 
 /* ======================
-   DEBUG MINER + BLOCK DETECTION
+   DEBUG MINER
 ====================== */
 
 async function runDebugMiner(job) {
@@ -163,104 +162,54 @@ async function runDebugMiner(job) {
 
   try {
     for (let pageNum = 1; pageNum <= MAX_LIST_PAGES; pageNum++) {
-
-      const listUrl =
+      const url =
         pageNum === 1
           ? job.input
           : `${job.input}${job.input.includes("?") ? "&" : "?"}page=${pageNum}`;
 
-      console.log(`\n📄 OPEN LIST PAGE ${pageNum}`);
-      console.log(`➡️ ${listUrl}`);
+      console.log(`📄 OPEN LIST PAGE ${pageNum}: ${url}`);
 
-      const response = await page.goto(listUrl, {
+      const response = await page.goto(url, {
         waitUntil: "domcontentloaded",
         timeout: 60000
       });
 
-      /* ---- HTTP STATUS CHECK ---- */
-      if (response) {
-        const status = response.status();
-        if (status === 403 || status === 401) {
-          blockSignals.http403 = true;
-          console.log("🚨 HTTP STATUS BLOCK:", status);
-        }
+      if (response && [401, 403].includes(response.status())) {
+        blockSignals.http403 = true;
       }
 
       await page.waitForTimeout(2000);
 
-      /* ---- BODY + CLOUDFLARE CHECK ---- */
-      const bodyStats = await page.evaluate(() => {
-        const text = document.body ? document.body.innerText : "";
+      const stats = await page.evaluate(() => {
+        const text = document.body?.innerText || "";
         return {
-          sample: text.slice(0, 300),
-          hasCloudflare:
+          text,
+          cloudflare:
             text.toLowerCase().includes("cloudflare") ||
-            document.querySelector(".cf-error-details") !== null
+            document.querySelector(".cf-error-details") !== null,
+          anchors: document.querySelectorAll("a").length
         };
       });
 
-      console.log("🧾 BODY SAMPLE:", JSON.stringify(bodyStats.sample));
-
-      if (
-        bodyStats.sample.includes("403") ||
-        bodyStats.sample.toLowerCase().includes("forbidden")
-      ) {
+      if (stats.text.toLowerCase().includes("forbidden")) {
         blockSignals.forbiddenText = true;
-        console.log("🚨 FORBIDDEN TEXT DETECTED IN BODY");
       }
-
-      if (bodyStats.hasCloudflare) {
-        blockSignals.cloudflare = true;
-        console.log("🚨 CLOUDFLARE BLOCK PAGE DETECTED");
-      }
-
-      /* ---- DOM SNAPSHOT BEFORE SCROLL ---- */
-      const beforeScroll = await page.evaluate(() => {
-        return document.querySelectorAll("a").length;
-      });
-
-      console.log("🔎 BEFORE SCROLL <a> count:", beforeScroll);
-
-      if (beforeScroll === 0) {
+      if (stats.cloudflare) blockSignals.cloudflare = true;
+      if (stats.anchors === 0) {
         blockSignals.zeroAnchorsBefore = true;
-      }
-
-      /* ---- SCROLL ---- */
-      for (let i = 0; i < SCROLL_ROUNDS; i++) {
-        await page.mouse.wheel(0, 2000);
-        await page.waitForTimeout(SCROLL_DELAY_MS);
-      }
-
-      /* ---- DOM SNAPSHOT AFTER SCROLL ---- */
-      const afterScroll = await page.evaluate(() => {
-        return document.querySelectorAll("a").length;
-      });
-
-      console.log("🔎 AFTER SCROLL <a> count:", afterScroll);
-
-      if (afterScroll === 0) {
         blockSignals.zeroAnchorsAfter = true;
       }
 
-      /* ---- BLOCK DECISION ---- */
-      const signalCount = Object.values(blockSignals).filter(Boolean).length;
-
-      console.log("📊 BLOCK SIGNALS:", blockSignals);
-      console.log("📊 SIGNAL COUNT:", signalCount);
-
-      if (signalCount >= 2) {
-        console.log("⛔ BLOCK CONFIRMED (>=2 signals)");
+      if (Object.values(blockSignals).filter(Boolean).length >= 2) {
         return true;
       }
 
       await page.waitForTimeout(PAGE_DELAY_MS);
     }
-
   } finally {
     await browser.close();
   }
 
-  console.log("✅ NO BLOCK DETECTED – site appears crawlable");
   return false;
 }
 
@@ -271,17 +220,13 @@ async function runDebugMiner(job) {
 async function markCompleted(jobId) {
   await db.query(
     `UPDATE mining_jobs
-     SET status='completed',
-         completed_at=NOW()
+     SET status='completed', completed_at=NOW()
      WHERE id=$1`,
     [jobId]
   );
-
-  console.log("✅ DEBUG JOB COMPLETED (NO BLOCK)");
+  console.log("✅ Job completed");
 }
 
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-startWorker().catch(err => {
-  console.error("💥 Fatal error:", err);
-});
+startWorker().catch(err => console.error("💥 Fatal error:", err));
