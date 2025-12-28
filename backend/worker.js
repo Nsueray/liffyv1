@@ -108,7 +108,8 @@ async function processNextJob() {
             "node mine.js \\",
             `  --job-id ${job.id} \\`,
             "  --api https://api.liffy.app/api \\",
-            `  --token ${token}`
+            `  --token ${token} \\`,
+            `  --input ${job.input}`
           ].join("\n");
 
           try {
