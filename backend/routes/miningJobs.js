@@ -3,8 +3,31 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
+
+// --- MULTER AYARLARI (Dosya Yükleme) ---
+// Uploads klasörünü oluştur (Eğer yoksa)
+const uploadDir = path.join(__dirname, '../../uploads');
+if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadDir)
+  },
+  filename: function (req, file, cb) {
+    // Dosya adını benzersiz yap: timestamp-orijinalIsim
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
+    cb(null, uniqueSuffix + '-' + file.originalname)
+  }
+});
+
+const upload = multer({ storage: storage });
 
 /**
  * Auth middleware
@@ -53,17 +76,28 @@ function validateJobId(req, res, next) {
 
 /**
  * POST /api/mining/jobs
- * Create job (NO auto-run)
+ * Hem JSON (URL) hem Multipart (Dosya) kabul eder
  */
-router.post('/api/mining/jobs', authRequired, async (req, res) => {
+router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req, res) => {
   try {
     const organizer_id = req.auth.organizer_id;
-    const { type, input, name, strategy, site_profile, config } = req.body;
+    
+    // Body'den verileri al
+    let { type, input, name, strategy, site_profile, config } = req.body;
 
-    if (!type || !input) {
+    // Dosya Yüklendiyse (Multipart)
+    if (req.file) {
+        type = 'file';
+        input = req.file.filename; // Diske kaydedilen dosya adı
+        name = name || req.file.originalname; // İsim verilmediyse dosya adını kullan
+        strategy = 'auto'; // Dosyalar için her zaman auto
+    }
+
+    // Validation
+    if (!type || (!input && !req.file)) {
       return res.status(400).json({
         error: 'Missing required fields',
-        details: "Both 'type' and 'input' are required",
+        details: "Both 'type' and 'input' (or 'file') are required",
       });
     }
 
@@ -73,6 +107,11 @@ router.post('/api/mining/jobs', authRequired, async (req, res) => {
         error: 'Invalid type',
         details: `Type must be one of: ${allowedTypes.join(', ')}`,
       });
+    }
+
+    // Config form-data içinde string olarak gelebilir, parse et
+    if (typeof config === 'string') {
+        try { config = JSON.parse(config); } catch(e) { config = {} }
     }
 
     const result = await db.query(

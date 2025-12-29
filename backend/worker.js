@@ -1,6 +1,7 @@
 const db = require("./db");
 const { sendEmail } = require("./mailer");
 const { runMiningTest } = require("./services/miningWorker");
+const { runFileMining } = require("./services/fileMiner"); // YENİ EKLENDİ
 
 const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 30000;
@@ -30,7 +31,7 @@ process.on("SIGINT", () => {
 ====================== */
 
 async function startWorker() {
-  console.log("🧪 Liffy Worker started (INTEGRATED SMART MINER v2)");
+  console.log("🧪 Liffy Worker started (URL + FILE MINER)");
 
   while (true) {
     try {
@@ -44,7 +45,7 @@ async function startWorker() {
 
 async function processNextJob() {
   const client = await db.connect();
-  let currentJobId = null; // ID'yi burada tutacağız ki catch bloğunda erişebilelim
+  let currentJobId = null;
 
   try {
     await client.query("BEGIN");
@@ -65,10 +66,11 @@ async function processNextJob() {
     }
 
     const job = res.rows[0];
-    currentJobId = job.id; // ID'yi dışarıya kaydet
+    currentJobId = job.id;
 
     console.log("\n==============================");
     console.log(`⛏️ JOB PICKED: ${job.id}`);
+    console.log(`📂 TYPE: ${job.type}`);
     console.log(`🌐 TARGET: ${job.input}`);
     console.log("==============================");
 
@@ -82,26 +84,28 @@ async function processNextJob() {
 
     await client.query("COMMIT");
 
-    // 3. SERVİSİ ÇAĞIR
-    await runMiningTest(job);
+    // 3. TÜR KONTROLÜ VE YÖNLENDİRME (ROUTING)
+    if (job.type === 'file' || job.type === 'pdf' || job.type === 'excel' || job.type === 'word' || job.type === 'other') {
+        // Dosya Madenciliği
+        await runFileMining(job);
+    } else {
+        // URL Madenciliği (Web)
+        await runMiningTest(job);
+    }
 
     console.log("✅ Worker: Job execution finished normally.");
 
   } catch (err) {
     await client.query("ROLLBACK");
 
-    // 4. BLOK YAKALAMA (Manual Assist)
+    // 4. BLOK YAKALAMA (Manual Assist - Sadece URL için)
     if (err.message && err.message.includes("BLOCK_DETECTED")) {
       console.log("🚫 BLOCK DETECTED (via Service) – Triggering Manual Assist...");
-      // DÜZELTME BURADA: 'res' yerine 'currentJobId' kullanıyoruz
       if (currentJobId) {
         await handleManualAssist(currentJobId);
-      } else {
-        console.error("❌ Critical: Block detected but Job ID is missing.");
       }
     } else {
       console.error("❌ Worker Job Failed:", err.message);
-      // Job ID varsa failed olarak işaretleyelim ki asılı kalmasın
       if (currentJobId) {
          try {
            await db.query("UPDATE mining_jobs SET status='failed', error=$1 WHERE id=$2", [err.message, currentJobId]);
@@ -135,7 +139,7 @@ async function handleManualAssist(jobId) {
     [jobId]
   );
 
-  // Email gönder (Sadece ilk seferde - manual_started_at NULL ise)
+  // Email gönder (Sadece ilk seferde)
   if (updateRes.rows.length > 0) {
     const token = process.env.MANUAL_MINER_TOKEN;
     if (token) {
@@ -157,8 +161,6 @@ async function handleManualAssist(jobId) {
       } catch (emailErr) {
         console.error("❌ Failed to send email:", emailErr);
       }
-    } else {
-        console.error("❌ Email skipped: MANUAL_MINER_TOKEN env var is missing!");
     }
   } else {
       console.log("ℹ️ Manual assist already triggered for this job, skipping email.");
