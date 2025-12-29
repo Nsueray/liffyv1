@@ -92,32 +92,6 @@ function mapResultRow(row) {
 
 /**
  * POST /api/mining/jobs/:id/results
- * Body:
- * {
- * results: [
- * {
- * url,
- * companyName,
- * contactName,
- * jobTitle,
- * phone,
- * country,
- * website,
- * emails: [...]
- * // diğer alanlar raw içine atılabilir
- * },
- * ...
- * ],
- * summary: {
- * total_exhibitors,
- * total_results,
- * total_emails,
- * exhibitors_with_emails,
- * websites_found,
- * contacts_found,
- * time_minutes
- * }
- * }
  */
 router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId, async (req, res) => {
   const jobId = req.params.id;

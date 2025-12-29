@@ -1,14 +1,10 @@
 const db = require("./db");
-const { chromium } = require("playwright");
 const { sendEmail } = require("./mailer");
+// Yeni servisi dahil ediyoruz
+const { runMiningTest } = require("./services/miningWorker");
 
 const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 30000;
-
-const MAX_LIST_PAGES = 5;
-const SCROLL_ROUNDS = 8;
-const SCROLL_DELAY_MS = 800;
-const PAGE_DELAY_MS = 1500;
 
 /* ======================
    HEARTBEAT (IDLE SAFE)
@@ -35,7 +31,7 @@ process.on("SIGINT", () => {
 ====================== */
 
 async function startWorker() {
-  console.log("🧪 Liffy DEBUG Worker started (BLOCK DETECTION FINAL – IDLE SAFE)");
+  console.log("🧪 Liffy Worker started (INTEGRATED SMART MINER)");
 
   while (true) {
     try {
@@ -53,6 +49,7 @@ async function processNextJob() {
   try {
     await client.query("BEGIN");
 
+    // 1. Pending işi al
     const res = await client.query(`
       SELECT *
       FROM mining_jobs
@@ -70,10 +67,11 @@ async function processNextJob() {
     const job = res.rows[0];
 
     console.log("\n==============================");
-    console.log(`⛏️ DEBUG JOB START: ${job.id}`);
-    console.log(`🌐 INPUT URL: ${job.input}`);
+    console.log(`⛏️ JOB PICKED: ${job.id}`);
+    console.log(`🌐 TARGET: ${job.input}`);
     console.log("==============================");
 
+    // 2. Running olarak işaretle
     await client.query(
       `UPDATE mining_jobs
        SET status='running', started_at=NOW(), error=NULL
@@ -83,149 +81,73 @@ async function processNextJob() {
 
     await client.query("COMMIT");
 
-    const blocked = await runDebugMiner(job);
+    // 3. SERVİSİ ÇAĞIR (Asıl İş Burada)
+    // runMiningTest artık hem kontrol ediyor hem de topluyor.
+    await runMiningTest(job);
 
-    if (blocked) {
-      console.log("🚫 BLOCK DETECTED – manual assist required");
-
-      const updateRes = await db.query(
-        `UPDATE mining_jobs
-         SET manual_required = true,
-             manual_reason = 'blocked_source',
-             manual_started_at = NOW()
-         WHERE id = $1 AND manual_started_at IS NULL
-         RETURNING id`,
-        [job.id]
-      );
-
-      if (updateRes.rows.length > 0) {
-        const token = process.env.MANUAL_MINER_TOKEN;
-
-        if (!token) {
-          console.error("❌ MANUAL_MINER_TOKEN is NOT set. Email skipped.");
-        } else {
-          const command = [
-            "node mine.js \\",
-            `  --job-id ${job.id} \\`,
-            "  --api https://api.liffy.app/api \\",
-            `  --token ${token} \\`,
-            `  --input ${job.input}`
-          ].join("\n");
-
-          try {
-            await sendEmail({
-              to: "suer@elan-expo.com",
-              subject: `Manual Mining Required for Job ${job.id}`,
-              text: command
-            });
-            console.log("📧 Manual mining email sent.");
-          } catch (err) {
-            console.error("❌ Failed to send manual mining email:", err);
-          }
-        }
-      } else {
-        console.log("📧 Email already sent earlier, skipping.");
-      }
-
-      console.log("🟡 Job left RUNNING for manual assist");
-      return;
-    }
-
-    await markCompleted(job.id);
+    console.log("✅ Worker: Job execution finished normally.");
 
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("❌ Job failed:", err);
+
+    // 4. BLOK YAKALAMA (Manual Assist)
+    if (err.message && err.message.includes("BLOCK_DETECTED")) {
+      console.log("🚫 BLOCK DETECTED (via Service) – Triggering Manual Assist...");
+      await handleManualAssist(err.jobId || res?.rows[0]?.id);
+    } else {
+      console.error("❌ Worker Job Failed:", err.message);
+    }
   } finally {
     client.release();
   }
 }
 
-/* ======================
-   DEBUG MINER
-====================== */
+// Blok durumunda çalışacak Manual Assist fonksiyonu
+async function handleManualAssist(jobId) {
+  if (!jobId) return;
+  
+  // Job verisini çek (Input lazım)
+  const jobRes = await db.query("SELECT * FROM mining_jobs WHERE id = $1", [jobId]);
+  if (jobRes.rows.length === 0) return;
+  const job = jobRes.rows[0];
 
-async function runDebugMiner(job) {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox", "--disable-dev-shm-usage"]
-  });
-
-  const page = await browser.newPage();
-
-  let blockSignals = {
-    http403: false,
-    forbiddenText: false,
-    zeroAnchorsBefore: false,
-    zeroAnchorsAfter: false,
-    cloudflare: false
-  };
-
-  try {
-    for (let pageNum = 1; pageNum <= MAX_LIST_PAGES; pageNum++) {
-      const url =
-        pageNum === 1
-          ? job.input
-          : `${job.input}${job.input.includes("?") ? "&" : "?"}page=${pageNum}`;
-
-      console.log(`📄 OPEN LIST PAGE ${pageNum}: ${url}`);
-
-      const response = await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: 60000
-      });
-
-      if (response && [401, 403].includes(response.status())) {
-        blockSignals.http403 = true;
-      }
-
-      await page.waitForTimeout(2000);
-
-      const stats = await page.evaluate(() => {
-        const text = document.body?.innerText || "";
-        return {
-          text,
-          cloudflare:
-            text.toLowerCase().includes("cloudflare") ||
-            document.querySelector(".cf-error-details") !== null,
-          anchors: document.querySelectorAll("a").length
-        };
-      });
-
-      if (stats.text.toLowerCase().includes("forbidden")) {
-        blockSignals.forbiddenText = true;
-      }
-      if (stats.cloudflare) blockSignals.cloudflare = true;
-      if (stats.anchors === 0) {
-        blockSignals.zeroAnchorsBefore = true;
-        blockSignals.zeroAnchorsAfter = true;
-      }
-
-      if (Object.values(blockSignals).filter(Boolean).length >= 2) {
-        return true;
-      }
-
-      await page.waitForTimeout(PAGE_DELAY_MS);
-    }
-  } finally {
-    await browser.close();
-  }
-
-  return false;
-}
-
-/* ======================
-   FINALIZE
-====================== */
-
-async function markCompleted(jobId) {
-  await db.query(
+  // Manual required olarak işaretle
+  const updateRes = await db.query(
     `UPDATE mining_jobs
-     SET status='completed', completed_at=NOW()
-     WHERE id=$1`,
+     SET manual_required = true,
+         manual_reason = 'blocked_source',
+         manual_started_at = NOW()
+     WHERE id = $1 AND manual_started_at IS NULL
+     RETURNING id`,
     [jobId]
   );
-  console.log("✅ Job completed");
+
+  // Email gönder (Sadece ilk seferde)
+  if (updateRes.rows.length > 0) {
+    const token = process.env.MANUAL_MINER_TOKEN;
+    if (token) {
+      const command = [
+        "node mine.js \\",
+        `  --job-id ${job.id} \\`,
+        "  --api https://api.liffy.app/api \\",
+        `  --token ${token} \\`,
+        `  --input "${job.input}"`
+      ].join("\n");
+
+      try {
+        await sendEmail({
+          to: "suer@elan-expo.com",
+          subject: `Manual Mining Required for Job ${job.id}`,
+          text: command
+        });
+        console.log("📧 Manual mining email sent.");
+      } catch (emailErr) {
+        console.error("❌ Failed to send email:", emailErr);
+      }
+    }
+  }
+  
+  console.log("🟡 Job left in RUNNING state for manual assist");
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
