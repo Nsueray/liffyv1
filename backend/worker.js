@@ -1,6 +1,5 @@
 const db = require("./db");
 const { sendEmail } = require("./mailer");
-// Yeni servisi dahil ediyoruz
 const { runMiningTest } = require("./services/miningWorker");
 
 const POLL_INTERVAL_MS = 5000;
@@ -31,7 +30,7 @@ process.on("SIGINT", () => {
 ====================== */
 
 async function startWorker() {
-  console.log("🧪 Liffy Worker started (INTEGRATED SMART MINER)");
+  console.log("🧪 Liffy Worker started (INTEGRATED SMART MINER v2)");
 
   while (true) {
     try {
@@ -45,6 +44,7 @@ async function startWorker() {
 
 async function processNextJob() {
   const client = await db.connect();
+  let currentJobId = null; // ID'yi burada tutacağız ki catch bloğunda erişebilelim
 
   try {
     await client.query("BEGIN");
@@ -65,6 +65,7 @@ async function processNextJob() {
     }
 
     const job = res.rows[0];
+    currentJobId = job.id; // ID'yi dışarıya kaydet
 
     console.log("\n==============================");
     console.log(`⛏️ JOB PICKED: ${job.id}`);
@@ -81,8 +82,7 @@ async function processNextJob() {
 
     await client.query("COMMIT");
 
-    // 3. SERVİSİ ÇAĞIR (Asıl İş Burada)
-    // runMiningTest artık hem kontrol ediyor hem de topluyor.
+    // 3. SERVİSİ ÇAĞIR
     await runMiningTest(job);
 
     console.log("✅ Worker: Job execution finished normally.");
@@ -93,9 +93,20 @@ async function processNextJob() {
     // 4. BLOK YAKALAMA (Manual Assist)
     if (err.message && err.message.includes("BLOCK_DETECTED")) {
       console.log("🚫 BLOCK DETECTED (via Service) – Triggering Manual Assist...");
-      await handleManualAssist(err.jobId || res?.rows[0]?.id);
+      // DÜZELTME BURADA: 'res' yerine 'currentJobId' kullanıyoruz
+      if (currentJobId) {
+        await handleManualAssist(currentJobId);
+      } else {
+        console.error("❌ Critical: Block detected but Job ID is missing.");
+      }
     } else {
       console.error("❌ Worker Job Failed:", err.message);
+      // Job ID varsa failed olarak işaretleyelim ki asılı kalmasın
+      if (currentJobId) {
+         try {
+           await db.query("UPDATE mining_jobs SET status='failed', error=$1 WHERE id=$2", [err.message, currentJobId]);
+         } catch(e) { /* ignore secondary db error */ }
+      }
     }
   } finally {
     client.release();
@@ -111,6 +122,8 @@ async function handleManualAssist(jobId) {
   if (jobRes.rows.length === 0) return;
   const job = jobRes.rows[0];
 
+  console.log(`📧 Preparing manual assist email for job ${jobId}...`);
+
   // Manual required olarak işaretle
   const updateRes = await db.query(
     `UPDATE mining_jobs
@@ -122,7 +135,7 @@ async function handleManualAssist(jobId) {
     [jobId]
   );
 
-  // Email gönder (Sadece ilk seferde)
+  // Email gönder (Sadece ilk seferde - manual_started_at NULL ise)
   if (updateRes.rows.length > 0) {
     const token = process.env.MANUAL_MINER_TOKEN;
     if (token) {
@@ -140,11 +153,15 @@ async function handleManualAssist(jobId) {
           subject: `Manual Mining Required for Job ${job.id}`,
           text: command
         });
-        console.log("📧 Manual mining email sent.");
+        console.log("📧 Manual mining email SENT successfully.");
       } catch (emailErr) {
         console.error("❌ Failed to send email:", emailErr);
       }
+    } else {
+        console.error("❌ Email skipped: MANUAL_MINER_TOKEN env var is missing!");
     }
+  } else {
+      console.log("ℹ️ Manual assist already triggered for this job, skipping email.");
   }
   
   console.log("🟡 Job left in RUNNING state for manual assist");
