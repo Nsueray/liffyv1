@@ -247,4 +247,34 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
   return res.json({ job: newJob.rows[0] });
 });
 
+/**
+ * DELETE /api/mining/jobs/:id
+ */
+router.delete('/api/mining/jobs/:id', authRequired, validateJobId, async (req, res) => {
+  const { organizer_id } = req.auth;
+  const job_id = req.params.id;
+
+  try {
+    const checkRes = await db.query(
+      `SELECT id FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      [job_id, organizer_id]
+    );
+
+    if (checkRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    // Delete job (assuming CASCADE is set up in DB for results, otherwise results need deletion first)
+    await db.query(
+      `DELETE FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      [job_id, organizer_id]
+    );
+
+    return res.json({ success: true, message: 'Job deleted successfully' });
+  } catch (err) {
+    console.error('DELETE /mining/jobs/:id error:', err);
+    return res.status(500).json({ error: 'Failed to delete job' });
+  }
+});
+
 module.exports = router;
