@@ -5,122 +5,162 @@ const csv = require('csv-parser');
 const db = require('../db');
 const { Readable } = require('stream');
 
-// --- 1. AKILLI YARDIMCI FONKSİYONLAR ---
+// --- 1. AKILLI BLOK ANALİZİ (SMART BLOCK PARSER) ---
 
 /**
- * Metin içinde en çok geçen ülkeyi bulur.
+ * Bu fonksiyon metni satırlara böler ve her bir iletişim bilgisini (email)
+ * ait olduğu "paragraf bloğu" içinde analiz eder.
  */
-function detectCountry(text) {
-    if (!text) return null;
-    const searchSpace = text.slice(0, 5000).toLowerCase(); // Sadece ilk 5000 karaktere bak (Hız için)
-    
-    // Yaygın ülkeler listesi (Genişletilebilir)
-    const countries = [
-        { name: "Ghana", keywords: ["ghana", "accra", "kumasi"] },
-        { name: "Germany", keywords: ["germany", "deutschland", "berlin"] },
-        { name: "USA", keywords: ["usa", "united states", "america", "ny", "california"] },
-        { name: "UK", keywords: ["uk", "united kingdom", "london"] },
-        { name: "Turkey", keywords: ["turkey", "türkiye", "istanbul", "ankara"] },
-        { name: "Nigeria", keywords: ["nigeria", "lagos", "abuja"] },
-        { name: "France", keywords: ["france", "paris"] },
-        { name: "China", keywords: ["china", "beijing", "shanghai"] }
-    ];
+function extractEntitiesFromText(text) {
+    if (!text) return [];
 
-    for (const c of countries) {
-        if (c.keywords.some(k => searchSpace.includes(k))) {
-            return c.name; // İlk eşleşen ülkeyi döndür
-        }
-    }
-    return null; // Bulamazsa boş bırak
-}
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+    const results = [];
+    const usedEmails = new Set();
 
-/**
- * Email adresinden Şirket İsmi ve Web Sitesi türetir.
- * Örn: info@ghana.ahk.de -> Company: "Ghana Ahk", Web: "www.ghana.ahk.de"
- */
-function deriveCompanyInfo(email) {
-    try {
-        const domain = email.split('@')[1];
-        if (!domain) return { name: "Unknown Company", web: null };
+    // Regex Tanımları
+    const emailRegex = /[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/i;
+    // Telefon: + ile başlayan, 00 ile başlayan veya parantezli formatlar
+    const phoneRegex = /(?:\+|00)[1-9]\d{1,3}[\s\-\.]?(?:\(?\d{1,4}\)?[\s\-\.]?)?\d{3,4}[\s\-]?\d{3,4}/g;
+    const urlRegex = /(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i;
 
-        // Genel domainleri filtrele
-        const genericDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com'];
-        if (genericDomains.includes(domain)) {
-            return { name: "Individual / Freelancer", web: null };
-        }
-
-        // Web sitesi
-        const website = `www.${domain}`;
-
-        // Şirket ismi türetme (domaini temizle)
-        // ghana.ahk.de -> ghana ahk
-        let name = domain.split('.')[0]; 
-        if (domain.includes('.')) {
-            // Uzantıları at (com, org, net, co, gov)
-            const parts = domain.split('.');
-            // Son parçayı at, geri kalanı birleştir
-            if (parts.length > 2) {
-                 parts.pop(); // de gitti
-                 if(parts[parts.length-1].length <= 3) parts.pop(); // ahk.de -> ahk (veya co.uk -> co gider)
-            } else {
-                parts.pop(); // com gitti
-            }
-            name = parts.join(' ');
-        }
+    // Her satırı gez
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
         
-        // Baş harfleri büyüt
-        name = name.replace(/\b\w/g, l => l.toUpperCase());
+        // Bu satırda email var mı?
+        const emailMatch = line.match(emailRegex);
+        
+        if (emailMatch) {
+            const email = emailMatch[0].toLowerCase();
+            
+            // Gereksiz emailleri ele
+            const junk = ["example.com", "domain.com", "email.com", ".png", ".jpg", "jpeg"];
+            if (usedEmails.has(email) || junk.some(j => email.includes(j))) continue;
+            
+            usedEmails.add(email);
 
-        return { name: name, web: website };
-    } catch (e) {
-        return { name: "File Extraction", web: null };
+            // --- BAĞLAM ANALİZİ (CONTEXT ANALYSIS) ---
+            // Email bulduk. Şimdi bu emailin ait olduğu "bloğu" (çevresindeki 10 satır) inceleyelim.
+            // Yukarı doğru 5-6 satır, aşağı doğru 2-3 satır.
+            
+            let companyName = null;
+            let website = null;
+            let phone = null;
+            let country = null;
+
+            // 1. Şirket İsmini Bul (Yukarı doğru tarama)
+            // Genelde şirket ismi, iletişim bilgilerinin 1-5 satır üstündedir.
+            // Kriter: "Kısa", "Baş harfleri büyük" veya "Tamamı büyük" satırlar daha olasıdır.
+            for (let j = 1; j <= 6; j++) {
+                if (i - j < 0) break;
+                const prevLine = lines[i - j];
+                
+                // Eğer satır "Address:", "Tel:", "Email:" gibi teknik bir satırsa atla
+                if (/^(address|tel|phone|email|website|fax|location)/i.test(prevLine)) continue;
+
+                // Eğer satır çok uzunsa (açıklama metniyse) muhtemelen şirket ismi değildir, ama içinde geçebilir.
+                if (prevLine.length > 100) continue;
+
+                // Eğer parantez içinde kısaltma varsa (örn: "(CWSA)"), bunu şirket ismi olarak alabiliriz ama
+                // asıl hedefimiz ondan bir önceki satırdaki "Community Water..." olmalı.
+                
+                // Basit mantık: İlk anlamlı, teknik olmayan satırı aday olarak al.
+                // Eğer satırda "Agency", "Authority", "Commission", "Ltd", "Inc", "Company" geçiyorsa o kesin şirkettir.
+                if (/(Agency|Authority|Commission|Limited|Ltd|Inc|Company|Group|Corporation|Council|Department|Ministry)/i.test(prevLine)) {
+                    companyName = prevLine;
+                    break; 
+                }
+                
+                // Eğer henüz bulamadıysak ve satır "Title Case" (Baş Harfler Büyük) ise aday yap
+                // Örn: "The Ghana Standards Authority"
+                if (!companyName && /^[A-Z]/.test(prevLine) && prevLine.length > 3) {
+                    companyName = prevLine;
+                }
+            }
+
+            // 2. Web Sitesini Bul (Yakın çevrede tarama: i-2 ile i+3 arası)
+            for (let k = -2; k <= 3; k++) {
+                if (i + k < 0 || i + k >= lines.length) continue;
+                const nearLine = lines[i + k];
+                
+                // "Website:" veya "www." arıyoruz
+                if (nearLine.toLowerCase().includes('www.') || nearLine.toLowerCase().includes('http')) {
+                    const urlMatch = nearLine.match(urlRegex);
+                    if (urlMatch) {
+                        website = urlMatch[0]; // www.gsa.gov.gh
+                        // Eğer web sitesi http içermiyorsa ekle
+                        if (!website.startsWith('http')) website = 'http://' + website;
+                        break;
+                    }
+                }
+            }
+            // Eğer web sitesi bulunamadıysa emailden türet
+            if (!website) {
+                const domain = email.split('@')[1];
+                if (!['gmail.com', 'yahoo.com', 'hotmail.com'].includes(domain)) {
+                    website = 'www.' + domain;
+                }
+            }
+
+            // 3. Telefonu Bul (Yakın çevrede tarama)
+            for (let k = -3; k <= 3; k++) {
+                if (i + k < 0 || i + k >= lines.length) continue;
+                const nearLine = lines[i + k];
+                const phonesInLine = nearLine.match(phoneRegex);
+                if (phonesInLine) {
+                    // İlk geçerli telefonu al
+                    phone = phonesInLine[0];
+                    break;
+                }
+            }
+
+            // 4. Ülkeyi Bul (Yakın çevrede tarama)
+            const countryKeywords = ["Ghana", "Germany", "USA", "UK", "Turkey", "Nigeria", "France", "China"];
+            for (let k = -5; k <= 5; k++) {
+                 if (i + k < 0 || i + k >= lines.length) continue;
+                 const nearLine = lines[i + k];
+                 for (const c of countryKeywords) {
+                     if (nearLine.includes(c)) {
+                         country = c;
+                         break;
+                     }
+                 }
+                 if (country) break;
+            }
+
+            // Fallback: Şirket ismi hala yoksa, email domaininden türet (Eski yöntem)
+            if (!companyName) {
+                const domainParts = email.split('@')[1].split('.');
+                companyName = domainParts[0].charAt(0).toUpperCase() + domainParts[0].slice(1);
+            }
+
+            // Temizlik
+            if (companyName) {
+                // Parantez içindeki kısaltmaları temizle veya koru. 
+                // Örn: "The Ghana Standards Authority (GSA)" -> Olduğu gibi kalabilir.
+                companyName = companyName.replace(/Address:|Tel:|Email:|Website:/gi, '').trim();
+            }
+
+            results.push({
+                email: email,
+                companyName: companyName,
+                website: website,
+                phone: phone,
+                country: country
+            });
+        }
     }
+    return results;
 }
 
-function extractEmails(text) {
-  if (!text) return [];
-  const emails = new Set();
-  const regex = /[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
-  const matches = text.match(regex) || [];
-  matches.forEach(e => {
-    const clean = e.toLowerCase().trim();
-    const junk = ["example.com", "domain.com", "email.com", ".png", ".jpg", "jpeg", "srgb", "adobe", "image"];
-    // Email en az 5 karakter olsun ve içinde gereksiz kelimeler olmasın
-    if (clean.length > 5 && !junk.some(j => clean.includes(j))) emails.add(clean);
-  });
-  return Array.from(emails);
-}
-
-function extractPhones(text) {
-  if (!text) return [];
-  const phones = new Set();
-  // V3.1: Çok daha katı Regex.
-  // En az 10 rakam olmalı. Başında + veya ( olabilir.
-  // Tarihleri (2018, 2024) yakalamaması için boşluk/tire zorunluluğu ekleyebiliriz ama format çok değişken.
-  const regex = /(?:\+|00)[1-9](?:[\s\-\.]?\d){9,14}/g; 
-  
-  // Alternatif genel format: (0123) 456 7890
-  const regex2 = /\(?0\d{2,4}\)?[\s\-\.]?\d{3,4}[\s\-\.]?\d{3,4}/g;
-
-  const matches = [...(text.match(regex) || []), ...(text.match(regex2) || [])];
-
-  matches.forEach(p => {
-    const clean = p.trim();
-    // Temizle ve sayıları say
-    const digits = clean.replace(/\D/g, '');
-    // 20182019 gibi tarihleri elemek zor ama uzunluk kontrolü yapalım
-    if (digits.length >= 9 && digits.length <= 15) {
-        phones.add(clean);
-    }
-  });
-  return Array.from(phones);
-}
-
-// --- 2. PARSERS (AYNI KALDI) ---
+// --- 2. PARSERS (Buffer Fix Dahil) ---
 
 async function parsePdf(buffer) {
   try {
       const data = await pdf(buffer);
+      // PDF-Parse satır sonlarını bazen yutar, onları korumaya çalışalım.
+      // Ancak pdf-parse genelde \n verir.
       return data.text;
   } catch (error) {
       return null; 
@@ -136,8 +176,10 @@ async function parseExcel(buffer) {
   const workbook = xlsx.read(buffer, { type: 'buffer' });
   let text = "";
   workbook.SheetNames.forEach(sheetName => {
-    const rowObject = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName]);
-    text += JSON.stringify(rowObject) + " ";
+    // Excel'i satır satır metne çevir ki blok analizi çalışsın
+    const sheet = workbook.Sheets[sheetName];
+    const json = xlsx.utils.sheet_to_json(sheet, { header: 1 }); // Array of arrays
+    text += json.map(row => row.join(" ")).join("\n") + "\n";
   });
   return text;
 }
@@ -155,10 +197,10 @@ async function parseCsv(buffer) {
 }
 
 /**
- * 3. MAIN RUNNER (MANTIK DEĞİŞTİ)
+ * 3. MAIN RUNNER
  */
 async function runFileMining(job) {
-  console.log(`📂 Starting File Miner v4.0 (Smart Extract) for Job: ${job.id}`);
+  console.log(`📂 Starting File Miner v5.0 (Block Context) for Job: ${job.id}`);
 
   if (!job.file_data) {
     throw new Error("No file data found in database.");
@@ -182,6 +224,8 @@ async function runFileMining(job) {
   let content = "";
   let usedFallback = false;
 
+  console.log(`   📄 Parsing: ${filename} | Size: ${fileBuffer.length}`);
+
   // --- PARSING ---
   try {
     if (filename.endsWith('.pdf')) {
@@ -201,52 +245,26 @@ async function runFileMining(job) {
         content = fileBuffer.toString('utf8');
     }
 
-    // --- EXTRACTION ---
-    const emails = extractEmails(content);
-    const phones = extractPhones(content);
-    const detectedCountry = detectCountry(content); // Ülke Tespiti
+    // --- ENTITY EXTRACTION WITH CONTEXT ---
+    // Artık tüm metni tek bir Regex ile taramak yerine, satır satır analiz ediyoruz.
+    const extractedData = extractEntitiesFromText(content);
 
-    console.log(`   ✅ Analysis: ${emails.length} emails, ${phones.length} phones. Country: ${detectedCountry || 'Unknown'}`);
+    console.log(`   ✅ Analysis: Found ${extractedData.length} structured contacts.`);
 
     const results = [];
     
-    // --- AKILLI EŞLEŞTİRME (SMART MAPPING) ---
-    // Her email için şirket ve web sitesi türet
-    // Telefon numarasını "rastgele" atama. Eğer sadece 1 telefon varsa ve 10 email varsa, belki genel şirket telefonudur.
-    // Ama güvenli taraf için: Telefonu emaile bağlama, sadece "raw" datada tut veya ayrı kaydet.
-    // Şimdilik: Email varsa Company/Web türet, Country ekle.
-
-    // Genel telefon (varsa ilkini al, yoksa null)
-    const primaryPhone = phones.length === 1 ? phones[0] : null; 
-
-    if (emails.length > 0) {
-        emails.forEach(email => {
-            const info = deriveCompanyInfo(email);
-            results.push({
-                url: info.web || job.input, // Web sitesi varsa onu yaz, yoksa dosya adı kalsın
-                companyName: info.name,
-                emails: [email],
-                phone: primaryPhone, // Sadece 1 telefon varsa kesinlikle şirketindir, dağıt. Yoksa boş geç.
-                country: detectedCountry,
-                source_type: "file",
-                all_phones_found: phones // Bulunan tüm telefonları raw data'da sakla
-            });
+    // Verileri işle
+    extractedData.forEach(data => {
+        results.push({
+            url: data.website || job.input, // Websitesi bulunduysa onu kullan
+            companyName: data.companyName || "Unknown Company",
+            emails: [data.email],
+            phone: data.phone,
+            country: data.country,
+            source_type: "file",
+            raw_context: { detected_from_block: true } // Debug için
         });
-    } 
-    // Email yok ama Telefon var
-    else if (phones.length > 0) {
-        // İlk 50 telefonu al
-        phones.slice(0, 50).forEach(phone => {
-            results.push({
-                url: job.input, 
-                companyName: "Phone Lead",
-                emails: [], 
-                phone: phone, 
-                country: detectedCountry,
-                source_type: "file"
-            });
-        });
-    }
+    });
 
     await saveResultsToDb(job, results);
 
@@ -264,7 +282,6 @@ async function saveResultsToDb(job, results) {
 
     for (const r of results) {
       totalEmails += r.emails.length;
-      // SQL INSERT GÜNCELLENDİ: country sütunu eklendi
       await client.query(`
         INSERT INTO mining_results 
         (job_id, organizer_id, source_url, company_name, phone, emails, country, raw)
