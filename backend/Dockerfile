@@ -1,14 +1,21 @@
-ARG CACHE_BUST=2025-01-27
-FROM mcr.microsoft.com/playwright:v1.56.1-jammy
+# Node.js 22 imajını kullan (Senin versiyonunla uyumlu)
+FROM node:22-alpine
 
+# Çalışma dizinini ayarla
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm ci --production
+# 1. Önce sadece paket dosyalarını kopyala (Root context'ten)
+COPY package.json package-lock.json ./
 
-COPY . .
+# 2. Paketleri yükle (Cache mekanizmasını bozmamak için)
+RUN npm ci
 
-ENV NODE_ENV=production
+# 3. Şimdi kaynak kodları kopyala
+# Context "Root" olduğu için, backend klasörünü içeri alıyoruz
+COPY backend ./backend
 
-# 👇 Worker entrypoint (ZORUNLU)
-CMD ["node", "worker.js"]
+# Uploads klasörünü oluştur (Dosya yüklemeleri için)
+RUN mkdir -p uploads
+
+# 4. Worker'ı başlat
+CMD ["node", "backend/worker.js"]
