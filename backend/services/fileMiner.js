@@ -16,24 +16,18 @@ try { pdfParse = require('pdf-parse'); } catch(e) {}
 // CONFIGURATION
 // ============================================
 const CONFIG = {
-    // Dynamic Context Window (Gemini önerisi)
     MAX_SEARCH_LINES_ABOVE: 20,
     MAX_SEARCH_LINES_BELOW: 6,
-    
-    // Mining
     MIN_CONFIDENCE: 40,
-    
-    // PDF Extraction
     PDF_TIMEOUT: 60000,
     MAX_BUFFER: 50 * 1024 * 1024,
     MIN_TEXT_LENGTH: 500
 };
 
 // ============================================
-// DOMAIN MAPPING (Genişletilmiş)
+// DOMAIN MAPPING
 // ============================================
 const DOMAIN_MAP = {
-    // Ghana Water Sector
     'gwcl': 'Ghana Water Company Limited',
     'cwsa': 'Community Water and Sanitation Agency',
     'purcghana': 'Public Utilities Regulatory Commission',
@@ -48,7 +42,6 @@ const DOMAIN_MAP = {
     'jospongroup': 'Jospong Group of Companies',
     'seweragesystems': 'Sewerage Systems Ghana Ltd',
     'coniwas': 'CONIWAS Ghana',
-    // International
     'wateraid': 'WaterAid',
     'safewaternetwork': 'Safe Water Network',
     'unicef': 'UNICEF',
@@ -59,79 +52,54 @@ const DOMAIN_MAP = {
 };
 
 // ============================================
-// ENHANCED REGEX PATTERNS (Gemini önerisi)
+// REGEX PATTERNS
 // ============================================
 const PATTERNS = {
     email: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi,
-    
-    // Gelişmiş telefon regex'leri - boşluklu formatlar dahil
     phone: [
-        // Ghana formatları (boşluklu)
         /(?:\+|00)\s?233\s?\(?0?\)?[\s\-\.]?\d{2,3}[\s\-\.]?\d{3}[\s\-\.]?\d{3,4}/g,
-        // Ghana yerel (020, 024, 050 vb.)
         /0[235]\d{1,2}[\s\-\.]?\d{3}[\s\-\.]?\d{4}/g,
-        // Uluslararası genel
         /(?:\+|00)\d{1,3}[\s\-\.]?\(?\d{1,4}\)?[\s\-\.]?\d{3,4}[\s\-\.]?\d{3,4}/g,
-        // Parantezli alan kodu
         /\(\d{2,4}\)[\s\-\.]?\d{3,4}[\s\-\.]?\d{3,4}/g,
-        // Tireli format
         /\d{3}[\-]\d{3}[\-]\d{4,6}/g,
-        // Boşluklu format
         /\d{3}\s\d{3}\s\d{4}/g
     ],
-    
-    // Website regex'leri
     website: [
         /https?:\/\/(?:www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)/gi,
         /(?:www\.)[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b(?:[-a-zA-Z0-9()@:%_\+.~#?&//=]*)/gi
     ],
-    
-    // Şirket göstergeleri
     companyIndicators: /(?:Ltd|Limited|Inc|Corp|Corporation|LLC|GmbH|AG|Company|Co\.|Authority|Agency|Commission|Ministry|Department|Institute|Association|Group|Ventures|Consult|Solutions|Services|Enterprises|Holdings|Bank|Council|Directorate|S\.A\.|PLC|Foundation)/i,
-    
-    // Filtrelenecek URL'ler
     blacklistUrls: /google\.com|facebook\.com|twitter\.com|linkedin\.com|instagram\.com|youtube\.com|bit\.ly|tinyurl/i
 };
 
 // ============================================
-// ROLE-AWARE EMAIL SCORING (ChatGPT önerisi)
+// EMAIL ROLE SCORING
 // ============================================
 const EMAIL_ROLE_SCORES = {
-    // Generic - düşük değer
     generic: {
         patterns: ['info@', 'contact@', 'hello@', 'enquiry@', 'enquiries@', 'admin@', 'office@', 'mail@', 'support@'],
         score: 10
     },
-    // Department - orta değer
     department: {
-        patterns: ['sales@', 'marketing@', 'hr@', 'finance@', 'accounts@', 'procurement@', 'operations@', 'technical@'],
+        patterns: ['sales@', 'marketing@', 'hr@', 'finance@', 'accounts@', 'procurement@', 'operations@', 'technical@', 'export@', 'export1@'],
         score: 15
     },
-    // Personal - yüksek değer (firstname.lastname@ veya firstname@ gibi)
-    personal: {
-        score: 25
-    }
+    personal: { score: 25 }
 };
 
 function getEmailRoleScore(email) {
     const lower = email.toLowerCase();
-    
-    // Generic check
     for (const pattern of EMAIL_ROLE_SCORES.generic.patterns) {
         if (lower.startsWith(pattern)) return EMAIL_ROLE_SCORES.generic.score;
     }
-    
-    // Department check
     for (const pattern of EMAIL_ROLE_SCORES.department.patterns) {
         if (lower.startsWith(pattern)) return EMAIL_ROLE_SCORES.department.score;
     }
-    
-    // Personal email (varsayılan - en yüksek)
     return EMAIL_ROLE_SCORES.personal.score;
 }
 
 // ============================================
-// 1. BUFFER HANDLING (Geliştirilmiş)
+// 1. BUFFER HANDLING
 // ============================================
 function ensureBuffer(input) {
     console.log("   🔍 Buffer Analysis:");
@@ -148,7 +116,6 @@ function ensureBuffer(input) {
         console.log(`      String length: ${input.length}`);
         console.log(`      Starts with: "${input.substring(0, 20)}"`);
         
-        // PostgreSQL hex format: \x...
         if (input.startsWith('\\x')) {
             console.log("      → Converting from Postgres hex format");
             const buf = Buffer.from(input.slice(2), 'hex');
@@ -157,17 +124,14 @@ function ensureBuffer(input) {
             return buf;
         }
         
-        // Base64 check
         if (input.match(/^[A-Za-z0-9+/=]+$/) && input.length > 100) {
             console.log("      → Converting from Base64");
-            const buf = Buffer.from(input, 'base64');
-            return buf;
+            return Buffer.from(input, 'base64');
         }
         
         return Buffer.from(input, 'binary');
     }
     
-    // Object format
     if (input && input.type === 'Buffer' && Array.isArray(input.data)) {
         console.log("      → Converting from Buffer object");
         return Buffer.from(input.data);
@@ -177,25 +141,40 @@ function ensureBuffer(input) {
 }
 
 // ============================================
-// 2. PDF EXTRACTION - UNIVERSAL FALLBACK CHAIN
+// 2. PDF EXTRACTION - WITH DEBUG
 // ============================================
 async function extractFromPDF(buffer) {
     const tempPath = path.join(os.tmpdir(), `liffy_${Date.now()}.pdf`);
     
     try {
         await fs.promises.writeFile(tempPath, buffer);
+        
+        // DEBUG: Temp file kontrolü
+        const tempStats = await fs.promises.stat(tempPath);
+        console.log(`   📁 Temp file written: ${tempStats.size} bytes (buffer was: ${buffer.length} bytes)`);
+        console.log(`   📋 Buffer header (hex): ${buffer.slice(0, 20).toString('hex')}`);
+        
+        // DEBUG: Temp dosyayı geri oku ve karşılaştır
+        const readBack = await fs.promises.readFile(tempPath);
+        console.log(`   🔄 Read back: ${readBack.length} bytes, match: ${buffer.equals(readBack)}`);
+        
         console.log("   📄 Starting Universal PDF Extraction Chain...");
         
         let text = '';
         let method = '';
 
-        // METHOD 1: pdftotext (Poppler)
+        // METHOD 1: pdftotext (Poppler) - STDERR AÇIK
         try {
             console.log("   [1/4] Trying pdftotext...");
-            const { stdout } = await execPromise(
-                `pdftotext -layout -enc UTF-8 "${tempPath}" - 2>/dev/null`,
+            const { stdout, stderr } = await execPromise(
+                `pdftotext -layout -enc UTF-8 "${tempPath}" -`,
                 { timeout: CONFIG.PDF_TIMEOUT, maxBuffer: CONFIG.MAX_BUFFER }
             );
+            
+            if (stderr) {
+                console.log(`   📝 pdftotext stderr: ${stderr.slice(0, 500)}`);
+            }
+            
             const realText = stdout.replace(/[\s\f\r\n]/g, '');
             if (realText.length >= CONFIG.MIN_TEXT_LENGTH) {
                 text = stdout;
@@ -206,16 +185,22 @@ async function extractFromPDF(buffer) {
             }
         } catch (e) {
             console.log(`   ⚠️ pdftotext failed: ${e.message}`);
+            if (e.stderr) console.log(`   📝 pdftotext stderr: ${e.stderr.slice(0, 500)}`);
         }
 
-        // METHOD 2: mutool (MuPDF)
+        // METHOD 2: mutool (MuPDF) - STDERR AÇIK
         if (!text) {
             try {
                 console.log("   [2/4] Trying mutool...");
-                const { stdout } = await execPromise(
-                    `mutool draw -F txt -o - "${tempPath}" 2>/dev/null`,
+                const { stdout, stderr } = await execPromise(
+                    `mutool draw -F txt -o - "${tempPath}"`,
                     { timeout: CONFIG.PDF_TIMEOUT, maxBuffer: CONFIG.MAX_BUFFER }
                 );
+                
+                if (stderr) {
+                    console.log(`   📝 mutool stderr: ${stderr.slice(0, 500)}`);
+                }
+                
                 const realText = stdout.replace(/[\s\f\r\n]/g, '');
                 if (realText.length >= CONFIG.MIN_TEXT_LENGTH) {
                     text = stdout;
@@ -226,6 +211,7 @@ async function extractFromPDF(buffer) {
                 }
             } catch (e) {
                 console.log(`   ⚠️ mutool failed: ${e.message}`);
+                if (e.stderr) console.log(`   📝 mutool stderr: ${e.stderr.slice(0, 500)}`);
             }
         }
 
@@ -304,14 +290,13 @@ async function extractFromWord(buffer) {
 }
 
 // ============================================
-// 4. MINING ENGINE - DYNAMIC CONTEXT (Gemini önerisi)
+// 4. MINING ENGINE
 // ============================================
 function mineUnstructuredData(text, extractionMethod = 'unknown') {
     const lines = text.split(/\r?\n/);
     const contacts = [];
     const processedEmails = new Set();
     
-    // File-level stats
     const stats = {
         total_lines: lines.length,
         total_emails_found: 0,
@@ -327,10 +312,8 @@ function mineUnstructuredData(text, extractionMethod = 'unknown') {
             const emailLower = email.toLowerCase();
             stats.total_emails_found++;
             
-            // Duplicate check
             if (processedEmails.has(emailLower)) continue;
             
-            // Filter junk
             if (['.png', '.jpg', '.jpeg', 'example.com', 'wix.com', 'sentry.io'].some(ext => emailLower.includes(ext))) {
                 stats.emails_filtered++;
                 continue;
@@ -338,25 +321,19 @@ function mineUnstructuredData(text, extractionMethod = 'unknown') {
 
             processedEmails.add(emailLower);
 
-            // ========== DYNAMIC CONTEXT WINDOW ==========
-            // Sabit 15 satır yerine, başka email görene kadar git (Gemini önerisi)
-            
             let start = i;
             let searchCount = 0;
             
-            // Yukarı tarama - başka email görene kadar
             while (start > 0 && searchCount < CONFIG.MAX_SEARCH_LINES_ABOVE) {
                 start--;
                 searchCount++;
                 const checkLine = lines[start];
-                // Başka email varsa DUR (data leaking önleme)
                 if (PATTERNS.email.test(checkLine) && !checkLine.toLowerCase().includes(emailLower)) {
-                    start++; // O satırı dahil etme
+                    start++;
                     break;
                 }
             }
 
-            // Aşağı tarama
             let end = i;
             searchCount = 0;
             while (end < lines.length - 1 && searchCount < CONFIG.MAX_SEARCH_LINES_BELOW) {
@@ -371,32 +348,15 @@ function mineUnstructuredData(text, extractionMethod = 'unknown') {
             const contextLines = lines.slice(start, end + 1);
             const contextText = contextLines.join('\n');
 
-            // ========== DATA EXTRACTION ==========
-            
-            // Company
             const company = findCompanyNameSmart(contextLines, i - start, emailLower);
-            
-            // Phones
             const phones = extractPhones(contextText);
-            
-            // Website (email domain öncelikli)
             const website = extractWebsiteSmart(contextLines, emailLower);
-            
-            // Country
             const country = detectCountry(contextText);
-            
-            // Address
             const addresses = extractAddresses(contextLines);
 
-            // ========== CONFIDENCE SCORING (Role-Aware) ==========
             const emailRoleScore = getEmailRoleScore(emailLower);
             const confidence = calculateConfidence({ 
-                email: emailLower, 
-                company, 
-                phones, 
-                website, 
-                addresses,
-                emailRoleScore 
+                email: emailLower, company, phones, website, addresses, emailRoleScore 
             });
 
             if (confidence >= CONFIG.MIN_CONFIDENCE) {
@@ -420,35 +380,26 @@ function mineUnstructuredData(text, extractionMethod = 'unknown') {
 }
 
 // ============================================
-// 5. SMART HELPER FUNCTIONS
+// 5. HELPER FUNCTIONS
 // ============================================
-
 function findCompanyNameSmart(blockLines, emailRelativeIndex, email) {
-    // 1. Domain Map kontrolü (En güvenilir)
     const domain = email.split('@')[1];
     for (const [key, val] of Object.entries(DOMAIN_MAP)) {
         if (domain.includes(key)) return val;
     }
 
-    // 2. Yukarı doğru tara
     for (let i = emailRelativeIndex - 1; i >= 0; i--) {
         const line = blockLines[i].trim();
-        
         if (line.length < 3) continue;
         if (/^(Address|Tel|Phone|Email|Web|Fax|Location|P\.?O\.?\s?Box)/i.test(line)) continue;
-
-        // Şirket göstergesi varsa
         if (PATTERNS.companyIndicators.test(line) && line.length < 100) {
             return line.replace(/^(Name|Company|Organization)\s*[:\.]?\s*/i, '').trim();
         }
-        
-        // Tamamen büyük harf (header olma ihtimali)
         if (line === line.toUpperCase() && line.length > 4 && line.length < 60 && /[A-Z]/.test(line)) {
             return line;
         }
     }
     
-    // 3. Domain'den türet
     return deriveCompanyFromEmail(email);
 }
 
@@ -458,7 +409,6 @@ function extractPhones(text) {
         const matches = text.match(regex) || [];
         matches.forEach(p => {
             const clean = p.replace(/[^\d+]/g, '');
-            // Yıl gibi görünenleri filtrele (2018, 2019, 2020 vb.)
             if (clean.length >= 8 && clean.length <= 16 && !/^(19|20)\d{2}$/.test(clean)) {
                 phones.add(p.trim());
             }
@@ -477,11 +427,7 @@ function extractWebsiteSmart(lines, email) {
             matches.forEach(url => {
                 let cleanUrl = url.trim().replace(/[.,;:]+$/, '');
                 if (!cleanUrl.startsWith('http')) cleanUrl = 'https://' + cleanUrl;
-                
-                // Blacklist kontrolü
                 if (PATTERNS.blacklistUrls.test(cleanUrl)) return;
-                
-                // Email domain ile eşleşiyorsa en yüksek öncelik
                 if (cleanUrl.toLowerCase().includes(emailDomain)) {
                     candidates.unshift({ url: cleanUrl, priority: 1 });
                 } else {
@@ -491,13 +437,11 @@ function extractWebsiteSmart(lines, email) {
         });
     });
 
-    // En yüksek öncelikli URL'i döndür
     if (candidates.length > 0) {
         candidates.sort((a, b) => a.priority - b.priority);
         return candidates[0].url;
     }
     
-    // Fallback: email domain'inden türet
     return deriveWebsiteFromEmail(email);
 }
 
@@ -541,7 +485,7 @@ function detectCountry(text) {
         { name: "Germany", keywords: ["germany", "berlin", "munich"] },
         { name: "United Kingdom", keywords: ["united kingdom", "uk", "london"] },
         { name: "USA", keywords: ["usa", "united states", "america"] },
-        { name: "Turkey", keywords: ["turkey", "türkiye", "istanbul", "ankara"] },
+        { name: "Turkey", keywords: ["turkey", "türkiye", "istanbul", "ankara", "bursa", "izmir"] },
         { name: "France", keywords: ["france", "paris"] },
         { name: "China", keywords: ["china", "beijing", "shanghai"] }
     ];
@@ -560,28 +504,12 @@ function classifyEmailType(email) {
 }
 
 function calculateConfidence(data) {
-    let score = 0;
-    
-    // Base: email found
-    score += 30;
-    
-    // Email role score (ChatGPT önerisi)
+    let score = 30;
     score += data.emailRoleScore || 15;
-    
-    // Phone
     if (data.phones && data.phones.length > 0) score += 15;
-    
-    // Website
     if (data.website) score += 10;
-    
-    // Company name quality
-    if (data.company && data.company !== "Individual" && data.company !== "Unknown") {
-        score += 15;
-    }
-    
-    // Address
+    if (data.company && data.company !== "Individual" && data.company !== "Unknown") score += 15;
     if (data.addresses && data.addresses.length > 0) score += 5;
-    
     return Math.min(100, score);
 }
 
@@ -609,7 +537,6 @@ function mineStructuredData(sheetsData) {
 
             if (email && !processedEmails.has(email.toLowerCase())) {
                 processedEmails.add(email.toLowerCase());
-                
                 const phones = extractPhones(rowText);
                 row.forEach(cell => {
                     const str = String(cell);
@@ -617,9 +544,7 @@ function mineStructuredData(sheetsData) {
                         company = str;
                     }
                 });
-                
                 if (!company) company = deriveCompanyFromEmail(email.toLowerCase());
-
                 const emailRoleScore = getEmailRoleScore(email.toLowerCase());
                 
                 contacts.push({
@@ -640,63 +565,53 @@ function mineStructuredData(sheetsData) {
 }
 
 // ============================================
-// 7. FILE SUMMARY OBJECT (ChatGPT önerisi)
+// 7. FILE SUMMARY OBJECT
 // ============================================
 function generateFileSummary(contacts, extractionStats, filename) {
-    // Sector detection
     const allText = contacts.map(c => `${c.companyName} ${c.email}`).join(' ').toLowerCase();
     let sector = 'general';
     if (allText.includes('water') || allText.includes('sanitation')) sector = 'water_sanitation';
     else if (allText.includes('energy') || allText.includes('power')) sector = 'energy';
     else if (allText.includes('health') || allText.includes('medical')) sector = 'healthcare';
     else if (allText.includes('tech') || allText.includes('software')) sector = 'technology';
+    else if (allText.includes('hvac') || allText.includes('air') || allText.includes('fan')) sector = 'hvac';
     
-    // Country detection
     const countries = contacts.map(c => c.country).filter(Boolean);
     const mainCountry = countries.length > 0 
         ? countries.sort((a,b) => countries.filter(v => v===a).length - countries.filter(v => v===b).length).pop()
         : null;
     
-    // Email type distribution
     const emailTypes = {
         generic: contacts.filter(c => c.email_type === 'generic').length,
         department: contacts.filter(c => c.email_type === 'department').length,
         personal: contacts.filter(c => c.email_type === 'personal').length
     };
     
-    // Business relevance score (ChatGPT önerisi)
     const personalRatio = contacts.length > 0 ? emailTypes.personal / contacts.length : 0;
     const hasPhones = contacts.filter(c => c.phone).length;
     const phoneRatio = contacts.length > 0 ? hasPhones / contacts.length : 0;
     
     const businessRelevanceScore = Math.round(
-        (personalRatio * 40) + 
-        (phoneRatio * 30) + 
-        (contacts.length > 10 ? 20 : contacts.length * 2) +
-        (mainCountry ? 10 : 0)
+        (personalRatio * 40) + (phoneRatio * 30) + 
+        (contacts.length > 10 ? 20 : contacts.length * 2) + (mainCountry ? 10 : 0)
     );
 
     return {
-        filename: filename,
-        document_type: extractionStats.extraction_method === 'excel' ? 'spreadsheet' : 'document',
-        extraction_method: extractionStats.extraction_method,
-        main_country: mainCountry,
-        detected_sector: sector,
-        total_organizations: new Set(contacts.map(c => c.companyName)).size,
-        total_contacts: contacts.length,
-        contacts_with_phone: hasPhones,
-        email_type_distribution: emailTypes,
-        business_relevance_score: Math.min(100, businessRelevanceScore),
+        filename, document_type: extractionStats.extraction_method === 'excel' ? 'spreadsheet' : 'document',
+        extraction_method: extractionStats.extraction_method, main_country: mainCountry,
+        detected_sector: sector, total_organizations: new Set(contacts.map(c => c.companyName)).size,
+        total_contacts: contacts.length, contacts_with_phone: hasPhones,
+        email_type_distribution: emailTypes, business_relevance_score: Math.min(100, businessRelevanceScore),
         extraction_stats: extractionStats
     };
 }
 
 // ============================================
-// 8. MAIN RUNNER (V11.0)
+// 8. MAIN RUNNER (V11.1 DEBUG)
 // ============================================
 async function runFileMining(job) {
     console.log(`\n${'='.repeat(50)}`);
-    console.log(`📂 LIFFY FILE MINER V11.0`);
+    console.log(`📂 LIFFY FILE MINER V11.1 (DEBUG)`);
     console.log(`Job: ${job.id}`);
     console.log(`File: ${job.input}`);
     console.log(`${'='.repeat(50)}`);
@@ -706,7 +621,6 @@ async function runFileMining(job) {
     const fileBuffer = ensureBuffer(job.file_data);
     console.log(`   📊 Buffer Size: ${fileBuffer.length} bytes`);
     
-    // Magic bytes check
     const magic = fileBuffer.slice(0, 8).toString('utf8');
     console.log(`   📋 Magic: "${magic.replace(/[^\x20-\x7E]/g, '?')}"`);
 
@@ -736,7 +650,6 @@ async function runFileMining(job) {
             extractionStats = result.stats;
             
         } else {
-            // CSV/TXT fallback
             const text = fileBuffer.toString('utf8');
             if ((text.match(/,/g) || []).length > text.split('\n').length) {
                 const rows = text.split('\n').map(r => r.split(/,|;/));
@@ -750,7 +663,6 @@ async function runFileMining(job) {
             }
         }
 
-        // Generate summary
         const summary = generateFileSummary(contacts, extractionStats, job.input);
         
         console.log(`\n   📊 SUMMARY:`);
@@ -783,26 +695,13 @@ async function saveResultsToDb(job, results, summary) {
                 INSERT INTO mining_results 
                 (job_id, organizer_id, source_url, company_name, phone, emails, country, raw)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            `, [
-                job.id, 
-                job.organizer_id, 
-                r.website || job.input, 
-                r.companyName, 
-                r.phone, 
-                [r.email], 
-                r.country, 
-                JSON.stringify(r)
-            ]);
+            `, [job.id, job.organizer_id, r.website || job.input, r.companyName, r.phone, [r.email], r.country, JSON.stringify(r)]);
         }
         
         await client.query(`
             UPDATE mining_jobs 
-            SET total_found = $1,
-                total_emails_raw = $2,
-                status = 'completed',
-                completed_at = NOW(),
-                stats = $3,
-                file_data = NULL
+            SET total_found = $1, total_emails_raw = $2, status = 'completed',
+                completed_at = NOW(), stats = $3, file_data = NULL
             WHERE id = $4
         `, [results.length, totalEmails, summary, job.id]);
         
