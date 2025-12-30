@@ -6,15 +6,15 @@ const util = require('util');
 const execPromise = util.promisify(exec);
 const db = require('../db');
 
-let xlsx, mammoth, csvParser;
+let xlsx, mammoth, pdfParse;
 try { xlsx = require('xlsx'); } catch(e) {}
 try { mammoth = require('mammoth'); } catch(e) {}
-try { csvParser = require('csv-parser'); } catch(e) {}
+try { pdfParse = require('pdf-parse'); } catch(e) {}
 
 const CONFIG = {
-    CONTEXT_LINES_ABOVE: 15, // Context penceresini genişlettik
+    CONTEXT_LINES_ABOVE: 15,
     CONTEXT_LINES_BELOW: 10,
-    MIN_CONFIDENCE: 30       // Güven barajını düşürdük (test için)
+    MIN_CONFIDENCE: 30
 };
 
 const PATTERNS = {
@@ -30,7 +30,7 @@ const PATTERNS = {
         /https?:\/\/[^\s<>"']+/gi,
         /www\.[a-zA-Z0-9][a-zA-Z0-9\-]*\.[a-zA-Z]{2,}[^\s<>"']*/gi
     ],
-    companyIndicators: /(?:Ltd|Limited|Inc|Corp|Corporation|LLC|GmbH|AG|Company|Co\.|Authority|Agency|Commission|Ministry|Department|Institute|Association|Group|Ventures|Consult|Solutions|Services|Enterprises|Holdings|Bank)/i,
+    companyIndicators: /(?:Ltd|Limited|Inc|Corp|Corporation|LLC|GmbH|AG|Company|Co\.|Authority|Agency|Commission|Ministry|Department|Institute|Association|Group|Ventures|Consult|Solutions|Services|Enterprises|Holdings|Bank|Council|Directorate)/i,
     labels: {
         address: /^(?:Address|Postal Address|Location|Office|Hq)\s*[:\.]?\s*(.+)/i,
         phone: /^(?:Telephone|Tel|Phone|Mobile|Cell|Fax)\s*[:\.]?\s*(.+)/i,
@@ -38,41 +38,40 @@ const PATTERNS = {
     }
 };
 
-// ============================================
-// 1. DOSYA OKUYUCULAR
-// ============================================
-
 async function extractFromPDF(buffer) {
-    const tempPath = path.join(os.tmpdir(), `liffy_${Date.now()}_${Math.random().toString(36).substr(7)}.pdf`);
+    let text = "";
+    const tempPath = path.join(os.tmpdir(), `liffy_${Date.now()}.pdf`);
+    
     try {
         await fs.promises.writeFile(tempPath, buffer);
+        console.log("   Attempting Method A: pdftotext (System Tool)...");
         
-        // Debug: Dosya gerçekten oluştu mu ve boyutu ne?
-        const stats = await fs.promises.stat(tempPath);
-        console.log(`   📄 PDF written to temp (Size: ${stats.size} bytes). Executing pdftotext...`);
-
-        // pdftotext kontrolü
-        try {
-             await execPromise('pdftotext -v');
-        } catch (e) {
-             console.error("   ❌ CRITICAL: pdftotext NOT INSTALLED or NOT FOUND in PATH.");
-             throw new Error("pdftotext missing");
+        // Fontlar yüklendiği için artık burası DOLU metin döndürecek
+        const { stdout } = await execPromise(`pdftotext -layout -enc UTF-8 "${tempPath}" -`, { timeout: 10000 });
+        
+        if (stdout && stdout.length > 200) {
+            console.log(`   ✅ Method A Success: Extracted ${stdout.length} chars.`);
+            text = stdout;
+        } else {
+            console.warn(`   ⚠️ Method A result too short (${stdout.length} chars). Fonts might be missing.`);
+            throw new Error("Short output");
         }
-
-        const { stdout } = await execPromise(`pdftotext -layout -enc UTF-8 "${tempPath}" -`);
-        
-        console.log(`   ✅ pdftotext success. Extracted ${stdout.length} chars.`);
-        if (stdout.length < 100) console.warn("   ⚠️ Warning: Extracted text is suspiciously short.");
-        
-        return stdout;
     } catch (e) {
-        console.error("   ❌ pdftotext Failed:", e.message);
-        console.log("   🔄 Switching to Raw Buffer Scan (Fallback)...");
-        // Fallback: Buffer'ı latin1 olarak oku (bazı PDF metinleri binary içinde düz durur)
-        return buffer.toString('latin1');
+        console.warn("   ⚠️ Method A Failed:", e.message);
+        
+        // Sadece fontlar yüklenmezse buraya düşer
+        console.log("   🔄 Method B: Fallback to pdf-parse...");
+        if (pdfParse) {
+            const data = await pdfParse(buffer);
+            text = data.text;
+        }
     } finally {
         try { await fs.promises.unlink(tempPath); } catch (e) {}
     }
+    
+    // Son çare raw
+    if (!text || text.length < 50) text = buffer.toString('latin1');
+    return text;
 }
 
 async function extractFromExcel(buffer) {
@@ -81,8 +80,7 @@ async function extractFromExcel(buffer) {
     let sheetsData = [];
     for (const sheetName of workbook.SheetNames) {
         const sheet = workbook.Sheets[sheetName];
-        const data = xlsx.utils.sheet_to_json(sheet, { header: 1, defval: '' });
-        sheetsData.push(data);
+        sheetsData.push(xlsx.utils.sheet_to_json(sheet, { header: 1, defval: '' }));
     }
     return { type: 'structured', data: sheetsData };
 }
@@ -93,14 +91,8 @@ async function extractFromWord(buffer) {
     return result.value;
 }
 
-// ============================================
-// 2. MADENCİLİK MOTORU
-// ============================================
-
 function mineUnstructuredData(text) {
-    // Debug: İlk 200 karakteri görelim
-    console.log(`   🔍 Analyzing Text Sample: ${text.substring(0, 100).replace(/\n/g, ' ')}...`);
-
+    console.log(`   🔍 Analyzing Text (${text.length} chars)...`);
     const lines = text.split(/\r?\n/);
     const contacts = [];
     const processedEmails = new Set();
@@ -112,7 +104,7 @@ function mineUnstructuredData(text) {
         for (const email of emailMatches) {
             const emailLower = email.toLowerCase();
             if (processedEmails.has(emailLower)) continue;
-            if (['.png', '.jpg', 'example.com', 'email.com', 'domain.com'].some(ext => emailLower.includes(ext))) continue;
+            if (['.png', '.jpg', 'example.com', 'email.com'].some(ext => emailLower.includes(ext))) continue;
 
             processedEmails.add(emailLower);
 
@@ -127,12 +119,8 @@ function mineUnstructuredData(text) {
             const addresses = extractAddresses(contextLines, i - start);
             const country = detectCountry(contextText);
 
-            let website = websites[0];
-            if (!website) website = deriveWebsiteFromEmail(emailLower);
-
+            let website = websites[0] || deriveWebsiteFromEmail(emailLower);
             const confidence = calculateConfidence({ email, company, phones, website, addresses });
-
-            console.log(`      Found Candidate: ${email} | Company: ${company} | Phone: ${phones[0]}`);
 
             if (confidence >= CONFIG.MIN_CONFIDENCE) {
                 contacts.push({
@@ -158,27 +146,18 @@ function mineStructuredData(sheetsData) {
         if (!Array.isArray(rows)) return;
         rows.forEach(row => {
             if (!Array.isArray(row)) return;
-            let email = null;
-            let company = null;
-            let rowText = row.join(' ');
-
+            let email = null, company = null, rowText = row.join(' ');
+            
             row.forEach(cell => {
-                const cellStr = String(cell);
-                if (PATTERNS.email.test(cellStr)) {
-                    email = cellStr.match(PATTERNS.email)[0];
-                }
+                if (PATTERNS.email.test(String(cell))) email = String(cell).match(PATTERNS.email)[0];
             });
 
             if (email) {
                 const phones = extractPhones(rowText);
                 const websites = extractWebsites(rowText);
                 row.forEach(cell => {
-                    const cellStr = String(cell);
-                    if (cellStr.length > 3 && PATTERNS.companyIndicators.test(cellStr) && !PATTERNS.email.test(cellStr)) {
-                        company = cellStr;
-                    }
+                    if (String(cell).length > 3 && PATTERNS.companyIndicators.test(String(cell)) && !PATTERNS.email.test(String(cell))) company = String(cell);
                 });
-
                 contacts.push({
                     email: email.toLowerCase(),
                     companyName: company || deriveCompanyFromEmail(email),
@@ -195,46 +174,31 @@ function mineStructuredData(sheetsData) {
     return contacts;
 }
 
-// ============================================
-// 3. YARDIMCI FONKSİYONLAR
-// ============================================
-
+// Helpers
 function findCompanyNameInContext(lines, emailIndex, email) {
     for (let i = 1; i <= CONFIG.CONTEXT_LINES_ABOVE; i++) {
         const lineIndex = emailIndex - i;
         if (lineIndex < 0) break;
         const line = lines[lineIndex].trim();
-        if (line.length < 3) continue;
-        if (/^(Address|Tel|Phone|Email|Web|Fax|Location)/i.test(line)) continue;
-
-        if (PATTERNS.companyIndicators.test(line) && line.length < 80) {
-            return line.replace(/^(Name|Company|Organization)\s*[:\.]?\s*/i, '').trim();
-        }
-        // Baş harf büyük kontrolü ve noktalama olmaması
+        if (line.length < 3 || /^(Address|Tel|Phone|Email|Web)/i.test(line)) continue;
+        if (PATTERNS.companyIndicators.test(line) && line.length < 80) return line.replace(/^(Name|Company)\s*[:\.]?\s*/i, '').trim();
         if (/^[A-Z]/.test(line) && line.length > 4 && line.length < 60 && !line.endsWith('.')) {
-             // Alt satırda adres varsa bu satır şirkettir
-            if (lines[lineIndex + 1] && /Address|Box/i.test(lines[lineIndex + 1])) {
-                return line;
-            }
+            if (lines[lineIndex + 1] && /Address|Box/i.test(lines[lineIndex + 1])) return line;
         }
     }
     return null;
 }
-
 function extractPhones(text) {
     const phones = new Set();
     PATTERNS.phone.forEach(regex => {
         const matches = text.match(regex) || [];
         matches.forEach(p => {
             const clean = p.replace(/[^\d+]/g, '');
-            if (clean.length >= 7 && clean.length <= 15) {
-                if (!/^20\d{2}$/.test(clean)) phones.add(p.trim());
-            }
+            if (clean.length >= 7 && clean.length <= 15 && !/^20\d{2}$/.test(clean)) phones.add(p.trim());
         });
     });
     return Array.from(phones);
 }
-
 function extractWebsites(text) {
     const sites = new Set();
     PATTERNS.website.forEach(regex => {
@@ -247,122 +211,76 @@ function extractWebsites(text) {
     });
     return Array.from(sites);
 }
-
 function extractAddresses(contextLines, relativeEmailIdx) {
     const addresses = [];
     contextLines.forEach(line => {
-        if (/^(Address|Location|P\.?O\.?\s?Box)/i.test(line)) {
-            addresses.push(line.replace(/^(Address|Location)\s*[:\.]?\s*/i, '').trim());
-        }
+        if (/^(Address|Location|P\.?O\.?\s?Box)/i.test(line)) addresses.push(line.replace(/^(Address|Location)\s*[:\.]?\s*/i, '').trim());
     });
     return addresses;
 }
-
 function deriveCompanyFromEmail(email) {
     try {
         const domain = email.split('@')[1];
-        if (['gmail.com', 'yahoo.com', 'hotmail.com'].includes(domain)) return "Individual";
+        if (['gmail.com', 'yahoo.com'].includes(domain)) return "Individual";
         let name = domain.split('.')[0];
         return name.charAt(0).toUpperCase() + name.slice(1);
     } catch (e) { return "Unknown"; }
 }
-
 function deriveWebsiteFromEmail(email) {
     const domain = email.split('@')[1];
     if (['gmail.com', 'yahoo.com'].includes(domain)) return null;
     return 'www.' + domain;
 }
-
 function detectCountry(text) {
     const search = text.slice(0, 5000).toLowerCase();
-    const countries = ["Ghana", "Germany", "USA", "United States", "UK", "United Kingdom", "Turkey", "France", "Nigeria", "China"];
-    for (const c of countries) {
-        if (search.includes(c.toLowerCase())) return c;
-    }
+    const countries = ["Ghana", "Germany", "USA", "United Kingdom", "Turkey", "France", "Nigeria", "China"];
+    for (const c of countries) { if (search.includes(c.toLowerCase())) return c; }
     return null;
 }
-
 function calculateConfidence(data) {
     let score = 0;
     if (data.email) score += 40;
     if (data.phones.length > 0) score += 20;
     if (data.website) score += 10;
-    if (data.company && data.company !== "Individual") score += 20;
+    if (data.company && data.company !== "Unknown") score += 20;
     if (data.addresses && data.addresses.length > 0) score += 10;
     return Math.min(100, score);
 }
 
-// ============================================
-// 4. MAIN RUNNER (AKILLI HEADER KONTROLÜ)
-// ============================================
 async function runFileMining(job) {
-    console.log(`📂 Starting Universal File Miner v7.2 (Debug Edition) for Job: ${job.id}`);
+    console.log(`📂 Starting Universal File Miner v8.1 (Fonts Fixed) for Job: ${job.id}`);
     if (!job.file_data) throw new Error("No file data found.");
-
     let fileBuffer = job.file_data;
 
-    // --- RÖNTGEN: Buffer ne durumda? ---
-    console.log(`   📊 Input Data Type: ${typeof fileBuffer}`);
-    if (Buffer.isBuffer(fileBuffer)) {
-        console.log(`   📊 Buffer Size: ${fileBuffer.length} bytes`);
-        const headerHex = fileBuffer.subarray(0, 8).toString('hex');
-        console.log(`   🔍 Header HEX: ${headerHex}`);
-
-        // %PDF Magic Bytes: 25 50 44 46
-        if (headerHex.startsWith('25504446')) {
-            console.log("   ✅ Valid PDF Header detected. No conversion needed.");
-        } 
-        // Postgres Hex String: \x (5c 78)
-        else if (headerHex.startsWith('5c78')) {
-            console.log("   ⚠️ Postgres HEX String detected (\\x...). Converting to Buffer...");
-            fileBuffer = Buffer.from(fileBuffer.toString('utf8').slice(2), 'hex');
-            console.log(`   ✅ Converted. New Size: ${fileBuffer.length}, New Header: ${fileBuffer.subarray(0, 8).toString('hex')}`);
-        }
-        else {
-            console.warn("   ⚠️ Unknown File Header. Attempting processing anyway.");
-        }
-    } else {
-        // String gelirse
-        if (typeof fileBuffer === 'string' && fileBuffer.startsWith('\\x')) {
-            console.log("   ⚠️ Input is String starting with \\x. Converting...");
-            fileBuffer = Buffer.from(fileBuffer.slice(2), 'hex');
-        } else {
-             console.log("   ⚠️ Input is plain String/Buffer. Using as is.");
-             fileBuffer = Buffer.from(fileBuffer);
-        }
+    // Buffer Fixes
+    if (!Buffer.isBuffer(fileBuffer)) {
+        if (typeof fileBuffer === 'string' && fileBuffer.startsWith('\\x')) fileBuffer = Buffer.from(fileBuffer.slice(2), 'hex');
+        else fileBuffer = Buffer.from(fileBuffer);
     }
+    if (fileBuffer.length > 2 && fileBuffer[0] === 0x5c && fileBuffer[1] === 0x78) fileBuffer = Buffer.from(fileBuffer.toString('utf8').slice(2), 'hex');
 
     const filename = job.input.toLowerCase();
     let contacts = [];
 
     try {
-        let text = "";
         if (filename.endsWith('.pdf')) {
-            text = await extractFromPDF(fileBuffer);
+            const text = await extractFromPDF(fileBuffer);
             contacts = mineUnstructuredData(text);
         } else if (filename.endsWith('.xlsx') || filename.endsWith('.xls')) {
             const result = await extractFromExcel(fileBuffer);
             if (result.type === 'structured') contacts = mineStructuredData(result.data);
         } else if (filename.endsWith('.docx') || filename.endsWith('.doc')) {
-            text = await extractFromWord(fileBuffer);
+            const text = await extractFromWord(fileBuffer);
             contacts = mineUnstructuredData(text);
         } else {
-            text = fileBuffer.toString('utf8');
+            const text = fileBuffer.toString('utf8');
             if ((text.match(/,/g) || []).length > (text.split('\n').length)) {
                 const rows = text.split('\n').map(r => r.split(/,|;/));
                 contacts = mineStructuredData([rows]);
-            } else {
-                contacts = mineUnstructuredData(text);
-            }
+            } else contacts = mineUnstructuredData(text);
         }
 
         console.log(`   ✅ Mining Complete. Found ${contacts.length} contacts.`);
-        
-        // Sonuç 0 ise log bas
-        if (contacts.length === 0) {
-            console.log("   ⚠️ Zero contacts found. Check 'Analyzing Text Sample' log above to see if text is empty.");
-        }
-
         await saveResultsToDb(job, contacts);
     } catch (err) {
         console.error("Critical Miner Error:", err);
@@ -378,17 +296,12 @@ async function saveResultsToDb(job, results) {
         for (const r of results) {
             totalEmails++;
             await client.query(`
-                INSERT INTO mining_results 
-                (job_id, organizer_id, source_url, company_name, phone, emails, country, raw)
+                INSERT INTO mining_results (job_id, organizer_id, source_url, company_name, phone, emails, country, raw)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             `, [job.id, job.organizer_id, r.website || job.input, r.companyName, r.phone, [r.email], r.country, JSON.stringify(r)]);
         }
         const summary = { total_found: results.length, total_emails: totalEmails, file_type: 'universal' };
-        await client.query(`
-            UPDATE mining_jobs 
-            SET total_found = $1, total_emails_raw = $2, status = 'completed', completed_at = NOW(), stats = $3, file_data = NULL
-            WHERE id = $4
-        `, [results.length, totalEmails, summary, job.id]);
+        await client.query(`UPDATE mining_jobs SET total_found=$1, total_emails_raw=$2, status='completed', completed_at=NOW(), stats=$3, file_data=NULL WHERE id=$4`, [results.length, totalEmails, summary, job.id]);
         await client.query('COMMIT');
     } catch (e) {
         await client.query('ROLLBACK');
