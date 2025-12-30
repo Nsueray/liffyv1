@@ -3,10 +3,20 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-# KRİTİK DÜZELTME: 
-# 1. poppler-utils: PDF okuma aracı
-# 2. font-noto, ttf-freefont: PDF içindeki harfleri tanımak için gereken fontlar
-RUN apk add --no-cache poppler-utils font-noto ttf-freefont
+# --- KRİTİK GÜNCELLEME ---
+# 1. poppler-utils: pdftotext aracı
+# 2. poppler-data: PDF karakter kodlamaları (Bunu eklemezsek yazı çıkmaz!)
+# 3. font-noto, ttf-freefont: Temel fontlar
+# 4. msttcorefonts-installer: Arial, Times New Roman gibi Windows fontları
+RUN apk add --no-cache \
+    poppler-utils \
+    poppler-data \
+    font-noto \
+    terminus-font \
+    ttf-freefont \
+    msttcorefonts-installer && \
+    update-ms-fonts && \
+    fc-cache -f
 
 COPY package.json package-lock.json ./
 RUN npm ci
