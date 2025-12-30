@@ -108,11 +108,23 @@ async function extractFromPDF(buffer) {
         await fs.promises.writeFile(tempPath, buffer);
         console.log("   📄 Attempting pdftotext (with enhanced fonts)...");
         
+        // DEBUG: PDF info kontrolü
+        try {
+            const { stdout: pdfInfo } = await execPromise(`pdfinfo "${tempPath}" 2>&1 || true`, { timeout: 5000 });
+            console.log("   📋 PDF Info:", pdfInfo.substring(0, 500));
+        } catch (e) {
+            console.log("   ⚠️ pdfinfo failed:", e.message);
+        }
+        
         // Timeout ve Buffer artırıldı
-        const { stdout } = await execPromise(
+        const { stdout, stderr } = await execPromise(
             `pdftotext -layout -enc UTF-8 "${tempPath}" -`, 
             { timeout: CONFIG.PDF_TIMEOUT, maxBuffer: CONFIG.MAX_BUFFER }
         );
+        
+        // DEBUG: İlk 500 karakteri göster
+        console.log("   🔍 First 500 chars:", JSON.stringify(stdout.substring(0, 500)));
+        console.log("   🔍 Stderr:", stderr || "none");
         
         if (stdout && stdout.length > 200) {
             console.log(`   ✅ Success: Extracted ${stdout.length} chars.`);
