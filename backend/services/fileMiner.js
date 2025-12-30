@@ -6,23 +6,19 @@ const util = require('util');
 const execPromise = util.promisify(exec);
 const db = require('../db');
 
-// Opsiyonel kütüphaneler (Hata almamak için try-catch ile)
 let xlsx, mammoth, csvParser;
 try { xlsx = require('xlsx'); } catch(e) {}
 try { mammoth = require('mammoth'); } catch(e) {}
 try { csvParser = require('csv-parser'); } catch(e) {}
 
-// --- AYARLAR ---
 const CONFIG = {
-    CONTEXT_LINES_ABOVE: 10,
-    CONTEXT_LINES_BELOW: 5,
-    MIN_CONFIDENCE: 40
+    CONTEXT_LINES_ABOVE: 15, // Context penceresini genişlettik
+    CONTEXT_LINES_BELOW: 10,
+    MIN_CONFIDENCE: 30       // Güven barajını düşürdük (test için)
 };
 
-// --- REGEX DESENLERİ ---
 const PATTERNS = {
     email: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi,
-    
     phone: [
         /\+\d{1,4}[\s\-\.]?\(?\d{1,4}\)?[\s\-\.]?\d{2,4}[\s\-\.]?\d{2,4}/g,
         /00\d{1,4}[\s\-\.]?\d{2,4}[\s\-\.]?\d{2,4}[\s\-\.]?\d{2,4}/g,
@@ -30,14 +26,11 @@ const PATTERNS = {
         /(?:\b0)(?:[235][0-9])[\s\-]?\d{3}[\s\-]?\d{4}\b/g,
         /\b\d{3}[\-]\d{3}[\-]\d{4}\b/g
     ],
-
     website: [
         /https?:\/\/[^\s<>"']+/gi,
         /www\.[a-zA-Z0-9][a-zA-Z0-9\-]*\.[a-zA-Z]{2,}[^\s<>"']*/gi
     ],
-
     companyIndicators: /(?:Ltd|Limited|Inc|Corp|Corporation|LLC|GmbH|AG|Company|Co\.|Authority|Agency|Commission|Ministry|Department|Institute|Association|Group|Ventures|Consult|Solutions|Services|Enterprises|Holdings|Bank)/i,
-
     labels: {
         address: /^(?:Address|Postal Address|Location|Office|Hq)\s*[:\.]?\s*(.+)/i,
         phone: /^(?:Telephone|Tel|Phone|Mobile|Cell|Fax)\s*[:\.]?\s*(.+)/i,
@@ -49,19 +42,35 @@ const PATTERNS = {
 // 1. DOSYA OKUYUCULAR
 // ============================================
 
-// PDF Okuyucu (FIXED)
 async function extractFromPDF(buffer) {
     const tempPath = path.join(os.tmpdir(), `liffy_${Date.now()}_${Math.random().toString(36).substr(7)}.pdf`);
     try {
         await fs.promises.writeFile(tempPath, buffer);
-        // Eğer sistemde pdftotext yoksa burada hata fırlatır ve catch bloğuna düşer
+        
+        // Debug: Dosya gerçekten oluştu mu ve boyutu ne?
+        const stats = await fs.promises.stat(tempPath);
+        console.log(`   📄 PDF written to temp (Size: ${stats.size} bytes). Executing pdftotext...`);
+
+        // pdftotext kontrolü
+        try {
+             await execPromise('pdftotext -v');
+        } catch (e) {
+             console.error("   ❌ CRITICAL: pdftotext NOT INSTALLED or NOT FOUND in PATH.");
+             throw new Error("pdftotext missing");
+        }
+
         const { stdout } = await execPromise(`pdftotext -layout -enc UTF-8 "${tempPath}" -`);
+        
+        console.log(`   ✅ pdftotext success. Extracted ${stdout.length} chars.`);
+        if (stdout.length < 100) console.warn("   ⚠️ Warning: Extracted text is suspiciously short.");
+        
         return stdout;
     } catch (e) {
-        console.warn("⚠️ pdftotext failed (using raw fallback):", e.message);
-        return buffer.toString('utf8'); // Fallback olarak raw text dene
+        console.error("   ❌ pdftotext Failed:", e.message);
+        console.log("   🔄 Switching to Raw Buffer Scan (Fallback)...");
+        // Fallback: Buffer'ı latin1 olarak oku (bazı PDF metinleri binary içinde düz durur)
+        return buffer.toString('latin1');
     } finally {
-        // HATA DÜZELTİLDİ: fs.promises.unlink kullanıldı
         try { await fs.promises.unlink(tempPath); } catch (e) {}
     }
 }
@@ -89,6 +98,9 @@ async function extractFromWord(buffer) {
 // ============================================
 
 function mineUnstructuredData(text) {
+    // Debug: İlk 200 karakteri görelim
+    console.log(`   🔍 Analyzing Text Sample: ${text.substring(0, 100).replace(/\n/g, ' ')}...`);
+
     const lines = text.split(/\r?\n/);
     const contacts = [];
     const processedEmails = new Set();
@@ -100,7 +112,7 @@ function mineUnstructuredData(text) {
         for (const email of emailMatches) {
             const emailLower = email.toLowerCase();
             if (processedEmails.has(emailLower)) continue;
-            if (['.png', '.jpg', 'example.com', 'email.com'].some(ext => emailLower.includes(ext))) continue;
+            if (['.png', '.jpg', 'example.com', 'email.com', 'domain.com'].some(ext => emailLower.includes(ext))) continue;
 
             processedEmails.add(emailLower);
 
@@ -119,6 +131,8 @@ function mineUnstructuredData(text) {
             if (!website) website = deriveWebsiteFromEmail(emailLower);
 
             const confidence = calculateConfidence({ email, company, phones, website, addresses });
+
+            console.log(`      Found Candidate: ${email} | Company: ${company} | Phone: ${phones[0]}`);
 
             if (confidence >= CONFIG.MIN_CONFIDENCE) {
                 contacts.push({
@@ -196,8 +210,10 @@ function findCompanyNameInContext(lines, emailIndex, email) {
         if (PATTERNS.companyIndicators.test(line) && line.length < 80) {
             return line.replace(/^(Name|Company|Organization)\s*[:\.]?\s*/i, '').trim();
         }
-        if (/^[A-Z]/.test(line) && line.length > 4 && line.length < 60 && !line.includes('.')) {
-            if (lines[lineIndex + 1] && /Address/i.test(lines[lineIndex + 1])) {
+        // Baş harf büyük kontrolü ve noktalama olmaması
+        if (/^[A-Z]/.test(line) && line.length > 4 && line.length < 60 && !line.endsWith('.')) {
+             // Alt satırda adres varsa bu satır şirkettir
+            if (lines[lineIndex + 1] && /Address|Box/i.test(lines[lineIndex + 1])) {
                 return line;
             }
         }
@@ -245,7 +261,7 @@ function extractAddresses(contextLines, relativeEmailIdx) {
 function deriveCompanyFromEmail(email) {
     try {
         const domain = email.split('@')[1];
-        if (['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com'].includes(domain)) return "Individual";
+        if (['gmail.com', 'yahoo.com', 'hotmail.com'].includes(domain)) return "Individual";
         let name = domain.split('.')[0];
         return name.charAt(0).toUpperCase() + name.slice(1);
     } catch (e) { return "Unknown"; }
@@ -277,39 +293,61 @@ function calculateConfidence(data) {
 }
 
 // ============================================
-// 4. MAIN RUNNER
+// 4. MAIN RUNNER (AKILLI HEADER KONTROLÜ)
 // ============================================
 async function runFileMining(job) {
-    console.log(`📂 Starting Universal File Miner v7.1 for Job: ${job.id}`);
+    console.log(`📂 Starting Universal File Miner v7.2 (Debug Edition) for Job: ${job.id}`);
     if (!job.file_data) throw new Error("No file data found.");
 
     let fileBuffer = job.file_data;
-    if (!Buffer.isBuffer(fileBuffer)) {
+
+    // --- RÖNTGEN: Buffer ne durumda? ---
+    console.log(`   📊 Input Data Type: ${typeof fileBuffer}`);
+    if (Buffer.isBuffer(fileBuffer)) {
+        console.log(`   📊 Buffer Size: ${fileBuffer.length} bytes`);
+        const headerHex = fileBuffer.subarray(0, 8).toString('hex');
+        console.log(`   🔍 Header HEX: ${headerHex}`);
+
+        // %PDF Magic Bytes: 25 50 44 46
+        if (headerHex.startsWith('25504446')) {
+            console.log("   ✅ Valid PDF Header detected. No conversion needed.");
+        } 
+        // Postgres Hex String: \x (5c 78)
+        else if (headerHex.startsWith('5c78')) {
+            console.log("   ⚠️ Postgres HEX String detected (\\x...). Converting to Buffer...");
+            fileBuffer = Buffer.from(fileBuffer.toString('utf8').slice(2), 'hex');
+            console.log(`   ✅ Converted. New Size: ${fileBuffer.length}, New Header: ${fileBuffer.subarray(0, 8).toString('hex')}`);
+        }
+        else {
+            console.warn("   ⚠️ Unknown File Header. Attempting processing anyway.");
+        }
+    } else {
+        // String gelirse
         if (typeof fileBuffer === 'string' && fileBuffer.startsWith('\\x')) {
+            console.log("   ⚠️ Input is String starting with \\x. Converting...");
             fileBuffer = Buffer.from(fileBuffer.slice(2), 'hex');
         } else {
-            fileBuffer = Buffer.from(fileBuffer);
+             console.log("   ⚠️ Input is plain String/Buffer. Using as is.");
+             fileBuffer = Buffer.from(fileBuffer);
         }
-    }
-    if (fileBuffer.length > 2 && fileBuffer[0] === 0x5c && fileBuffer[1] === 0x78) {
-        fileBuffer = Buffer.from(fileBuffer.toString('utf8').slice(2), 'hex');
     }
 
     const filename = job.input.toLowerCase();
     let contacts = [];
 
     try {
+        let text = "";
         if (filename.endsWith('.pdf')) {
-            const text = await extractFromPDF(fileBuffer);
+            text = await extractFromPDF(fileBuffer);
             contacts = mineUnstructuredData(text);
         } else if (filename.endsWith('.xlsx') || filename.endsWith('.xls')) {
             const result = await extractFromExcel(fileBuffer);
             if (result.type === 'structured') contacts = mineStructuredData(result.data);
         } else if (filename.endsWith('.docx') || filename.endsWith('.doc')) {
-            const text = await extractFromWord(fileBuffer);
+            text = await extractFromWord(fileBuffer);
             contacts = mineUnstructuredData(text);
         } else {
-            const text = fileBuffer.toString('utf8');
+            text = fileBuffer.toString('utf8');
             if ((text.match(/,/g) || []).length > (text.split('\n').length)) {
                 const rows = text.split('\n').map(r => r.split(/,|;/));
                 contacts = mineStructuredData([rows]);
@@ -319,6 +357,12 @@ async function runFileMining(job) {
         }
 
         console.log(`   ✅ Mining Complete. Found ${contacts.length} contacts.`);
+        
+        // Sonuç 0 ise log bas
+        if (contacts.length === 0) {
+            console.log("   ⚠️ Zero contacts found. Check 'Analyzing Text Sample' log above to see if text is empty.");
+        }
+
         await saveResultsToDb(job, contacts);
     } catch (err) {
         console.error("Critical Miner Error:", err);
