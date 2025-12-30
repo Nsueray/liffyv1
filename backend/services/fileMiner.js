@@ -77,21 +77,41 @@ const PATTERNS = {
 // 1. BUFFER DÜZELTME (Postgres Bytea Fix)
 // ============================================
 function ensureBuffer(input) {
-    if (Buffer.isBuffer(input)) return input;
+    // DEBUG: Input tipini ve ilk byte'ları göster
+    console.log("   🔍 Input type:", typeof input);
+    console.log("   🔍 Is Buffer:", Buffer.isBuffer(input));
+    if (typeof input === 'string') {
+        console.log("   🔍 String starts with:", JSON.stringify(input.substring(0, 50)));
+    }
+    
+    if (Buffer.isBuffer(input)) {
+        console.log("   🔍 Buffer first 20 bytes:", input.slice(0, 20).toString('hex'));
+        return input;
+    }
     
     if (typeof input === 'string') {
         // Postgres hex formatı: \xDEADBEEF...
         if (input.startsWith('\\x')) {
             console.log("   🛠️ Fixing Postgres Bytea (\\x prefix)...");
-            return Buffer.from(input.slice(2), 'hex');
+            const buf = Buffer.from(input.slice(2), 'hex');
+            console.log("   🔍 Converted buffer first 20 bytes:", buf.slice(0, 20).toString('hex'));
+            return buf;
         }
-        // Base64 veya düz string olabilir
+        // Base64 olabilir
+        if (input.match(/^[A-Za-z0-9+/=]+$/)) {
+            console.log("   🛠️ Trying Base64 decode...");
+            const buf = Buffer.from(input, 'base64');
+            console.log("   🔍 Base64 buffer first 20 bytes:", buf.slice(0, 20).toString('hex'));
+            return buf;
+        }
         return Buffer.from(input);
     }
     
     // Obje gelirse (örn: { type: 'Buffer', data: [...] })
     if (input && input.type === 'Buffer' && Array.isArray(input.data)) {
-        return Buffer.from(input.data);
+        const buf = Buffer.from(input.data);
+        console.log("   🔍 Object buffer first 20 bytes:", buf.slice(0, 20).toString('hex'));
+        return buf;
     }
 
     throw new Error(`Unknown data type: ${typeof input}`);
@@ -357,15 +377,24 @@ function calculateConfidence(data) {
 }
 
 // ============================================
-// 4. MAIN RUNNER (V9.0)
+// 5. MAIN RUNNER (V9.1 - Buffer Debug)
 // ============================================
 async function runFileMining(job) {
-    console.log(`📂 Starting Universal File Miner v9.0 (Fonts + Fixes) for Job: ${job.id}`);
+    console.log(`📂 Starting Universal File Miner v9.1 (Buffer Debug) for Job: ${job.id}`);
     if (!job.file_data) throw new Error("No file data found.");
 
     // Sağlam Buffer Kontrolü
     const fileBuffer = ensureBuffer(job.file_data);
     console.log(`   📊 Buffer Prepared. Size: ${fileBuffer.length} bytes`);
+    
+    // PDF Magic Bytes kontrolü
+    const magic = fileBuffer.slice(0, 8).toString('utf8');
+    console.log(`   🔍 Magic bytes (UTF8): "${magic}"`);
+    console.log(`   🔍 Magic bytes (HEX): ${fileBuffer.slice(0, 8).toString('hex')}`);
+    
+    if (!magic.startsWith('%PDF')) {
+        console.error("   ❌ WARNING: File does not start with %PDF - buffer may be corrupted!");
+    }
 
     const filename = job.input.toLowerCase();
     let contacts = [];
