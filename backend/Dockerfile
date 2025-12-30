@@ -1,21 +1,16 @@
-# Node.js 22 imajını kullan (Senin versiyonunla uyumlu)
+# backend/Dockerfile
 FROM node:22-alpine
 
-# Çalışma dizinini ayarla
 WORKDIR /app
 
-# 1. Önce sadece paket dosyalarını kopyala (Root context'ten)
-COPY package.json package-lock.json ./
+# KRİTİK: pdftotext (poppler-utils) kurulumu
+RUN apk add --no-cache poppler-utils
 
-# 2. Paketleri yükle (Cache mekanizmasını bozmamak için)
+COPY package.json package-lock.json ./
 RUN npm ci
 
-# 3. Şimdi kaynak kodları kopyala
-# Context "Root" olduğu için, backend klasörünü içeri alıyoruz
 COPY backend ./backend
 
-# Uploads klasörünü oluştur (Dosya yüklemeleri için)
-RUN mkdir -p uploads
+RUN mkdir -p uploads && mkdir -p /tmp
 
-# 4. Worker'ı başlat
 CMD ["node", "backend/worker.js"]
