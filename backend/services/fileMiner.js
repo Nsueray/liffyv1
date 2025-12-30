@@ -7,19 +7,24 @@ const { Readable } = require('stream');
 
 // --- HELPER FUNCTIONS ---
 function extractEmails(text) {
+  if (!text) return [];
   const emails = new Set();
+  // Regex: Basit ve etkili bir email yakalayıcı
   const regex = /[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
   const matches = text.match(regex) || [];
   matches.forEach(e => {
     const clean = e.toLowerCase().trim();
-    const junk = ["example.com", "domain.com", "email.com", ".png", ".jpg"];
+    // Gereksiz "dummy" emailleri filtrele
+    const junk = ["example.com", "domain.com", "email.com", ".png", ".jpg", "yourname", "username"];
     if (!junk.some(j => clean.includes(j))) emails.add(clean);
   });
   return Array.from(emails);
 }
 
 function extractPhones(text) {
+  if (!text) return [];
   const phones = new Set();
+  // Regex: Uluslararası ve yerel formatları yakalamaya çalışan genel bir regex
   const regex = /(?:\+|00)[1-9]\d{0,3}[\s\.\-]?\(?0?\d{1,4}\)?[\s\.\-]?\d{2,4}[\s\.\-]?\d{2,4}[\s\.\-]?\d{2,4}/g;
   const matches = text.match(regex) || [];
   matches.forEach(p => {
@@ -31,8 +36,14 @@ function extractPhones(text) {
 // --- PARSERS (BUFFER BASED) ---
 
 async function parsePdf(buffer) {
-  const data = await pdf(buffer);
-  return data.text;
+  try {
+      const data = await pdf(buffer);
+      return data.text;
+  } catch (error) {
+      console.error("PDF Parsing Error:", error.message);
+      // Hata olsa bile pdf-parse bazen kısmi veri döndürür, onu kurtarmayı deneyelim
+      return "";
+  }
 }
 
 async function parseDocx(buffer) {
@@ -68,29 +79,52 @@ async function parseCsv(buffer) {
 async function runFileMining(job) {
   console.log(`📂 Starting File Miner for Job: ${job.id}`);
 
-  // Dosya verisi DB'den geldi mi?
+  // 1. GÜVENLİK KONTROLÜ: Veri var mı?
   if (!job.file_data) {
     throw new Error("No file data found in database for this job.");
   }
 
-  // job.input dosya adını taşıyor
+  // 2. BUFFER DÖNÜŞÜMÜ (Kritik Düzeltme)
+  // Postgres bazen binary veriyi Hex String (\x...) olarak döndürür.
+  // Bunu gerçek bir Buffer'a çevirmemiz gerekir.
+  let fileBuffer = job.file_data;
+
+  if (!Buffer.isBuffer(fileBuffer)) {
+      if (typeof fileBuffer === 'string' && fileBuffer.startsWith('\\x')) {
+          // Hex string ise Buffer'a çevir
+          console.log("   ⚠️ Converting Postgres Hex String to Buffer...");
+          fileBuffer = Buffer.from(fileBuffer.slice(2), 'hex');
+      } else if (typeof fileBuffer === 'object') {
+           // Bazen JSON objesi gibi gelebilir
+           fileBuffer = Buffer.from(fileBuffer);
+      } else {
+           // String ise
+           fileBuffer = Buffer.from(fileBuffer);
+      }
+  }
+
   const filename = job.input.toLowerCase();
   let content = "";
 
   try {
-    console.log(`   📄 Parsing file: ${filename}`);
+    console.log(`   📄 Parsing file: ${filename} (Size: ${fileBuffer.length} bytes)`);
 
     if (filename.endsWith('.pdf')) {
-        content = await parsePdf(job.file_data);
+        content = await parsePdf(fileBuffer);
     } else if (filename.endsWith('.docx') || filename.endsWith('.doc')) {
-        content = await parseDocx(job.file_data);
+        content = await parseDocx(fileBuffer);
     } else if (filename.endsWith('.xlsx') || filename.endsWith('.xls')) {
-        content = await parseExcel(job.file_data);
+        content = await parseExcel(fileBuffer);
     } else if (filename.endsWith('.csv')) {
-        content = await parseCsv(job.file_data);
+        content = await parseCsv(fileBuffer);
     } else {
         // Text tabanlı varsayalım
-        content = job.file_data.toString('utf8');
+        content = fileBuffer.toString('utf8');
+    }
+
+    // İçerik boşsa hata fırlatma, log bas (PDF taranmış resim olabilir)
+    if (!content || content.trim().length === 0) {
+        console.warn("   ⚠️ Warning: Extracted text is empty. File might be an image-only PDF.");
     }
 
     const emails = extractEmails(content);
@@ -99,6 +133,8 @@ async function runFileMining(job) {
     console.log(`   ✅ Extracted: ${emails.length} emails, ${phones.length} phones`);
 
     const results = [];
+    
+    // Email varsa ekle
     if (emails.length > 0) {
         emails.forEach(email => {
             results.push({
@@ -109,7 +145,9 @@ async function runFileMining(job) {
                 source_type: "file"
             });
         });
-    } else if (phones.length > 0) {
+    } 
+    // Email yok ama telefon varsa ekle
+    else if (phones.length > 0) {
          phones.forEach(phone => {
             results.push({
                 url: job.input,
@@ -146,10 +184,11 @@ async function saveResultsToDb(job, results) {
 
     const summary = { total_found: results.length, total_emails: totalEmails, file_type: 'file_upload' };
 
-    // İş bittiğinde file_data'yı null yaparak DB'yi rahatlatabiliriz (Opsiyonel ama iyi olur)
+    // İş bittiğinde file_data'yı sıfırlayarak DB'yi rahatlatıyoruz
+    // NOT: Dosyayı saklamak istersen ", file_data = NULL" kısmını silebilirsin.
     await client.query(`
       UPDATE mining_jobs 
-      SET total_found = $1, total_emails_raw = $2, status = 'completed', completed_at = NOW(), stats = $3
+      SET total_found = $1, total_emails_raw = $2, status = 'completed', completed_at = NOW(), stats = $3, file_data = NULL
       WHERE id = $4
     `, [results.length, totalEmails, summary, job.id]);
 
