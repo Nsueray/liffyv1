@@ -9,25 +9,15 @@ const fs = require('fs');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
 
-// --- MULTER AYARLARI (Dosya Yükleme) ---
-// Uploads klasörünü oluştur (Eğer yoksa)
-const uploadDir = path.join(__dirname, '../../uploads');
-if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
-}
+// --- MULTER AYARLARI (MEMORY STORAGE) ---
+// Dosyayı diske değil, RAM'e (Buffer) alıyoruz.
+// Böylece veritabanına BYTEA olarak kaydedebiliriz.
+const storage = multer.memoryStorage();
 
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, uploadDir)
-  },
-  filename: function (req, file, cb) {
-    // Dosya adını benzersiz yap: timestamp-orijinalIsim
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9)
-    cb(null, uniqueSuffix + '-' + file.originalname)
-  }
+const upload = multer({ 
+    storage: storage,
+    limits: { fileSize: 10 * 1024 * 1024 } // 10MB Limit (Güvenlik için)
 });
-
-const upload = multer({ storage: storage });
 
 /**
  * Auth middleware
@@ -84,13 +74,15 @@ router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req,
     
     // Body'den verileri al
     let { type, input, name, strategy, site_profile, config } = req.body;
+    let fileBuffer = null;
 
     // Dosya Yüklendiyse (Multipart)
     if (req.file) {
         type = 'file';
-        input = req.file.filename; // Diske kaydedilen dosya adı
-        name = name || req.file.originalname; // İsim verilmediyse dosya adını kullan
+        input = req.file.originalname; // Dosya ismini input olarak sakla
+        name = name || req.file.originalname;
         strategy = 'auto'; // Dosyalar için her zaman auto
+        fileBuffer = req.file.buffer; // Dosyanın binary verisi
     }
 
     // Validation
@@ -114,11 +106,13 @@ router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req,
         try { config = JSON.parse(config); } catch(e) { config = {} }
     }
 
+    // DB'ye Kayıt (file_data sütununa buffer'ı ekliyoruz)
     const result = await db.query(
       `INSERT INTO mining_jobs
-       (organizer_id, type, input, name, strategy, site_profile, config, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
-       RETURNING *`,
+       (organizer_id, type, input, name, strategy, site_profile, config, status, file_data)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+       RETURNING id, organizer_id, type, input, name, strategy, site_profile, config, status, created_at`, 
+       // Not: file_data'yı RETURNING ile geri döndürmüyoruz, performans için.
       [
         organizer_id,
         type,
@@ -127,6 +121,7 @@ router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req,
         strategy || 'auto',
         site_profile || null,
         config || {},
+        fileBuffer
       ]
     );
 
@@ -167,8 +162,11 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
       idx++;
     }
 
+    // ÖNEMLİ: file_data sütununu bilerek seçmiyoruz (*) kullanmıyoruz.
+    // Çünkü listelemede binary dosya verisini çekersek API çok yavaşlar.
     const jobsRes = await db.query(
-      `SELECT *
+      `SELECT id, organizer_id, type, input, name, strategy, site_profile, config, status, 
+              progress, total_found, total_emails_raw, stats, created_at, completed_at
        FROM mining_jobs
        WHERE ${where.join(' AND ')}
        ORDER BY created_at DESC
@@ -208,8 +206,11 @@ router.get('/api/mining/jobs/:id', authRequired, validateJobId, async (req, res)
   const { organizer_id } = req.auth;
   const job_id = req.params.id;
 
+  // Detayda da file_data'yı çekmiyoruz, gerekirse ayrı endpoint yapılır.
   const result = await db.query(
-    `SELECT * FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+    `SELECT id, organizer_id, type, input, name, strategy, site_profile, config, status, 
+            progress, total_found, total_emails_raw, stats, created_at, completed_at
+     FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
     [job_id, organizer_id]
   );
 
@@ -236,8 +237,10 @@ router.patch('/api/mining/jobs/:id', authRequired, validateJobId, async (req, re
   const setClause = keys.map((k, i) => `${k} = $${i + 3}`).join(', ');
   const values = [job_id, organizer_id, ...Object.values(updates)];
 
+  // file_data hariç dön
   const result = await db.query(
-    `UPDATE mining_jobs SET ${setClause} WHERE id = $1 AND organizer_id = $2 RETURNING *`,
+    `UPDATE mining_jobs SET ${setClause} WHERE id = $1 AND organizer_id = $2 
+     RETURNING id, organizer_id, type, input, name, status, config, stats`,
     values
   );
 
@@ -256,6 +259,7 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
   const organizer_id = req.auth.organizer_id;
   const job_id = req.params.id;
 
+  // Retry için orijinal veriyi (binary file_data dahil) çekmemiz lazım
   const jobRes = await db.query(
     `SELECT * FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
     [job_id, organizer_id]
@@ -267,11 +271,12 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
 
   const j = jobRes.rows[0];
 
+  // Yeni job oluştururken eski binary datayı da kopyalıyoruz
   const newJob = await db.query(
     `INSERT INTO mining_jobs
-     (organizer_id, type, input, name, strategy, site_profile, config, status)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,'pending')
-     RETURNING *`,
+     (organizer_id, type, input, name, strategy, site_profile, config, status, file_data)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'pending', $8)
+     RETURNING id, organizer_id, type, input, name, status`,
     [
       organizer_id,
       j.type,
@@ -280,6 +285,7 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
       j.strategy,
       j.site_profile,
       j.config,
+      j.file_data // Eski dosya verisi
     ]
   );
 
@@ -303,7 +309,7 @@ router.delete('/api/mining/jobs/:id', authRequired, validateJobId, async (req, r
       return res.status(404).json({ error: 'Job not found' });
     }
 
-    // Delete job (assuming CASCADE is set up in DB for results, otherwise results need deletion first)
+    // Delete job (assuming CASCADE is set up in DB for results)
     await db.query(
       `DELETE FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [job_id, organizer_id]
