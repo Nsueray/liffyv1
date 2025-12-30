@@ -1,4 +1,21 @@
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
+
+// BYTEA FIX: PostgreSQL bytea sütunlarını düzgün Buffer olarak al
+// Type OID 17 = bytea
+types.setTypeParser(17, function(val) {
+  // val zaten Buffer olarak geliyor olabilir
+  if (Buffer.isBuffer(val)) return val;
+  
+  // String olarak geldiyse (hex format: \x...)
+  if (typeof val === 'string') {
+    if (val.startsWith('\\x')) {
+      return Buffer.from(val.slice(2), 'hex');
+    }
+    return Buffer.from(val, 'binary');
+  }
+  
+  return val;
+});
 
 const connectionString = process.env.DATABASE_URL;
 
