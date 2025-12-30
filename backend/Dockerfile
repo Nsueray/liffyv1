@@ -1,22 +1,19 @@
-# backend/Dockerfile
-FROM node:22-alpine
+# Node.js 22 Debian Slim
+FROM node:22-slim
 
 WORKDIR /app
 
-# --- KRİTİK GÜNCELLEME ---
-# 1. poppler-utils: pdftotext aracı
-# 2. poppler-data: PDF karakter kodlamaları (Bunu eklemezsek yazı çıkmaz!)
-# 3. font-noto, ttf-freefont: Temel fontlar
-# 4. msttcorefonts-installer: Arial, Times New Roman gibi Windows fontları
-RUN apk add --no-cache \
+# --- FONT VE ARAÇ PAKETLERİ (Debian) ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     poppler-data \
-    font-noto \
-    terminus-font \
-    ttf-freefont \
-    msttcorefonts-installer && \
-    update-ms-fonts && \
-    fc-cache -f
+    ghostscript \
+    fonts-noto \
+    fonts-freefont-ttf \
+    fonts-liberation \
+    fontconfig \
+    && fc-cache -f \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
 RUN npm ci
