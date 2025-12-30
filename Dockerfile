@@ -3,10 +3,11 @@ FROM node:22-slim
 
 WORKDIR /app
 
-# --- FONT VE ARAÇ PAKETLERİ (Debian) ---
+# --- FONT VE ARAÇ PAKETLERİ (Universal PDF Support) ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     poppler-data \
+    mupdf-tools \
     ghostscript \
     fonts-noto \
     fonts-freefont-ttf \

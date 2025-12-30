@@ -7,22 +7,23 @@ const execPromise = util.promisify(exec);
 const db = require('../db');
 
 // --- KÜTÜPHANELER ---
-let xlsx, mammoth;
+let xlsx, mammoth, pdfParse;
 try { xlsx = require('xlsx'); } catch(e) {}
 try { mammoth = require('mammoth'); } catch(e) {}
+try { pdfParse = require('pdf-parse'); } catch(e) {}
 
 // --- AYARLAR ---
 const CONFIG = {
     CONTEXT_LINES_ABOVE: 15,
     CONTEXT_LINES_BELOW: 10,
     MIN_CONFIDENCE: 40,
-    PDF_TIMEOUT: 60000, // 60 saniye (Timeout artırıldı)
-    MAX_BUFFER: 50 * 1024 * 1024 // 50MB
+    PDF_TIMEOUT: 60000,
+    MAX_BUFFER: 50 * 1024 * 1024,
+    MIN_TEXT_LENGTH: 500 // Bu uzunluktan az metin çıkarsa fallback'e geç
 };
 
-// --- DOMAIN MAPPING (Geri Getirildi - Fallback için Hayati) ---
+// --- DOMAIN MAPPING ---
 const DOMAIN_MAP = {
-    // Gana Özel
     'gwcl': 'Ghana Water Company Limited',
     'cwsa': 'Community Water and Sanitation Agency',
     'purcghana': 'Public Utilities Regulatory Commission',
@@ -35,7 +36,6 @@ const DOMAIN_MAP = {
     'blowgroup': 'Bel-Aqua (Blow-Chem Industries)',
     'jekoraventures': 'Jekora Ventures Ltd',
     'jospongroup': 'Jospong Group of Companies',
-    // Uluslararası
     'wateraid': 'WaterAid',
     'safewaternetwork': 'Safe Water Network',
     'unicef': 'UNICEF',
@@ -43,82 +43,52 @@ const DOMAIN_MAP = {
     'undp': 'UNDP'
 };
 
-// --- REGEX DESENLERİ (Geliştirilmiş) ---
+// --- REGEX DESENLERİ ---
 const PATTERNS = {
     email: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi,
-    
-    // Claude'un önerdiği kapsamlı telefon regexleri
     phone: [
-        /\+\d{1,4}[\s\-\.]?\(?\d{1,4}\)?[\s\-\.]?\d{2,4}[\s\-\.]?\d{2,4}/g, // Standart Uluslararası
-        /00\d{1,4}[\s\-\.]?\d{2,4}[\s\-\.]?\d{2,4}[\s\-\.]?\d{2,4}/g,       // 00 formatı
-        /\+233\s?\(0\)\s?\d{2,3}[\s\-]?\d{3}[\s\-]?\d{3,4}/g,               // Gana +233 (0)...
-        /0[23][0-9]{1,2}[\s\-]?\d{3}[\s\-]?\d{3,4}/g,                       // Gana Yerel (0302...)
-        /0[245][0-9][\s\-]?\d{3}[\s\-]?\d{4}/g,                             // Gana Cep (024...)
-        /\(\d{2,4}\)[\s\-]?\d{3,4}[\s\-]?\d{3,4}/g,                         // Parantezli Alan Kodu
-        /\d{3}[\-]\d{3}[\-]\d{4,6}/g,                                       // Tireli
-        /\d{3}\s\d{3}\s\d{4}/g                                              // Boşluklu
+        /\+\d{1,4}[\s\-\.]?\(?\d{1,4}\)?[\s\-\.]?\d{2,4}[\s\-\.]?\d{2,4}/g,
+        /00\d{1,4}[\s\-\.]?\d{2,4}[\s\-\.]?\d{2,4}[\s\-\.]?\d{2,4}/g,
+        /\+233\s?\(0\)\s?\d{2,3}[\s\-]?\d{3}[\s\-]?\d{3,4}/g,
+        /0[23][0-9]{1,2}[\s\-]?\d{3}[\s\-]?\d{3,4}/g,
+        /0[245][0-9][\s\-]?\d{3}[\s\-]?\d{4}/g,
+        /\(\d{2,4}\)[\s\-]?\d{3,4}[\s\-]?\d{3,4}/g,
+        /\d{3}[\-]\d{3}[\-]\d{4,6}/g,
+        /\d{3}\s\d{3}\s\d{4}/g
     ],
-
     website: [
         /https?:\/\/[^\s<>"']+/gi,
         /www\.[a-zA-Z0-9][a-zA-Z0-9\-]*\.[a-zA-Z]{2,}[^\s<>"']*/gi
     ],
-
-    companyIndicators: /(?:Ltd|Limited|Inc|Corp|Corporation|LLC|GmbH|AG|Company|Co\.|Authority|Agency|Commission|Ministry|Department|Institute|Association|Group|Ventures|Consult|Solutions|Services|Enterprises|Holdings|Bank|Council|Directorate)/i,
-
-    labels: {
-        address: /^(?:Address|Postal Address|Location|Office|Hq|Box)\s*[:\.]?\s*(.+)/i,
-        phone: /^(?:Telephone|Tel|Phone|Mobile|Cell|Fax)\s*[:\.]?\s*(.+)/i,
-        website: /^(?:Website|Web|URL)\s*[:\.]?\s*(.+)/i
-    }
+    companyIndicators: /(?:Ltd|Limited|Inc|Corp|Corporation|LLC|GmbH|AG|Company|Co\.|Authority|Agency|Commission|Ministry|Department|Institute|Association|Group|Ventures|Consult|Solutions|Services|Enterprises|Holdings|Bank|Council|Directorate)/i
 };
 
 // ============================================
-// 1. BUFFER DÜZELTME (Postgres Bytea Fix)
+// 1. BUFFER DÜZELTME
 // ============================================
 function ensureBuffer(input) {
-    // DEBUG: Input tipini ve ilk byte'ları göster
-    console.log("   🔍 Input type:", typeof input);
-    console.log("   🔍 Is Buffer:", Buffer.isBuffer(input));
-    if (typeof input === 'string') {
-        console.log("   🔍 String starts with:", JSON.stringify(input.substring(0, 50)));
-    }
-    
-    if (Buffer.isBuffer(input)) {
-        console.log("   🔍 Buffer first 20 bytes:", input.slice(0, 20).toString('hex'));
-        return input;
-    }
+    if (Buffer.isBuffer(input)) return input;
     
     if (typeof input === 'string') {
-        // Postgres hex formatı: \xDEADBEEF...
         if (input.startsWith('\\x')) {
-            console.log("   🛠️ Fixing Postgres Bytea (\\x prefix)...");
-            const buf = Buffer.from(input.slice(2), 'hex');
-            console.log("   🔍 Converted buffer first 20 bytes:", buf.slice(0, 20).toString('hex'));
-            return buf;
+            console.log("   🛠️ Converting Postgres Bytea...");
+            return Buffer.from(input.slice(2), 'hex');
         }
-        // Base64 olabilir
-        if (input.match(/^[A-Za-z0-9+/=]+$/)) {
-            console.log("   🛠️ Trying Base64 decode...");
-            const buf = Buffer.from(input, 'base64');
-            console.log("   🔍 Base64 buffer first 20 bytes:", buf.slice(0, 20).toString('hex'));
-            return buf;
+        if (input.match(/^[A-Za-z0-9+/=]+$/) && input.length > 100) {
+            return Buffer.from(input, 'base64');
         }
         return Buffer.from(input);
     }
     
-    // Obje gelirse (örn: { type: 'Buffer', data: [...] })
     if (input && input.type === 'Buffer' && Array.isArray(input.data)) {
-        const buf = Buffer.from(input.data);
-        console.log("   🔍 Object buffer first 20 bytes:", buf.slice(0, 20).toString('hex'));
-        return buf;
+        return Buffer.from(input.data);
     }
 
     throw new Error(`Unknown data type: ${typeof input}`);
 }
 
 // ============================================
-// 2. DOSYA OKUYUCULAR
+// 2. PDF EXTRACTION - UNIVERSAL FALLBACK CHAIN
 // ============================================
 
 async function extractFromPDF(buffer) {
@@ -126,41 +96,115 @@ async function extractFromPDF(buffer) {
     
     try {
         await fs.promises.writeFile(tempPath, buffer);
-        console.log("   📄 Attempting pdftotext (with enhanced fonts)...");
+        console.log("   📄 Starting Universal PDF Extraction Chain...");
         
-        // DEBUG: PDF info kontrolü
+        let text = '';
+        let method = '';
+
+        // ========== METHOD 1: pdftotext (Poppler) ==========
         try {
-            const { stdout: pdfInfo } = await execPromise(`pdfinfo "${tempPath}" 2>&1 || true`, { timeout: 5000 });
-            console.log("   📋 PDF Info:", pdfInfo.substring(0, 500));
+            console.log("   [1/4] Trying pdftotext...");
+            const { stdout } = await execPromise(
+                `pdftotext -layout -enc UTF-8 "${tempPath}" - 2>/dev/null`,
+                { timeout: CONFIG.PDF_TIMEOUT, maxBuffer: CONFIG.MAX_BUFFER }
+            );
+            
+            // Gerçek metin var mı kontrol et (sadece whitespace/control char değil)
+            const realText = stdout.replace(/[\s\f\r\n]/g, '');
+            if (realText.length >= CONFIG.MIN_TEXT_LENGTH) {
+                text = stdout;
+                method = 'pdftotext';
+                console.log(`   ✅ pdftotext SUCCESS: ${realText.length} chars`);
+            } else {
+                console.log(`   ⚠️ pdftotext: Only ${realText.length} chars (insufficient)`);
+            }
         } catch (e) {
-            console.log("   ⚠️ pdfinfo failed:", e.message);
+            console.log(`   ⚠️ pdftotext failed: ${e.message}`);
         }
-        
-        // Timeout ve Buffer artırıldı
-        const { stdout, stderr } = await execPromise(
-            `pdftotext -layout -enc UTF-8 "${tempPath}" -`, 
-            { timeout: CONFIG.PDF_TIMEOUT, maxBuffer: CONFIG.MAX_BUFFER }
-        );
-        
-        // DEBUG: İlk 500 karakteri göster
-        console.log("   🔍 First 500 chars:", JSON.stringify(stdout.substring(0, 500)));
-        console.log("   🔍 Stderr:", stderr || "none");
-        
-        if (stdout && stdout.length > 200) {
-            console.log(`   ✅ Success: Extracted ${stdout.length} chars.`);
-            return stdout;
+
+        // ========== METHOD 2: mutool (MuPDF) ==========
+        if (!text) {
+            try {
+                console.log("   [2/4] Trying mutool (MuPDF)...");
+                const { stdout } = await execPromise(
+                    `mutool draw -F txt -o - "${tempPath}" 2>/dev/null`,
+                    { timeout: CONFIG.PDF_TIMEOUT, maxBuffer: CONFIG.MAX_BUFFER }
+                );
+                
+                const realText = stdout.replace(/[\s\f\r\n]/g, '');
+                if (realText.length >= CONFIG.MIN_TEXT_LENGTH) {
+                    text = stdout;
+                    method = 'mutool';
+                    console.log(`   ✅ mutool SUCCESS: ${realText.length} chars`);
+                } else {
+                    console.log(`   ⚠️ mutool: Only ${realText.length} chars (insufficient)`);
+                }
+            } catch (e) {
+                console.log(`   ⚠️ mutool failed: ${e.message}`);
+            }
+        }
+
+        // ========== METHOD 3: pdf-parse (JavaScript - Pure) ==========
+        if (!text && pdfParse) {
+            try {
+                console.log("   [3/4] Trying pdf-parse (JS)...");
+                const data = await pdfParse(buffer);
+                
+                const realText = data.text.replace(/[\s\f\r\n]/g, '');
+                if (realText.length >= CONFIG.MIN_TEXT_LENGTH) {
+                    text = data.text;
+                    method = 'pdf-parse';
+                    console.log(`   ✅ pdf-parse SUCCESS: ${realText.length} chars`);
+                } else {
+                    console.log(`   ⚠️ pdf-parse: Only ${realText.length} chars (insufficient)`);
+                }
+            } catch (e) {
+                console.log(`   ⚠️ pdf-parse failed: ${e.message}`);
+            }
+        }
+
+        // ========== METHOD 4: Raw Buffer Scan (Last Resort) ==========
+        if (!text) {
+            try {
+                console.log("   [4/4] Trying raw buffer scan...");
+                const rawText = buffer.toString('latin1');
+                
+                // PDF içinden metin parçalarını çıkarmaya çalış
+                const textMatches = rawText.match(/\(([^)]+)\)/g) || [];
+                const extracted = textMatches
+                    .map(m => m.slice(1, -1))
+                    .filter(t => t.length > 3 && /[a-zA-Z]/.test(t))
+                    .join(' ');
+                
+                if (extracted.length >= 100) {
+                    text = extracted;
+                    method = 'raw-scan';
+                    console.log(`   ✅ raw-scan SUCCESS: ${extracted.length} chars`);
+                } else {
+                    console.log(`   ⚠️ raw-scan: Only ${extracted.length} chars`);
+                }
+            } catch (e) {
+                console.log(`   ⚠️ raw-scan failed: ${e.message}`);
+            }
+        }
+
+        // ========== SONUÇ ==========
+        if (text) {
+            console.log(`   🎉 PDF Extraction Complete via [${method}]: ${text.length} total chars`);
+            return text;
         } else {
-            console.warn(`   ⚠️ Warning: Extracted text is very short (${stdout ? stdout.length : 0} chars). Font issue likely persisted.`);
-            return stdout || ""; 
+            console.error("   ❌ ALL PDF METHODS FAILED - No text extracted");
+            return '';
         }
-    } catch (e) {
-        console.error("   ❌ pdftotext Failed:", e.message);
-        // Fallback: Raw Buffer Scan (Umutsuz durumlar için)
-        return buffer.toString('latin1');
+
     } finally {
         try { await fs.promises.unlink(tempPath); } catch (e) {}
     }
 }
+
+// ============================================
+// 3. EXCEL & WORD READERS
+// ============================================
 
 async function extractFromExcel(buffer) {
     if (!xlsx) return "";
@@ -180,7 +224,7 @@ async function extractFromWord(buffer) {
 }
 
 // ============================================
-// 3. MADENCİLİK MOTORU
+// 4. MINING ENGINE
 // ============================================
 
 function mineUnstructuredData(text) {
@@ -199,20 +243,17 @@ function mineUnstructuredData(text) {
 
             processedEmails.add(emailLower);
 
-            // Context Window
             const start = Math.max(0, i - CONFIG.CONTEXT_LINES_ABOVE);
             const end = Math.min(lines.length, i + CONFIG.CONTEXT_LINES_BELOW);
             const contextLines = lines.slice(start, end);
             const contextText = contextLines.join('\n');
 
-            // Verileri Çek
             let company = findCompanyNameInContext(lines, i, emailLower);
             const phones = extractPhones(contextText);
             const websites = extractWebsites(contextText);
-            const addresses = extractAddresses(contextLines, i - start);
+            const addresses = extractAddresses(contextLines);
             const country = detectCountry(contextText);
 
-            // Fallbackler
             let website = websites[0] || deriveWebsiteFromEmail(emailLower);
             if (!company || company === "Unknown") {
                 company = deriveCompanyFromEmail(emailLower);
@@ -258,7 +299,6 @@ function mineStructuredData(sheetsData) {
                     if (str.length > 3 && PATTERNS.companyIndicators.test(str) && !PATTERNS.email.test(str)) company = str;
                 });
                 
-                // Fallback
                 if (!company) company = deriveCompanyFromEmail(email.toLowerCase());
 
                 contacts.push({
@@ -278,17 +318,15 @@ function mineStructuredData(sheetsData) {
 }
 
 // ============================================
-// 4. YARDIMCI FONKSİYONLAR
+// 5. HELPER FUNCTIONS
 // ============================================
 
 function findCompanyNameInContext(lines, emailIndex, email) {
-    // Önce Domain Mapping kontrolü (En garantisi)
     const domain = email.split('@')[1];
     for (const [key, val] of Object.entries(DOMAIN_MAP)) {
         if (domain.includes(key)) return val;
     }
 
-    // Sonra Context analizi
     for (let i = 1; i <= CONFIG.CONTEXT_LINES_ABOVE; i++) {
         const lineIndex = emailIndex - i;
         if (lineIndex < 0) break;
@@ -330,7 +368,7 @@ function extractWebsites(text) {
     return Array.from(sites);
 }
 
-function extractAddresses(contextLines, relativeEmailIdx) {
+function extractAddresses(contextLines) {
     const addresses = [];
     contextLines.forEach(line => {
         if (/^(Address|Location|P\.?O\.?\s?Box)/i.test(line)) {
@@ -343,7 +381,6 @@ function extractAddresses(contextLines, relativeEmailIdx) {
 function deriveCompanyFromEmail(email) {
     try {
         const domain = email.split('@')[1];
-        // Domain Map kontrolü tekrar (Fallback için)
         for (const [key, val] of Object.entries(DOMAIN_MAP)) {
             if (domain.includes(key)) return val;
         }
@@ -377,24 +414,14 @@ function calculateConfidence(data) {
 }
 
 // ============================================
-// 5. MAIN RUNNER (V9.1 - Buffer Debug)
+// 6. MAIN RUNNER (V10.0 - Universal Fallback)
 // ============================================
 async function runFileMining(job) {
-    console.log(`📂 Starting Universal File Miner v9.1 (Buffer Debug) for Job: ${job.id}`);
+    console.log(`📂 Starting Universal File Miner v10.0 for Job: ${job.id}`);
     if (!job.file_data) throw new Error("No file data found.");
 
-    // Sağlam Buffer Kontrolü
     const fileBuffer = ensureBuffer(job.file_data);
-    console.log(`   📊 Buffer Prepared. Size: ${fileBuffer.length} bytes`);
-    
-    // PDF Magic Bytes kontrolü
-    const magic = fileBuffer.slice(0, 8).toString('utf8');
-    console.log(`   🔍 Magic bytes (UTF8): "${magic}"`);
-    console.log(`   🔍 Magic bytes (HEX): ${fileBuffer.slice(0, 8).toString('hex')}`);
-    
-    if (!magic.startsWith('%PDF')) {
-        console.error("   ❌ WARNING: File does not start with %PDF - buffer may be corrupted!");
-    }
+    console.log(`   📊 Buffer Size: ${fileBuffer.length} bytes`);
 
     const filename = job.input.toLowerCase();
     let contacts = [];
