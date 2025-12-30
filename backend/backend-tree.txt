@@ -1,0 +1,39 @@
+.
+├── backend-tree.txt
+├── config.js
+├── db.js
+├── mailer.js
+├── migrations
+│   ├── 001_create_email_templates.sql
+│   ├── 002_create_campaigns.sql
+│   ├── 003_create_email_logs.sql
+│   ├── 004_create_organizers_users_sender_identities.sql
+│   ├── 005_create_campaign_recipients.sql
+│   ├── 006_create_prospects_and_lists.sql
+│   └── 007_create_mining_jobs.sql
+├── models
+│   ├── campaigns.js
+│   ├── emailLogs.js
+│   └── emailTemplates.js
+├── package-lock.json
+├── package.json
+├── routes
+│   ├── auth.js
+│   ├── campaignRecipients.js
+│   ├── campaignSend.js
+│   ├── campaigns.js
+│   ├── emailLogs.js
+│   ├── emailTemplates.js
+│   ├── miningJobs.js
+│   ├── miningResults.js
+│   ├── prospects.js
+│   ├── reports.js
+│   ├── senders.js
+│   └── testEmail.js
+├── server.js
+└── services
+    ├── miningWorker.js
+    ├── playwrightClient.js
+    └── urlMiner.js
+
+5 directories, 32 files
