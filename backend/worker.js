@@ -1,4 +1,3 @@
-cat > backend/worker.js << 'EOF'
 const db = require("./db");
 const { sendEmail } = require("./mailer");
 const { runMiningTest } = require("./services/miningWorker");
@@ -167,4 +166,3 @@ async function handleManualAssist(jobId) {
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 startWorker().catch(err => console.error("💥 Fatal error:", err));
-EOF
