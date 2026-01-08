@@ -1,21 +1,28 @@
 const db = require("./db");
 const { sendEmail } = require("./mailer");
-const { runMiningTest } = require("./services/miningWorker");
-const { runFileMining } = require("./services/fileMiner");
-const { runUrlMiningJob } = require("./services/urlMiner");
+const { processMiningJob } = require("./services/miningService");
 
 const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 30000;
 
+/* ======================
+   HEARTBEAT
+====================== */
 setInterval(() => {
   console.log("💓 Worker heartbeat – alive");
 }, HEARTBEAT_INTERVAL_MS);
 
+/* ======================
+   SIGNAL HANDLING
+====================== */
 process.on("SIGTERM", () => console.log("⚠️ SIGTERM received – ignored"));
 process.on("SIGINT", () => console.log("⚠️ SIGINT received – ignored"));
 
+/* ======================
+   WORKER LOOP
+====================== */
 async function startWorker() {
-  console.log("🧪 Liffy Worker V11.2 (Smart Routing)");
+  console.log("🧪 Liffy Worker V12.0 (Orchestrator Driven)");
 
   while (true) {
     try {
@@ -54,43 +61,23 @@ async function processNextJob() {
     console.log("\n==============================");
     console.log(`⛏️ JOB PICKED: ${job.id}`);
     console.log(`📂 TYPE: ${job.type}`);
-    console.log(`🎯 STRATEGY: ${job.strategy || 'auto'}`);
+    console.log(`🎯 STRATEGY: ${job.strategy || "auto"}`);
     console.log(`🌐 TARGET: ${job.input}`);
     console.log("==============================");
 
     await client.query(
       `UPDATE mining_jobs
-       SET status='running', started_at=NOW(), error=NULL
-       WHERE id=$1`,
+       SET status = 'running', started_at = NOW(), error = NULL
+       WHERE id = $1`,
       [job.id]
     );
 
     await client.query("COMMIT");
 
-    // ============================================
-    // 🚀 SMART ROUTING
-    // ============================================
-    
-    if (job.type === 'file' || job.type === 'pdf' || job.type === 'excel' || job.type === 'word' || job.type === 'other') {
-      // 📁 FILE MINING
-      console.log("   🔀 Route → FILE MINER");
-      await runFileMining(job);
-      
-    } else if (job.type === 'url' && job.strategy === 'playwright') {
-      // 🎭 PLAYWRIGHT MINING (JS-heavy sites, anti-bot)
-      console.log("   🔀 Route → PLAYWRIGHT MINER");
-      await runMiningTest(job);
-      
-    } else if (job.type === 'url') {
-      // ⚡ AXIOS GOLDEN (Default - Fast & Light)
-      console.log("   🔀 Route → AXIOS MINER (Golden)");
-      await runUrlMiningJob(job.id, job.organizer_id);
-      
-    } else {
-      // 🤔 Unknown type - try Axios as fallback
-      console.log(`   🔀 Route → FALLBACK (unknown type: ${job.type})`);
-      await runUrlMiningJob(job.id, job.organizer_id);
-    }
+    /* ======================
+       ORCHESTRATOR ENTRY
+    ====================== */
+    await processMiningJob(job);
 
     console.log("✅ Worker: Job execution finished normally.");
 
@@ -106,8 +93,13 @@ async function processNextJob() {
       console.error("❌ Worker Job Failed:", err.message);
       if (currentJobId) {
         try {
-          await db.query("UPDATE mining_jobs SET status='failed', error=$1 WHERE id=$2", [err.message, currentJobId]);
-        } catch(e) { /* ignore */ }
+          await db.query(
+            "UPDATE mining_jobs SET status = 'failed', error = $1 WHERE id = $2",
+            [err.message, currentJobId]
+          );
+        } catch (e) {
+          /* ignore */
+        }
       }
     }
   } finally {
@@ -115,11 +107,18 @@ async function processNextJob() {
   }
 }
 
+/* ======================
+   MANUAL ASSIST
+====================== */
 async function handleManualAssist(jobId) {
   if (!jobId) return;
-  
-  const jobRes = await db.query("SELECT * FROM mining_jobs WHERE id = $1", [jobId]);
+
+  const jobRes = await db.query(
+    "SELECT * FROM mining_jobs WHERE id = $1",
+    [jobId]
+  );
   if (jobRes.rows.length === 0) return;
+
   const job = jobRes.rows[0];
 
   console.log(`📧 Preparing manual assist email for job ${jobId}...`);
@@ -159,10 +158,10 @@ async function handleManualAssist(jobId) {
   } else {
     console.log("ℹ️ Manual assist already triggered, skipping email.");
   }
-  
+
   console.log("🟡 Job left in RUNNING state for manual assist");
 }
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-startWorker().catch(err => console.error("💥 Fatal error:", err));
+startWorker().catch((err) => console.error("💥 Fatal error:", err));
