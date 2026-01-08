@@ -1,37 +1,22 @@
+cat > backend/worker.js << 'EOF'
 const db = require("./db");
 const { sendEmail } = require("./mailer");
 const { runMiningTest } = require("./services/miningWorker");
-const { runFileMining } = require("./services/fileMiner"); // YENİ EKLENDİ
+const { runFileMining } = require("./services/fileMiner");
+const { runUrlMiningJob } = require("./services/urlMiner");
 
 const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 30000;
-
-/* ======================
-   HEARTBEAT (IDLE SAFE)
-====================== */
 
 setInterval(() => {
   console.log("💓 Worker heartbeat – alive");
 }, HEARTBEAT_INTERVAL_MS);
 
-/* ======================
-   SIGNAL HANDLING
-====================== */
-
-process.on("SIGTERM", () => {
-  console.log("⚠️ SIGTERM received – ignored");
-});
-
-process.on("SIGINT", () => {
-  console.log("⚠️ SIGINT received – ignored");
-});
-
-/* ======================
-   WORKER LOOP
-====================== */
+process.on("SIGTERM", () => console.log("⚠️ SIGTERM received – ignored"));
+process.on("SIGINT", () => console.log("⚠️ SIGINT received – ignored"));
 
 async function startWorker() {
-  console.log("🧪 Liffy Worker started (URL + FILE MINER)");
+  console.log("🧪 Liffy Worker V11.2 (Smart Routing)");
 
   while (true) {
     try {
@@ -50,7 +35,6 @@ async function processNextJob() {
   try {
     await client.query("BEGIN");
 
-    // 1. Pending işi al
     const res = await client.query(`
       SELECT *
       FROM mining_jobs
@@ -71,10 +55,10 @@ async function processNextJob() {
     console.log("\n==============================");
     console.log(`⛏️ JOB PICKED: ${job.id}`);
     console.log(`📂 TYPE: ${job.type}`);
+    console.log(`🎯 STRATEGY: ${job.strategy || 'auto'}`);
     console.log(`🌐 TARGET: ${job.input}`);
     console.log("==============================");
 
-    // 2. Running olarak işaretle
     await client.query(
       `UPDATE mining_jobs
        SET status='running', started_at=NOW(), error=NULL
@@ -84,13 +68,29 @@ async function processNextJob() {
 
     await client.query("COMMIT");
 
-    // 3. TÜR KONTROLÜ VE YÖNLENDİRME (ROUTING)
+    // ============================================
+    // 🚀 SMART ROUTING
+    // ============================================
+    
     if (job.type === 'file' || job.type === 'pdf' || job.type === 'excel' || job.type === 'word' || job.type === 'other') {
-        // Dosya Madenciliği
-        await runFileMining(job);
+      // 📁 FILE MINING
+      console.log("   🔀 Route → FILE MINER");
+      await runFileMining(job);
+      
+    } else if (job.type === 'url' && job.strategy === 'playwright') {
+      // 🎭 PLAYWRIGHT MINING (JS-heavy sites, anti-bot)
+      console.log("   🔀 Route → PLAYWRIGHT MINER");
+      await runMiningTest(job);
+      
+    } else if (job.type === 'url') {
+      // ⚡ AXIOS GOLDEN (Default - Fast & Light)
+      console.log("   🔀 Route → AXIOS MINER (Golden)");
+      await runUrlMiningJob(job.id, job.organizer_id);
+      
     } else {
-        // URL Madenciliği (Web)
-        await runMiningTest(job);
+      // 🤔 Unknown type - try Axios as fallback
+      console.log(`   🔀 Route → FALLBACK (unknown type: ${job.type})`);
+      await runUrlMiningJob(job.id, job.organizer_id);
     }
 
     console.log("✅ Worker: Job execution finished normally.");
@@ -98,18 +98,17 @@ async function processNextJob() {
   } catch (err) {
     await client.query("ROLLBACK");
 
-    // 4. BLOK YAKALAMA (Manual Assist - Sadece URL için)
     if (err.message && err.message.includes("BLOCK_DETECTED")) {
-      console.log("🚫 BLOCK DETECTED (via Service) – Triggering Manual Assist...");
+      console.log("🚫 BLOCK DETECTED – Triggering Manual Assist...");
       if (currentJobId) {
         await handleManualAssist(currentJobId);
       }
     } else {
       console.error("❌ Worker Job Failed:", err.message);
       if (currentJobId) {
-         try {
-           await db.query("UPDATE mining_jobs SET status='failed', error=$1 WHERE id=$2", [err.message, currentJobId]);
-         } catch(e) { /* ignore secondary db error */ }
+        try {
+          await db.query("UPDATE mining_jobs SET status='failed', error=$1 WHERE id=$2", [err.message, currentJobId]);
+        } catch(e) { /* ignore */ }
       }
     }
   } finally {
@@ -117,18 +116,15 @@ async function processNextJob() {
   }
 }
 
-// Blok durumunda çalışacak Manual Assist fonksiyonu
 async function handleManualAssist(jobId) {
   if (!jobId) return;
   
-  // Job verisini çek (Input lazım)
   const jobRes = await db.query("SELECT * FROM mining_jobs WHERE id = $1", [jobId]);
   if (jobRes.rows.length === 0) return;
   const job = jobRes.rows[0];
 
   console.log(`📧 Preparing manual assist email for job ${jobId}...`);
 
-  // Manual required olarak işaretle
   const updateRes = await db.query(
     `UPDATE mining_jobs
      SET manual_required = true,
@@ -139,7 +135,6 @@ async function handleManualAssist(jobId) {
     [jobId]
   );
 
-  // Email gönder (Sadece ilk seferde)
   if (updateRes.rows.length > 0) {
     const token = process.env.MANUAL_MINER_TOKEN;
     if (token) {
@@ -163,7 +158,7 @@ async function handleManualAssist(jobId) {
       }
     }
   } else {
-      console.log("ℹ️ Manual assist already triggered for this job, skipping email.");
+    console.log("ℹ️ Manual assist already triggered, skipping email.");
   }
   
   console.log("🟡 Job left in RUNNING state for manual assist");
@@ -172,3 +167,4 @@ async function handleManualAssist(jobId) {
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 startWorker().catch(err => console.error("💥 Fatal error:", err));
+EOF
