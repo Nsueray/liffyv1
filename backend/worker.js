@@ -77,8 +77,23 @@ async function processNextJob() {
     /* ======================
        ORCHESTRATOR ENTRY
     ====================== */
-    await processMiningJob(job);
-
+    try {
+  await processMiningJob(job);
+} catch (err) {
+  if (
+    err.message &&
+    (
+      err.message.includes("Executable doesn't exist") ||
+      err.message.includes("playwright install") ||
+      err.message.includes("browserType.launch")
+    )
+  ) {
+    console.log("🚫 PLAYWRIGHT NOT AVAILABLE – Triggering Manual Assist...");
+    await handleManualAssist(job.id);
+  } else {
+    throw err;
+  }
+}
     console.log("✅ Worker: Job execution finished normally.");
 
   } catch (err) {
