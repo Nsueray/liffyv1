@@ -22,7 +22,7 @@ process.on("SIGINT", () => console.log("⚠️ SIGINT received – ignored"));
    WORKER LOOP
 ====================== */
 async function startWorker() {
-  console.log("🧪 Liffy Worker V12.0 (Orchestrator Driven)");
+  console.log("🧪 Liffy Worker V12.1 (Orchestrator Driven)");
 
   while (true) {
     try {
@@ -77,23 +77,38 @@ async function processNextJob() {
     /* ======================
        ORCHESTRATOR ENTRY
     ====================== */
+    let result;
+
     try {
-  await processMiningJob(job);
-} catch (err) {
-  if (
-    err.message &&
-    (
-      err.message.includes("Executable doesn't exist") ||
-      err.message.includes("playwright install") ||
-      err.message.includes("browserType.launch")
-    )
-  ) {
-    console.log("🚫 PLAYWRIGHT NOT AVAILABLE – Triggering Manual Assist...");
-    await handleManualAssist(job.id);
-  } else {
-    throw err;
-  }
-}
+      result = await processMiningJob(job);
+    } catch (err) {
+      if (
+        err.message &&
+        (
+          err.message.includes("Executable doesn't exist") ||
+          err.message.includes("playwright install") ||
+          err.message.includes("browserType.launch")
+        )
+      ) {
+        console.log("🚫 PLAYWRIGHT NOT AVAILABLE – Triggering Manual Assist...");
+        await handleManualAssist(job.id);
+        return;
+      }
+      throw err;
+    }
+
+    /* ======================
+       POST-RESULT BLOCK CHECK
+    ====================== */
+    if (
+      result?.status === "FAILED" &&
+      Array.isArray(result.logs) &&
+      result.logs.some(l => l.includes("BLOCKED"))
+    ) {
+      console.log("🚫 BLOCKED result detected – Triggering Manual Assist...");
+      await handleManualAssist(job.id);
+    }
+
     console.log("✅ Worker: Job execution finished normally.");
 
   } catch (err) {
