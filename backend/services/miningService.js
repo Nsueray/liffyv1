@@ -171,18 +171,27 @@ async function playwrightMinerAdapter(job) {
         };
         
     } catch (err) {
-        return {
-            status: "UNKNOWN",
-            emails: [],
-            extracted_links: [],
-            http_code: null,
-            meta: {
-                miner_name: "PlaywrightMiner",
-                execution_time_ms: Date.now() - startTime,
-                notes: `Error: ${err.message}`
-            }
-        };
-    }
+    const message = err.message || "";
+
+    const isPlaywrightMissing =
+        message.includes("Executable doesn't exist") ||
+        message.includes("playwright install") ||
+        message.includes("browserType.launch");
+
+    return {
+        status: isPlaywrightMissing ? "BLOCKED" : "UNKNOWN",
+        emails: [],
+        extracted_links: [],
+        http_code: null,
+        meta: {
+            miner_name: "PlaywrightMiner",
+            execution_time_ms: Date.now() - startTime,
+            notes: isPlaywrightMissing
+                ? "PLAYWRIGHT_NOT_AVAILABLE"
+                : `Error: ${message}`
+        }
+    };
+}
 }
 
 async function processMiningJob(job) {
