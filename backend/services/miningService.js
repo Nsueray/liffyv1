@@ -128,6 +128,21 @@ async function axiosMinerAdapter(job) {
 
 async function playwrightMinerAdapter(job) {
     const startTime = Date.now();
+
+    // 🔒 HARD GUARD: Playwright is NOT allowed on Render
+    if (process.env.RENDER || process.env.RENDER_SERVICE_ID) {
+        return {
+            status: "BLOCKED",
+            emails: [],
+            extracted_links: [],
+            http_code: null,
+            meta: {
+                miner_name: "PlaywrightMiner",
+                execution_time_ms: 0,
+                notes: "PLAYWRIGHT_DISABLED_ON_RENDER"
+            }
+        };
+    }
     
     try {
         const playwrightJob = { ...job, strategy: "playwright" };
@@ -171,27 +186,27 @@ async function playwrightMinerAdapter(job) {
         };
         
     } catch (err) {
-    const message = err.message || "";
+        const message = err.message || "";
 
-    const isPlaywrightMissing =
-        message.includes("Executable doesn't exist") ||
-        message.includes("playwright install") ||
-        message.includes("browserType.launch");
+        const isPlaywrightMissing =
+            message.includes("Executable doesn't exist") ||
+            message.includes("playwright install") ||
+            message.includes("browserType.launch");
 
-    return {
-        status: isPlaywrightMissing ? "BLOCKED" : "UNKNOWN",
-        emails: [],
-        extracted_links: [],
-        http_code: null,
-        meta: {
-            miner_name: "PlaywrightMiner",
-            execution_time_ms: Date.now() - startTime,
-            notes: isPlaywrightMissing
-                ? "PLAYWRIGHT_NOT_AVAILABLE"
-                : `Error: ${message}`
-        }
-    };
-}
+        return {
+            status: isPlaywrightMissing ? "BLOCKED" : "UNKNOWN",
+            emails: [],
+            extracted_links: [],
+            http_code: null,
+            meta: {
+                miner_name: "PlaywrightMiner",
+                execution_time_ms: Date.now() - startTime,
+                notes: isPlaywrightMissing
+                    ? "PLAYWRIGHT_NOT_AVAILABLE"
+                    : `Error: ${message}`
+            }
+        };
+    }
 }
 
 async function processMiningJob(job) {
