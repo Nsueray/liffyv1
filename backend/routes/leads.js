@@ -1,8 +1,7 @@
 const express = require('express');
+const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
-
-const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -28,92 +27,82 @@ function authRequired(req, res, next) {
   }
 }
 
-router.post('/api/leads/import', authRequired, async (req, res) => {
+// GET /api/leads
+router.get('/', authRequired, async (req, res) => {
   try {
-    let { leads } = req.body;
     const organizerId = req.auth.organizer_id;
 
-    if (!leads) {
-      return res.status(400).json({ error: "leads array required" });
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 500;
+    const offset = (page - 1) * limit;
+
+    const search = req.query.search || '';
+    const verificationStatus = req.query.verification_status || '';
+    const country = req.query.country || '';
+
+    let conditions = ['organizer_id = $1'];
+    let params = [organizerId];
+    let paramIndex = 2;
+
+    if (search.trim()) {
+      conditions.push(`(
+        LOWER(email) LIKE LOWER($${paramIndex}) OR
+        LOWER(name) LIKE LOWER($${paramIndex}) OR
+        LOWER(company) LIKE LOWER($${paramIndex})
+      )`);
+      params.push(`%${search.trim()}%`);
+      paramIndex++;
     }
 
-    if (!Array.isArray(leads)) {
-      leads = [leads];
+    if (verificationStatus.trim()) {
+      conditions.push(`verification_status = $${paramIndex}`);
+      params.push(verificationStatus.trim());
+      paramIndex++;
     }
 
-    const normalized = leads
-      .filter((lead) => lead && lead.email)
-      .map((lead) => ({
-        email: lead.email,
-        name: lead.name || lead.contact_name || null,
-        company: lead.company || lead.company_name || null,
-        country: lead.country || null,
-        sector: lead.sector || null,
-        source_type: lead.source_type || lead.sourceType || 'import',
-        source_ref: lead.source_ref || lead.sourceRef || 'manual',
-        verification_status: lead.verification_status || lead.verificationStatus || 'unknown',
-        meta: lead.meta || lead
-      }));
-
-    if (normalized.length === 0) {
-      return res.status(400).json({ error: "No valid leads" });
+    if (country.trim()) {
+      conditions.push(`LOWER(country) LIKE LOWER($${paramIndex})`);
+      params.push(`%${country.trim()}%`);
+      paramIndex++;
     }
 
-    const values = [];
-    const placeholders = [];
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
-    normalized.forEach((lead, i) => {
-      const idx = i * 10;
-      values.push(
-        organizerId,
-        lead.email,
-        lead.name,
-        lead.company,
-        lead.country,
-        lead.sector,
-        lead.source_type,
-        lead.source_ref,
-        lead.verification_status,
-        lead.meta
-      );
-      placeholders.push(`($${idx + 1}, $${idx + 2}, $${idx + 3}, $${idx + 4}, $${idx + 5}, $${idx + 6}, $${idx + 7}, $${idx + 8}, $${idx + 9}, $${idx + 10})`);
+    const countResult = await db.query(
+      `SELECT COUNT(*) FROM prospects ${whereClause}`,
+      params
+    );
+    const total = parseInt(countResult.rows[0].count, 10);
+
+    const dataResult = await db.query(
+      `
+      SELECT
+        id,
+        email,
+        name,
+        company,
+        country,
+        verification_status,
+        source_type,
+        source_ref,
+        created_at
+      FROM prospects
+      ${whereClause}
+      ORDER BY created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+      `,
+      [...params, limit, offset]
+    );
+
+    res.json({
+      page,
+      limit,
+      total,
+      leads: dataResult.rows
     });
-
-    const result = await db.query(
-      `INSERT INTO prospects
-       (organizer_id, email, name, company, country, sector, source_type, source_ref, verification_status, meta)
-       VALUES ${placeholders.join(',')}
-       RETURNING *`,
-      values
-    );
-
-    return res.json({ imported: result.rows.length, prospects: result.rows });
   } catch (err) {
-    console.error("POST /api/leads/import error:", err);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-router.post('/api/verification/verify', authRequired, async (req, res) => {
-  try {
-    const organizerId = req.auth.organizer_id;
-    const { emails } = req.body || {};
-
-    if (!Array.isArray(emails) || emails.length === 0) {
-      return res.status(400).json({ error: "emails array required" });
-    }
-
-    await db.query(
-      `UPDATE prospects
-       SET verification_status = 'pending'
-       WHERE organizer_id = $1 AND email = ANY($2::text[])`,
-      [organizerId, emails]
-    );
-
-    return res.json({ started: true, count: emails.length });
-  } catch (err) {
-    console.error("POST /api/verification/verify error:", err);
-    return res.status(500).json({ error: err.message });
+    console.error('GET /api/leads error:', err);
+    res.status(500).json({ error: 'Failed to fetch leads' });
   }
 });
 
