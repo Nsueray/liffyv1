@@ -18,6 +18,7 @@ const prospectsRouter = require('./routes/prospects');
 const miningJobsRouter = require('./routes/miningJobs');
 const miningResultsRouter = require('./routes/miningResults');
 const leadsRouter = require('./routes/leads');
+const listsRouter = require('./routes/lists');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -54,6 +55,8 @@ app.use(prospectsRouter);
 app.use(miningJobsRouter);
 app.use(miningResultsRouter);
 app.use('/api/leads', leadsRouter);
+app.use('/api/lists', listsRouter);
+
 // 404 fallback (JSON)
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
