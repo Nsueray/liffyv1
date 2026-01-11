@@ -53,8 +53,7 @@ app.use(reportsRouter);
 app.use(prospectsRouter);
 app.use(miningJobsRouter);
 app.use(miningResultsRouter);
-app.use(leadsRouter);
-
+app.use('/api/leads', leadsRouter);
 // 404 fallback (JSON)
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
