@@ -85,6 +85,7 @@ router.get('/', authRequired, async (req, res) => {
         verification_status,
         source_type,
         source_ref,
+        tags,
         created_at
       FROM prospects
       ${whereClause}
@@ -98,11 +99,55 @@ router.get('/', authRequired, async (req, res) => {
       page,
       limit,
       total,
-      leads: dataResult.rows
+      leads: dataResult.rows.map(row => ({
+        ...row,
+        tags: row.tags || []
+      }))
     });
   } catch (err) {
     console.error('GET /api/leads error:', err);
     res.status(500).json({ error: 'Failed to fetch leads' });
+  }
+});
+
+// POST /api/leads/:id/tags - Update tags for a lead
+router.post('/:id/tags', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const leadId = req.params.id;
+    const { tags } = req.body;
+
+    // Validate ownership
+    const checkResult = await db.query(
+      'SELECT id FROM prospects WHERE id = $1 AND organizer_id = $2',
+      [leadId, organizerId]
+    );
+
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    // Normalize tags
+    let normalizedTags = [];
+    if (Array.isArray(tags)) {
+      normalizedTags = tags
+        .map(t => (typeof t === 'string' ? t.trim().toLowerCase() : ''))
+        .filter(t => t.length > 0);
+    }
+
+    // Update tags
+    const updateResult = await db.query(
+      'UPDATE prospects SET tags = $1 WHERE id = $2 RETURNING id, tags',
+      [normalizedTags, leadId]
+    );
+
+    res.json({
+      id: updateResult.rows[0].id,
+      tags: updateResult.rows[0].tags || []
+    });
+  } catch (err) {
+    console.error('POST /api/leads/:id/tags error:', err);
+    res.status(500).json({ error: 'Failed to update tags' });
   }
 });
 

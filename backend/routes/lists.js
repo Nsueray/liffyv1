@@ -27,6 +27,63 @@ function authRequired(req, res, next) {
   }
 }
 
+function buildFilterQuery(organizerId, filters, selectFields, listIdParam) {
+  const { date_from, date_to, countries, tags, email_only } = filters;
+  
+  let conditions = ['organizer_id = $1'];
+  let params = [organizerId];
+  let paramIndex = 2;
+
+  if (email_only !== false) {
+    conditions.push("email IS NOT NULL AND TRIM(email) != ''");
+  }
+
+  if (date_from) {
+    conditions.push(`created_at >= $${paramIndex}`);
+    params.push(date_from);
+    paramIndex++;
+  }
+
+  if (date_to) {
+    conditions.push(`created_at <= $${paramIndex}`);
+    params.push(date_to + ' 23:59:59');
+    paramIndex++;
+  }
+
+  if (countries && Array.isArray(countries) && countries.length > 0) {
+    const validCountries = countries.filter(c => c && c.trim());
+    if (validCountries.length > 0) {
+      const placeholders = validCountries.map((_, i) => `$${paramIndex + i}`).join(', ');
+      conditions.push(`LOWER(TRIM(country)) IN (${placeholders})`);
+      validCountries.forEach(c => params.push(c.toLowerCase().trim()));
+      paramIndex += validCountries.length;
+    }
+  }
+
+  // Tags filter - uses real tags column (TEXT[] array)
+  if (tags && Array.isArray(tags) && tags.length > 0) {
+    const validTags = tags.filter(t => t && t.trim()).map(t => t.toLowerCase().trim());
+    if (validTags.length > 0) {
+      // Use array overlap operator && to find leads with ANY of the specified tags
+      conditions.push(`tags && $${paramIndex}::text[]`);
+      params.push(validTags);
+      paramIndex++;
+    }
+  }
+
+  const whereClause = `WHERE ${conditions.join(' AND ')}`;
+  
+  let query;
+  if (listIdParam !== undefined) {
+    query = `INSERT INTO list_members (list_id, prospect_id) SELECT $${paramIndex}, id FROM prospects ${whereClause}`;
+    params.push(listIdParam);
+  } else {
+    query = `SELECT ${selectFields} FROM prospects ${whereClause}`;
+  }
+
+  return { query, params };
+}
+
 // GET /api/lists - Get all lists for organizer with counts
 router.get('/', authRequired, async (req, res) => {
   try {
@@ -67,7 +124,120 @@ router.get('/', authRequired, async (req, res) => {
   }
 });
 
-// POST /api/lists - Create new list
+// GET /api/lists/tags - Get all unique tags used in leads
+router.get('/tags', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+
+    const result = await db.query(
+      `
+      SELECT DISTINCT unnest(tags) AS tag
+      FROM prospects
+      WHERE organizer_id = $1 AND tags IS NOT NULL AND array_length(tags, 1) > 0
+      ORDER BY tag
+      `,
+      [organizerId]
+    );
+
+    res.json({
+      tags: result.rows.map(r => r.tag)
+    });
+  } catch (err) {
+    console.error('GET /api/lists/tags error:', err);
+    res.status(500).json({ error: 'Failed to fetch tags' });
+  }
+});
+
+// POST /api/lists/preview - Preview count of leads matching filters
+router.post('/preview', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const { date_from, date_to, countries, tags, email_only } = req.body;
+
+    const { query, params } = buildFilterQuery(
+      organizerId,
+      { date_from, date_to, countries, tags, email_only: email_only !== false },
+      'COUNT(*)'
+    );
+
+    const result = await db.query(query, params);
+    const count = parseInt(result.rows[0].count, 10);
+
+    res.json({ count });
+  } catch (err) {
+    console.error('POST /api/lists/preview error:', err);
+    res.status(500).json({ error: 'Failed to preview leads' });
+  }
+});
+
+// POST /api/lists/create-with-filters - Create list with snapshot of matching leads
+router.post('/create-with-filters', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const { name, date_from, date_to, countries, tags, email_only } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'List name is required' });
+    }
+
+    const trimmedName = name.trim();
+
+    const existing = await db.query(
+      'SELECT id FROM lists WHERE organizer_id = $1 AND LOWER(name) = LOWER($2)',
+      [organizerId, trimmedName]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: 'A list with this name already exists' });
+    }
+
+    const listResult = await db.query(
+      'INSERT INTO lists (organizer_id, name) VALUES ($1, $2) RETURNING id, name, created_at',
+      [organizerId, trimmedName]
+    );
+
+    const newList = listResult.rows[0];
+
+    const { query, params } = buildFilterQuery(
+      organizerId,
+      { date_from, date_to, countries, tags, email_only: email_only !== false },
+      'id',
+      newList.id
+    );
+
+    await db.query(query, params);
+
+    const countResult = await db.query(
+      'SELECT COUNT(*) FROM list_members WHERE list_id = $1',
+      [newList.id]
+    );
+    const totalLeads = parseInt(countResult.rows[0].count, 10);
+
+    const verifiedResult = await db.query(
+      `
+      SELECT COUNT(*) FROM list_members lm
+      JOIN prospects p ON p.id = lm.prospect_id
+      WHERE lm.list_id = $1 AND p.verification_status = 'valid'
+      `,
+      [newList.id]
+    );
+    const verifiedCount = parseInt(verifiedResult.rows[0].count, 10);
+
+    res.status(201).json({
+      id: newList.id,
+      name: newList.name,
+      created_at: newList.created_at,
+      total_leads: totalLeads,
+      verified_count: verifiedCount,
+      unverified_count: totalLeads - verifiedCount
+    });
+  } catch (err) {
+    console.error('POST /api/lists/create-with-filters error:', err);
+    res.status(500).json({ error: 'Failed to create list' });
+  }
+});
+
+// POST /api/lists - Create new empty list
 router.post('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -79,7 +249,6 @@ router.post('/', authRequired, async (req, res) => {
 
     const trimmedName = name.trim();
 
-    // Check for duplicate name within organizer
     const existing = await db.query(
       'SELECT id FROM lists WHERE organizer_id = $1 AND LOWER(name) = LOWER($2)',
       [organizerId, trimmedName]
@@ -110,13 +279,70 @@ router.post('/', authRequired, async (req, res) => {
   }
 });
 
+// GET /api/lists/:id - Get single list with members
+router.get('/:id', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const listId = req.params.id;
+
+    const listResult = await db.query(
+      'SELECT id, name, created_at FROM lists WHERE id = $1 AND organizer_id = $2',
+      [listId, organizerId]
+    );
+
+    if (listResult.rows.length === 0) {
+      return res.status(404).json({ error: 'List not found' });
+    }
+
+    const list = listResult.rows[0];
+
+    const membersResult = await db.query(
+      `
+      SELECT 
+        p.id,
+        p.email,
+        p.name,
+        p.company,
+        p.country,
+        p.verification_status,
+        p.source_type,
+        p.tags,
+        p.created_at
+      FROM list_members lm
+      JOIN prospects p ON p.id = lm.prospect_id
+      WHERE lm.list_id = $1
+      ORDER BY p.created_at DESC
+      `,
+      [listId]
+    );
+
+    const totalLeads = membersResult.rows.length;
+    const verifiedCount = membersResult.rows.filter(r => r.verification_status === 'valid').length;
+
+    res.json({
+      id: list.id,
+      name: list.name,
+      created_at: list.created_at,
+      total_leads: totalLeads,
+      verified_count: verifiedCount,
+      unverified_count: totalLeads - verifiedCount,
+      members: membersResult.rows.map(row => ({
+        ...row,
+        tags: row.tags || []
+      }))
+    });
+  } catch (err) {
+    console.error('GET /api/lists/:id error:', err);
+    res.status(500).json({ error: 'Failed to fetch list' });
+  }
+});
+
 // DELETE /api/lists/:id - Delete list and cascade members
 router.delete('/:id', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     const listId = req.params.id;
 
-    // Verify ownership
     const listCheck = await db.query(
       'SELECT id FROM lists WHERE id = $1 AND organizer_id = $2',
       [listId, organizerId]
@@ -126,16 +352,40 @@ router.delete('/:id', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'List not found' });
     }
 
-    // Delete list members first (cascade)
     await db.query('DELETE FROM list_members WHERE list_id = $1', [listId]);
-
-    // Delete the list
     await db.query('DELETE FROM lists WHERE id = $1', [listId]);
 
     res.json({ success: true, deleted_id: listId });
   } catch (err) {
     console.error('DELETE /api/lists/:id error:', err);
     res.status(500).json({ error: 'Failed to delete list' });
+  }
+});
+
+// DELETE /api/lists/:id/members/:prospectId - Remove member from list
+router.delete('/:id/members/:prospectId', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const { id: listId, prospectId } = req.params;
+
+    const listCheck = await db.query(
+      'SELECT id FROM lists WHERE id = $1 AND organizer_id = $2',
+      [listId, organizerId]
+    );
+
+    if (listCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'List not found' });
+    }
+
+    await db.query(
+      'DELETE FROM list_members WHERE list_id = $1 AND prospect_id = $2',
+      [listId, prospectId]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('DELETE /api/lists/:id/members/:prospectId error:', err);
+    res.status(500).json({ error: 'Failed to remove member' });
   }
 });
 
