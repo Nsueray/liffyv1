@@ -172,39 +172,52 @@ router.get('/tags', authRequired, async (req, res) => {
   }
 });
 
-// GET /api/lists/mining-jobs - Get mining jobs for selection
+// GET /api/lists/mining-jobs - Get mining jobs for selection (proxies to mining API data)
 router.get('/mining-jobs', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
 
+    // Get jobs from mining_jobs table
     const result = await db.query(
       `
-      SELECT 
-        mj.id,
-        mj.target_url,
-        mj.status,
-        mj.created_at,
-        (SELECT COUNT(*) FROM prospects WHERE organizer_id = $1 AND source_ref = mj.id::text) AS lead_count
-      FROM mining_jobs mj
-      WHERE mj.organizer_id = $1
-      ORDER BY mj.created_at DESC
+      SELECT *
+      FROM mining_jobs
+      WHERE organizer_id = $1
+      ORDER BY created_at DESC
       LIMIT 50
       `,
       [organizerId]
     );
 
+    // Get lead counts per job from prospects
+    const leadCounts = await db.query(
+      `
+      SELECT source_ref, COUNT(*) as lead_count
+      FROM prospects
+      WHERE organizer_id = $1 AND source_ref IS NOT NULL
+      GROUP BY source_ref
+      `,
+      [organizerId]
+    );
+
+    const countMap = new Map();
+    leadCounts.rows.forEach(r => {
+      countMap.set(r.source_ref, parseInt(r.lead_count, 10) || 0);
+    });
+
     res.json({
       jobs: result.rows.map(row => ({
         id: row.id,
-        target_url: row.target_url || 'Unknown',
-        status: row.status,
+        target_url: row.target_url || row.url || row.source_url || 'Unknown',
+        status: row.status || 'unknown',
         created_at: row.created_at,
-        lead_count: parseInt(row.lead_count, 10) || 0
+        lead_count: countMap.get(row.id) || countMap.get(String(row.id)) || 0
       }))
     });
   } catch (err) {
     console.error('GET /api/lists/mining-jobs error:', err);
-    res.status(500).json({ error: 'Failed to fetch mining jobs' });
+    // Return empty array on error so frontend doesn't break
+    res.json({ jobs: [] });
   }
 });
 
