@@ -96,8 +96,8 @@ function buildLeadsFilter(organizerId, filters) {
   }
 
   if (mining_job_id && typeof mining_job_id === 'string' && mining_job_id.trim()) {
-    conditions.push(`(source_ref ILIKE $${paramIndex} OR source_type ILIKE $${paramIndex})`);
-    params.push(`%${mining_job_id.trim()}%`);
+    conditions.push(`source_ref = $${paramIndex}`);
+    params.push(mining_job_id.trim());
     paramIndex++;
   }
 
@@ -106,6 +106,7 @@ function buildLeadsFilter(organizerId, filters) {
   return { whereClause, params, paramIndex };
 }
 
+// GET /api/lists - Get all lists with CORRECT counts using subqueries
 router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -116,28 +117,30 @@ router.get('/', authRequired, async (req, res) => {
         l.id,
         l.name,
         l.created_at,
-        COUNT(lm.id) AS total_leads,
-        COUNT(CASE WHEN p.verification_status = 'valid' THEN 1 END) AS verified_count,
-        COUNT(CASE WHEN lm.id IS NOT NULL AND (p.verification_status IS NULL OR p.verification_status != 'valid') THEN 1 END) AS unverified_count
+        (SELECT COUNT(*) FROM list_members WHERE list_id = l.id) AS total_leads,
+        (SELECT COUNT(*) FROM list_members lm 
+         JOIN prospects p ON p.id = lm.prospect_id 
+         WHERE lm.list_id = l.id AND p.verification_status = 'valid') AS verified_count
       FROM lists l
-      LEFT JOIN list_members lm ON lm.list_id = l.id
-      LEFT JOIN prospects p ON p.id = lm.prospect_id
       WHERE l.organizer_id = $1
-      GROUP BY l.id, l.name, l.created_at
       ORDER BY l.created_at DESC
       `,
       [organizerId]
     );
 
     res.json({
-      lists: result.rows.map(row => ({
-        id: row.id,
-        name: row.name,
-        created_at: row.created_at,
-        total_leads: parseInt(row.total_leads, 10) || 0,
-        verified_count: parseInt(row.verified_count, 10) || 0,
-        unverified_count: parseInt(row.unverified_count, 10) || 0
-      }))
+      lists: result.rows.map(row => {
+        const total = parseInt(row.total_leads, 10) || 0;
+        const verified = parseInt(row.verified_count, 10) || 0;
+        return {
+          id: row.id,
+          name: row.name,
+          created_at: row.created_at,
+          total_leads: total,
+          verified_count: verified,
+          unverified_count: total - verified
+        };
+      })
     });
   } catch (err) {
     console.error('GET /api/lists error:', err);
@@ -145,6 +148,7 @@ router.get('/', authRequired, async (req, res) => {
   }
 });
 
+// GET /api/lists/tags - Get unique tags
 router.get('/tags', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -168,12 +172,47 @@ router.get('/tags', authRequired, async (req, res) => {
   }
 });
 
+// GET /api/lists/mining-jobs - Get mining jobs for selection
+router.get('/mining-jobs', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+
+    const result = await db.query(
+      `
+      SELECT 
+        mj.id,
+        mj.target_url,
+        mj.status,
+        mj.created_at,
+        (SELECT COUNT(*) FROM prospects WHERE organizer_id = $1 AND source_ref = mj.id::text) AS lead_count
+      FROM mining_jobs mj
+      WHERE mj.organizer_id = $1
+      ORDER BY mj.created_at DESC
+      LIMIT 50
+      `,
+      [organizerId]
+    );
+
+    res.json({
+      jobs: result.rows.map(row => ({
+        id: row.id,
+        target_url: row.target_url || 'Unknown',
+        status: row.status,
+        created_at: row.created_at,
+        lead_count: parseInt(row.lead_count, 10) || 0
+      }))
+    });
+  } catch (err) {
+    console.error('GET /api/lists/mining-jobs error:', err);
+    res.status(500).json({ error: 'Failed to fetch mining jobs' });
+  }
+});
+
+// POST /api/lists/preview
 router.post('/preview', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     const filters = req.body || {};
-
-    console.log('Preview filters received:', JSON.stringify(filters));
 
     const { whereClause, params } = buildLeadsFilter(organizerId, {
       date_from: filters.date_from,
@@ -186,9 +225,6 @@ router.post('/preview', authRequired, async (req, res) => {
     });
 
     const query = `SELECT COUNT(*) FROM prospects ${whereClause}`;
-    console.log('Preview query:', query);
-    console.log('Preview params:', params);
-
     const result = await db.query(query, params);
     const count = parseInt(result.rows[0].count, 10) || 0;
 
@@ -199,12 +235,11 @@ router.post('/preview', authRequired, async (req, res) => {
   }
 });
 
+// POST /api/lists/create-with-filters
 router.post('/create-with-filters', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     const { name, ...filters } = req.body || {};
-
-    console.log('Create list request:', { name, filters: JSON.stringify(filters) });
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'List name is required' });
@@ -248,9 +283,6 @@ router.post('/create-with-filters', authRequired, async (req, res) => {
       ON CONFLICT (list_id, prospect_id) DO NOTHING
     `;
 
-    console.log('Insert query:', insertQuery);
-    console.log('Insert params:', [...params, newList.id]);
-
     await db.query(insertQuery, [...params, newList.id]);
 
     const countResult = await db.query(
@@ -283,6 +315,7 @@ router.post('/create-with-filters', authRequired, async (req, res) => {
   }
 });
 
+// POST /api/lists - Create empty list
 router.post('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -324,6 +357,7 @@ router.post('/', authRequired, async (req, res) => {
   }
 });
 
+// GET /api/lists/:id - Get list detail
 router.get('/:id', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -381,6 +415,7 @@ router.get('/:id', authRequired, async (req, res) => {
   }
 });
 
+// DELETE /api/lists/:id
 router.delete('/:id', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -405,6 +440,7 @@ router.delete('/:id', authRequired, async (req, res) => {
   }
 });
 
+// DELETE /api/lists/:id/members/:prospectId
 router.delete('/:id/members/:prospectId', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
