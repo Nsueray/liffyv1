@@ -27,9 +27,25 @@ function authRequired(req, res, next) {
   }
 }
 
-function buildFilterQuery(organizerId, filters, selectFields, listIdParam) {
-  const { date_from, date_to, countries, tags, email_only } = filters;
-  
+function isValidDateString(str) {
+  if (!str || typeof str !== 'string') return false;
+  const regex = /^\d{4}-\d{2}-\d{2}$/;
+  if (!regex.test(str)) return false;
+  const date = new Date(str);
+  return !isNaN(date.getTime());
+}
+
+function buildLeadsFilter(organizerId, filters) {
+  const {
+    date_from,
+    date_to,
+    countries,
+    tags,
+    source_types,
+    mining_job_id,
+    email_only
+  } = filters;
+
   let conditions = ['organizer_id = $1'];
   let params = [organizerId];
   let paramIndex = 2;
@@ -38,20 +54,20 @@ function buildFilterQuery(organizerId, filters, selectFields, listIdParam) {
     conditions.push("email IS NOT NULL AND TRIM(email) != ''");
   }
 
-  if (date_from) {
-    conditions.push(`created_at >= $${paramIndex}`);
-    params.push(date_from);
+  if (date_from && isValidDateString(date_from)) {
+    conditions.push(`created_at >= $${paramIndex}::timestamp`);
+    params.push(date_from + ' 00:00:00');
     paramIndex++;
   }
 
-  if (date_to) {
-    conditions.push(`created_at <= $${paramIndex}`);
+  if (date_to && isValidDateString(date_to)) {
+    conditions.push(`created_at <= $${paramIndex}::timestamp`);
     params.push(date_to + ' 23:59:59');
     paramIndex++;
   }
 
-  if (countries && Array.isArray(countries) && countries.length > 0) {
-    const validCountries = countries.filter(c => c && c.trim());
+  if (countries && Array.isArray(countries)) {
+    const validCountries = countries.filter(c => c && typeof c === 'string' && c.trim());
     if (validCountries.length > 0) {
       const placeholders = validCountries.map((_, i) => `$${paramIndex + i}`).join(', ');
       conditions.push(`LOWER(TRIM(country)) IN (${placeholders})`);
@@ -60,8 +76,8 @@ function buildFilterQuery(organizerId, filters, selectFields, listIdParam) {
     }
   }
 
-  if (tags && Array.isArray(tags) && tags.length > 0) {
-    const validTags = tags.filter(t => t && t.trim()).map(t => t.toLowerCase().trim());
+  if (tags && Array.isArray(tags)) {
+    const validTags = tags.filter(t => t && typeof t === 'string' && t.trim()).map(t => t.toLowerCase().trim());
     if (validTags.length > 0) {
       conditions.push(`tags && $${paramIndex}::text[]`);
       params.push(validTags);
@@ -69,17 +85,25 @@ function buildFilterQuery(organizerId, filters, selectFields, listIdParam) {
     }
   }
 
-  const whereClause = `WHERE ${conditions.join(' AND ')}`;
-  
-  let query;
-  if (listIdParam !== undefined) {
-    query = `INSERT INTO list_members (list_id, prospect_id) SELECT $${paramIndex}, id FROM prospects ${whereClause} ON CONFLICT (list_id, prospect_id) DO NOTHING`;
-    params.push(listIdParam);
-  } else {
-    query = `SELECT ${selectFields} FROM prospects ${whereClause}`;
+  if (source_types && Array.isArray(source_types)) {
+    const validSourceTypes = source_types.filter(s => s && typeof s === 'string' && s.trim());
+    if (validSourceTypes.length > 0) {
+      const placeholders = validSourceTypes.map((_, i) => `$${paramIndex + i}`).join(', ');
+      conditions.push(`LOWER(source_type) IN (${placeholders})`);
+      validSourceTypes.forEach(s => params.push(s.toLowerCase().trim()));
+      paramIndex += validSourceTypes.length;
+    }
   }
 
-  return { query, params };
+  if (mining_job_id && typeof mining_job_id === 'string' && mining_job_id.trim()) {
+    conditions.push(`(source_ref ILIKE $${paramIndex} OR source_type ILIKE $${paramIndex})`);
+    params.push(`%${mining_job_id.trim()}%`);
+    paramIndex++;
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  return { whereClause, params, paramIndex };
 }
 
 router.get('/', authRequired, async (req, res) => {
@@ -94,7 +118,7 @@ router.get('/', authRequired, async (req, res) => {
         l.created_at,
         COUNT(lm.id) AS total_leads,
         COUNT(CASE WHEN p.verification_status = 'valid' THEN 1 END) AS verified_count,
-        COUNT(CASE WHEN p.verification_status IS NULL OR p.verification_status != 'valid' THEN 1 END) AS unverified_count
+        COUNT(CASE WHEN lm.id IS NOT NULL AND (p.verification_status IS NULL OR p.verification_status != 'valid') THEN 1 END) AS unverified_count
       FROM lists l
       LEFT JOIN list_members lm ON lm.list_id = l.id
       LEFT JOIN prospects p ON p.id = lm.prospect_id
@@ -110,9 +134,9 @@ router.get('/', authRequired, async (req, res) => {
         id: row.id,
         name: row.name,
         created_at: row.created_at,
-        total_leads: parseInt(row.total_leads, 10),
-        verified_count: parseInt(row.verified_count, 10),
-        unverified_count: parseInt(row.unverified_count, 10)
+        total_leads: parseInt(row.total_leads, 10) || 0,
+        verified_count: parseInt(row.verified_count, 10) || 0,
+        unverified_count: parseInt(row.unverified_count, 10) || 0
       }))
     });
   } catch (err) {
@@ -147,34 +171,50 @@ router.get('/tags', authRequired, async (req, res) => {
 router.post('/preview', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    const { date_from, date_to, countries, tags, email_only } = req.body;
+    const filters = req.body || {};
 
-    const { query, params } = buildFilterQuery(
-      organizerId,
-      { date_from, date_to, countries, tags, email_only: email_only !== false },
-      'COUNT(*)'
-    );
+    console.log('Preview filters received:', JSON.stringify(filters));
+
+    const { whereClause, params } = buildLeadsFilter(organizerId, {
+      date_from: filters.date_from,
+      date_to: filters.date_to,
+      countries: filters.countries,
+      tags: filters.tags,
+      source_types: filters.source_types,
+      mining_job_id: filters.mining_job_id,
+      email_only: filters.email_only !== false
+    });
+
+    const query = `SELECT COUNT(*) FROM prospects ${whereClause}`;
+    console.log('Preview query:', query);
+    console.log('Preview params:', params);
 
     const result = await db.query(query, params);
-    const count = parseInt(result.rows[0].count, 10);
+    const count = parseInt(result.rows[0].count, 10) || 0;
 
     res.json({ count });
   } catch (err) {
     console.error('POST /api/lists/preview error:', err);
-    res.status(500).json({ error: 'Failed to preview leads' });
+    res.status(500).json({ error: err.message || 'Failed to preview leads' });
   }
 });
 
 router.post('/create-with-filters', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    const { name, date_from, date_to, countries, tags, email_only } = req.body;
+    const { name, ...filters } = req.body || {};
 
-    if (!name || !name.trim()) {
+    console.log('Create list request:', { name, filters: JSON.stringify(filters) });
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'List name is required' });
     }
 
     const trimmedName = name.trim();
+
+    if (trimmedName.length > 255) {
+      return res.status(400).json({ error: 'List name is too long (max 255 characters)' });
+    }
 
     const existing = await db.query(
       'SELECT id FROM lists WHERE organizer_id = $1 AND LOWER(name) = LOWER($2)',
@@ -192,20 +232,32 @@ router.post('/create-with-filters', authRequired, async (req, res) => {
 
     const newList = listResult.rows[0];
 
-    const { query, params } = buildFilterQuery(
-      organizerId,
-      { date_from, date_to, countries, tags, email_only: email_only !== false },
-      'id',
-      newList.id
-    );
+    const { whereClause, params, paramIndex } = buildLeadsFilter(organizerId, {
+      date_from: filters.date_from,
+      date_to: filters.date_to,
+      countries: filters.countries,
+      tags: filters.tags,
+      source_types: filters.source_types,
+      mining_job_id: filters.mining_job_id,
+      email_only: filters.email_only !== false
+    });
 
-    await db.query(query, params);
+    const insertQuery = `
+      INSERT INTO list_members (list_id, prospect_id)
+      SELECT $${paramIndex}, id FROM prospects ${whereClause}
+      ON CONFLICT (list_id, prospect_id) DO NOTHING
+    `;
+
+    console.log('Insert query:', insertQuery);
+    console.log('Insert params:', [...params, newList.id]);
+
+    await db.query(insertQuery, [...params, newList.id]);
 
     const countResult = await db.query(
       'SELECT COUNT(*) FROM list_members WHERE list_id = $1',
       [newList.id]
     );
-    const totalLeads = parseInt(countResult.rows[0].count, 10);
+    const totalLeads = parseInt(countResult.rows[0].count, 10) || 0;
 
     const verifiedResult = await db.query(
       `
@@ -215,7 +267,7 @@ router.post('/create-with-filters', authRequired, async (req, res) => {
       `,
       [newList.id]
     );
-    const verifiedCount = parseInt(verifiedResult.rows[0].count, 10);
+    const verifiedCount = parseInt(verifiedResult.rows[0].count, 10) || 0;
 
     res.status(201).json({
       id: newList.id,
@@ -227,7 +279,7 @@ router.post('/create-with-filters', authRequired, async (req, res) => {
     });
   } catch (err) {
     console.error('POST /api/lists/create-with-filters error:', err);
-    res.status(500).json({ error: 'Failed to create list' });
+    res.status(500).json({ error: err.message || 'Failed to create list' });
   }
 });
 
@@ -236,7 +288,7 @@ router.post('/', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
     const { name } = req.body;
 
-    if (!name || !name.trim()) {
+    if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'List name is required' });
     }
 
@@ -268,7 +320,7 @@ router.post('/', authRequired, async (req, res) => {
     });
   } catch (err) {
     console.error('POST /api/lists error:', err);
-    res.status(500).json({ error: 'Failed to create list' });
+    res.status(500).json({ error: err.message || 'Failed to create list' });
   }
 });
 
