@@ -243,8 +243,8 @@ router.post('/create-with-filters', authRequired, async (req, res) => {
     });
 
     const insertQuery = `
-      INSERT INTO list_members (list_id, prospect_id)
-      SELECT $${paramIndex}, id FROM prospects ${whereClause}
+      INSERT INTO list_members (list_id, prospect_id, organizer_id)
+      SELECT $${paramIndex}, id, $1 FROM prospects ${whereClause}
       ON CONFLICT (list_id, prospect_id) DO NOTHING
     `;
 
