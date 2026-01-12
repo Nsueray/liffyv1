@@ -27,7 +27,6 @@ function authRequired(req, res, next) {
   }
 }
 
-// GET /api/leads
 router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -110,14 +109,12 @@ router.get('/', authRequired, async (req, res) => {
   }
 });
 
-// POST /api/leads/:id/tags - Update tags for a lead
 router.post('/:id/tags', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     const leadId = req.params.id;
     const { tags } = req.body;
 
-    // Validate ownership
     const checkResult = await db.query(
       'SELECT id FROM prospects WHERE id = $1 AND organizer_id = $2',
       [leadId, organizerId]
@@ -127,7 +124,6 @@ router.post('/:id/tags', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'Lead not found' });
     }
 
-    // Normalize tags
     let normalizedTags = [];
     if (Array.isArray(tags)) {
       normalizedTags = tags
@@ -135,7 +131,6 @@ router.post('/:id/tags', authRequired, async (req, res) => {
         .filter(t => t.length > 0);
     }
 
-    // Update tags
     const updateResult = await db.query(
       'UPDATE prospects SET tags = $1 WHERE id = $2 RETURNING id, tags',
       [normalizedTags, leadId]
@@ -147,6 +142,65 @@ router.post('/:id/tags', authRequired, async (req, res) => {
     });
   } catch (err) {
     console.error('POST /api/leads/:id/tags error:', err);
+    res.status(500).json({ error: 'Failed to update tags' });
+  }
+});
+
+router.post('/bulk-tags', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const { lead_ids, tags } = req.body;
+
+    if (!Array.isArray(lead_ids) || lead_ids.length === 0) {
+      return res.status(400).json({ error: 'lead_ids array is required' });
+    }
+
+    if (!Array.isArray(tags)) {
+      return res.status(400).json({ error: 'tags array is required' });
+    }
+
+    const normalizedTags = tags
+      .map(t => (typeof t === 'string' ? t.trim().toLowerCase() : ''))
+      .filter(t => t.length > 0);
+
+    if (normalizedTags.length === 0) {
+      return res.status(400).json({ error: 'At least one valid tag is required' });
+    }
+
+    const verifyResult = await db.query(
+      'SELECT id FROM prospects WHERE id = ANY($1) AND organizer_id = $2',
+      [lead_ids, organizerId]
+    );
+
+    const validIds = verifyResult.rows.map(r => r.id);
+
+    if (validIds.length === 0) {
+      return res.status(404).json({ error: 'No valid leads found' });
+    }
+
+    const updateResult = await db.query(
+      `
+      UPDATE prospects 
+      SET tags = (
+        SELECT ARRAY(
+          SELECT DISTINCT unnest(COALESCE(tags, '{}') || $1::text[])
+        )
+      )
+      WHERE id = ANY($2) AND organizer_id = $3
+      RETURNING id, tags
+      `,
+      [normalizedTags, validIds, organizerId]
+    );
+
+    res.json({
+      updated_count: updateResult.rows.length,
+      leads: updateResult.rows.map(r => ({
+        id: r.id,
+        tags: r.tags || []
+      }))
+    });
+  } catch (err) {
+    console.error('POST /api/leads/bulk-tags error:', err);
     res.status(500).json({ error: 'Failed to update tags' });
   }
 });

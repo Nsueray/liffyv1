@@ -60,11 +60,9 @@ function buildFilterQuery(organizerId, filters, selectFields, listIdParam) {
     }
   }
 
-  // Tags filter - uses real tags column (TEXT[] array)
   if (tags && Array.isArray(tags) && tags.length > 0) {
     const validTags = tags.filter(t => t && t.trim()).map(t => t.toLowerCase().trim());
     if (validTags.length > 0) {
-      // Use array overlap operator && to find leads with ANY of the specified tags
       conditions.push(`tags && $${paramIndex}::text[]`);
       params.push(validTags);
       paramIndex++;
@@ -75,7 +73,7 @@ function buildFilterQuery(organizerId, filters, selectFields, listIdParam) {
   
   let query;
   if (listIdParam !== undefined) {
-    query = `INSERT INTO list_members (list_id, prospect_id) SELECT $${paramIndex}, id FROM prospects ${whereClause}`;
+    query = `INSERT INTO list_members (list_id, prospect_id) SELECT $${paramIndex}, id FROM prospects ${whereClause} ON CONFLICT (list_id, prospect_id) DO NOTHING`;
     params.push(listIdParam);
   } else {
     query = `SELECT ${selectFields} FROM prospects ${whereClause}`;
@@ -84,7 +82,6 @@ function buildFilterQuery(organizerId, filters, selectFields, listIdParam) {
   return { query, params };
 }
 
-// GET /api/lists - Get all lists for organizer with counts
 router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -124,7 +121,6 @@ router.get('/', authRequired, async (req, res) => {
   }
 });
 
-// GET /api/lists/tags - Get all unique tags used in leads
 router.get('/tags', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -148,7 +144,6 @@ router.get('/tags', authRequired, async (req, res) => {
   }
 });
 
-// POST /api/lists/preview - Preview count of leads matching filters
 router.post('/preview', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -170,7 +165,6 @@ router.post('/preview', authRequired, async (req, res) => {
   }
 });
 
-// POST /api/lists/create-with-filters - Create list with snapshot of matching leads
 router.post('/create-with-filters', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -237,7 +231,6 @@ router.post('/create-with-filters', authRequired, async (req, res) => {
   }
 });
 
-// POST /api/lists - Create new empty list
 router.post('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -279,7 +272,6 @@ router.post('/', authRequired, async (req, res) => {
   }
 });
 
-// GET /api/lists/:id - Get single list with members
 router.get('/:id', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -337,7 +329,6 @@ router.get('/:id', authRequired, async (req, res) => {
   }
 });
 
-// DELETE /api/lists/:id - Delete list and cascade members
 router.delete('/:id', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -362,7 +353,6 @@ router.delete('/:id', authRequired, async (req, res) => {
   }
 });
 
-// DELETE /api/lists/:id/members/:prospectId - Remove member from list
 router.delete('/:id/members/:prospectId', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
