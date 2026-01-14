@@ -28,14 +28,15 @@ function authRequired(req, res, next) {
   }
 }
 
-router.post('/api/campaigns', async (req, res) => {
+router.post('/api/campaigns', authRequired, async (req, res) => {
   try {
-    const { organizer_id, template_id, name, scheduled_at } = req.body;
-    if (!organizer_id || !template_id || !name) {
+    const organizerId = req.auth.organizer_id;
+    const { template_id, name, scheduled_at } = req.body;
+    if (!template_id || !name) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
     const campaign = await campaigns.createCampaign(
-      organizer_id, template_id, name, scheduled_at
+      organizerId, template_id, name, scheduled_at
     );
     res.json(campaign);
   } catch (error) {
@@ -43,54 +44,55 @@ router.post('/api/campaigns', async (req, res) => {
   }
 });
 
-router.get('/api/campaigns', async (req, res) => {
+router.get('/api/campaigns', authRequired, async (req, res) => {
   try {
-    const { organizer_id } = req.query;
-    if (!organizer_id) {
-      return res.status(400).json({ error: 'organizer_id is required' });
-    }
-    const campaignList = await campaigns.getCampaignsByOrganizer(organizer_id);
+    const organizerId = req.auth.organizer_id;
+    const campaignList = await campaigns.getCampaignsByOrganizer(organizerId);
     res.json(campaignList);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-router.get('/api/campaigns/:id', async (req, res) => {
+router.get('/api/campaigns/:id', authRequired, async (req, res) => {
   try {
-    const campaign = await campaigns.getCampaignById(req.params.id);
-    if (!campaign) {
+    const campaignId = req.params.id;
+    const organizerId = req.auth.organizer_id;
+
+    const result = await db.query(
+      `SELECT c.*, t.subject as template_subject, t.name as template_name, t.body_html, t.body_text
+       FROM campaigns c
+       LEFT JOIN email_templates t ON c.template_id = t.id
+       WHERE c.id = $1 AND c.organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Campaign not found' });
     }
-    res.json(campaign);
+
+    res.json(result.rows[0]);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
 
-router.put('/api/campaigns/:id/status', async (req, res) => {
+router.delete('/api/campaigns/:id', authRequired, async (req, res) => {
   try {
-    const { status } = req.body;
-    if (!status) {
-      return res.status(400).json({ error: 'Status is required' });
-    }
-    const campaign = await campaigns.updateCampaignStatus(req.params.id, status);
-    if (!campaign) {
-      return res.status(404).json({ error: 'Campaign not found' });
-    }
-    res.json(campaign);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
+    const campaignId = req.params.id;
+    const organizerId = req.auth.organizer_id;
 
-router.delete('/api/campaigns/:id', async (req, res) => {
-  try {
-    const campaign = await campaigns.deleteCampaign(req.params.id);
-    if (!campaign) {
+    const checkRes = await db.query(
+      `SELECT id FROM campaigns WHERE id = $1 AND organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
+    if (checkRes.rows.length === 0) {
       return res.status(404).json({ error: 'Campaign not found' });
     }
-    res.json({ message: 'Campaign deleted successfully', campaign });
+
+    const deleted = await campaigns.deleteCampaign(campaignId);
+    res.json({ message: 'Campaign deleted successfully', campaign: deleted });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
