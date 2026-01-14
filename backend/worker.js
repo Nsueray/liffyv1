@@ -1,9 +1,11 @@
 const db = require("./db");
 const { sendEmail } = require("./mailer");
 const { processMiningJob } = require("./services/miningService");
+const { runScheduler } = require("./services/campaignScheduler");
 
 const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 30000;
+const CAMPAIGN_SCHEDULER_INTERVAL_MS = 10000;
 
 /* ======================
    HEARTBEAT
@@ -19,10 +21,29 @@ process.on("SIGTERM", () => console.log("⚠️ SIGTERM received – ignored"));
 process.on("SIGINT", () => console.log("⚠️ SIGINT received – ignored"));
 
 /* ======================
+   CAMPAIGN SCHEDULER LOOP
+====================== */
+async function startCampaignScheduler() {
+  while (true) {
+    try {
+      await runScheduler();
+    } catch (err) {
+      console.error("❌ Campaign scheduler error:", err.message);
+    }
+    await sleep(CAMPAIGN_SCHEDULER_INTERVAL_MS);
+  }
+}
+
+/* ======================
    WORKER LOOP
 ====================== */
 async function startWorker() {
   console.log("🧪 Liffy Worker V12.1 (Orchestrator Driven)");
+
+  // Start campaign scheduler in parallel (non-blocking)
+  startCampaignScheduler().catch((err) => {
+    console.error("❌ Campaign scheduler fatal error:", err.message);
+  });
 
   while (true) {
     try {
