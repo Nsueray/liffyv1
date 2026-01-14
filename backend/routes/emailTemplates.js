@@ -1,74 +1,76 @@
 const express = require('express');
 const router = express.Router();
-const emailTemplates = require('../models/emailTemplates');
+const pool = require('../db');
+const jwt = require('jsonwebtoken');
 
-router.post('/api/templates', async (req, res) => {
+const authRequired = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authorization token required' });
+  }
+
+  const token = authHeader.split(' ')[1];
   try {
-    const { organizer_id, name, subject, body_html, body_text } = req.body;
-    if (!organizer_id || !name || !subject || !body_html) {
-      return res.status(400).json({ error: 'Missing required fields' });
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.auth = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+};
+
+router.get('/', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    if (!organizerId) {
+      return res.status(403).json({ error: 'Organizer ID not found in token' });
     }
-    const template = await emailTemplates.createTemplate(
-      organizer_id, name, subject, body_html, body_text
+
+    const result = await pool.query(
+      `SELECT id, name, subject, body_html, body_text, created_at, updated_at 
+       FROM email_templates 
+       WHERE organizer_id = $1 
+       ORDER BY created_at DESC`,
+      [organizerId]
     );
-    res.json(template);
+
+    res.json({ templates: result.rows });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error fetching email templates:', error);
+    res.status(500).json({ error: 'Failed to fetch templates' });
   }
 });
 
-router.get('/api/templates', async (req, res) => {
+router.post('/', authRequired, async (req, res) => {
   try {
-    const { organizer_id } = req.query;
-    if (!organizer_id) {
-      return res.status(400).json({ error: 'organizer_id is required' });
+    const organizerId = req.auth.organizer_id;
+    if (!organizerId) {
+      return res.status(403).json({ error: 'Organizer ID not found in token' });
     }
-    const templates = await emailTemplates.getTemplatesByOrganizer(organizer_id);
-    res.json(templates);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
 
-router.get('/api/templates/:id', async (req, res) => {
-  try {
-    const template = await emailTemplates.getTemplateById(req.params.id);
-    if (!template) {
-      return res.status(404).json({ error: 'Template not found' });
-    }
-    res.json(template);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-router.put('/api/templates/:id', async (req, res) => {
-  try {
     const { name, subject, body_html, body_text } = req.body;
-    if (!name || !subject || !body_html) {
-      return res.status(400).json({ error: 'Missing required fields' });
-    }
-    const template = await emailTemplates.updateTemplate(
-      req.params.id, name, subject, body_html, body_text
-    );
-    if (!template) {
-      return res.status(404).json({ error: 'Template not found' });
-    }
-    res.json(template);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
 
-router.delete('/api/templates/:id', async (req, res) => {
-  try {
-    const template = await emailTemplates.deleteTemplate(req.params.id);
-    if (!template) {
-      return res.status(404).json({ error: 'Template not found' });
+    if (!name || !name.trim()) {
+      return res.status(400).json({ error: 'Name is required' });
     }
-    res.json({ message: 'Template deleted successfully', template });
+    if (!subject || !subject.trim()) {
+      return res.status(400).json({ error: 'Subject is required' });
+    }
+    if (!body_html || !body_html.trim()) {
+      return res.status(400).json({ error: 'Body HTML is required' });
+    }
+
+    const result = await pool.query(
+      `INSERT INTO email_templates (organizer_id, name, subject, body_html, body_text, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+       RETURNING id, name, subject, body_html, body_text, created_at, updated_at`,
+      [organizerId, name.trim(), subject.trim(), body_html, body_text || null]
+    );
+
+    res.status(201).json({ template: result.rows[0] });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error creating email template:', error);
+    res.status(500).json({ error: 'Failed to create template' });
   }
 });
 
