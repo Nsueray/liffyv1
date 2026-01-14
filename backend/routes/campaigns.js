@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const db = require('../db');
-const campaigns = require('../models/campaigns');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -31,15 +30,35 @@ function authRequired(req, res, next) {
 router.post('/api/campaigns', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    const { template_id, name, scheduled_at } = req.body;
-    if (!template_id || !name) {
-      return res.status(400).json({ error: 'Missing required fields' });
+    const { name, template_id } = req.body;
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'Campaign name is required' });
     }
-    const campaign = await campaigns.createCampaign(
-      organizerId, template_id, name, scheduled_at
+
+    if (!template_id) {
+      return res.status(400).json({ error: 'Template is required' });
+    }
+
+    const templateCheck = await db.query(
+      `SELECT id FROM email_templates WHERE id = $1 AND organizer_id = $2`,
+      [template_id, organizerId]
     );
-    res.json(campaign);
+
+    if (templateCheck.rows.length === 0) {
+      return res.status(400).json({ error: 'Template not found or access denied' });
+    }
+
+    const result = await db.query(
+      `INSERT INTO campaigns (organizer_id, template_id, name, status)
+       VALUES ($1, $2, $3, 'draft')
+       RETURNING *`,
+      [organizerId, template_id, name.trim()]
+    );
+
+    res.status(201).json(result.rows[0]);
   } catch (error) {
+    console.error("Create campaign error:", error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -47,8 +66,17 @@ router.post('/api/campaigns', authRequired, async (req, res) => {
 router.get('/api/campaigns', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    const campaignList = await campaigns.getCampaignsByOrganizer(organizerId);
-    res.json(campaignList);
+
+    const result = await db.query(
+      `SELECT c.*, t.subject as template_subject, t.name as template_name
+       FROM campaigns c
+       LEFT JOIN email_templates t ON c.template_id = t.id
+       WHERE c.organizer_id = $1
+       ORDER BY c.created_at DESC`,
+      [organizerId]
+    );
+
+    res.json(result.rows);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -82,17 +110,16 @@ router.delete('/api/campaigns/:id', authRequired, async (req, res) => {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
 
-    const checkRes = await db.query(
-      `SELECT id FROM campaigns WHERE id = $1 AND organizer_id = $2`,
+    const result = await db.query(
+      `DELETE FROM campaigns WHERE id = $1 AND organizer_id = $2 RETURNING *`,
       [campaignId, organizerId]
     );
 
-    if (checkRes.rows.length === 0) {
+    if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Campaign not found' });
     }
 
-    const deleted = await campaigns.deleteCampaign(campaignId);
-    res.json({ message: 'Campaign deleted successfully', campaign: deleted });
+    res.json({ message: 'Campaign deleted successfully', campaign: result.rows[0] });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
