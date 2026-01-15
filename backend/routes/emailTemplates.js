@@ -24,7 +24,8 @@ function authRequired(req, res, next) {
   }
 }
 
-router.get('/api/email-templates', authRequired, async (req, res) => {
+// GET /api/email-templates
+router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     if (!organizerId) {
@@ -46,7 +47,8 @@ router.get('/api/email-templates', authRequired, async (req, res) => {
   }
 });
 
-router.post('/api/email-templates', authRequired, async (req, res) => {
+// POST /api/email-templates
+router.post('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     if (!organizerId) {
@@ -77,6 +79,34 @@ router.post('/api/email-templates', authRequired, async (req, res) => {
   } catch (error) {
     console.error('Error creating email template:', error);
     res.status(500).json({ error: 'Failed to create template' });
+  }
+});
+
+// GET /api/email-templates/:id
+router.get('/:id', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const templateId = req.params.id;
+
+    if (!organizerId) {
+      return res.status(403).json({ error: 'Organizer ID not found in token' });
+    }
+
+    const result = await pool.query(
+      `SELECT id, name, subject, body_html, body_text, created_at, updated_at
+       FROM email_templates
+       WHERE id = $1 AND organizer_id = $2`,
+      [templateId, organizerId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+
+    res.json({ template: result.rows[0] });
+  } catch (error) {
+    console.error('Error fetching email template:', error);
+    res.status(500).json({ error: 'Failed to fetch template' });
   }
 });
 
