@@ -1,9 +1,30 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
-const { authRequired } = require('../middleware/auth');
+const jwt = require('jsonwebtoken');
 
-router.get('/', authRequired, async (req, res) => {
+const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
+
+/**
+ * Local auth middleware (same pattern as campaigns, lists, prospects)
+ */
+function authRequired(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authorization token required' });
+  }
+
+  const token = authHeader.replace('Bearer ', '');
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.auth = decoded;
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+router.get('/api/email-templates', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     if (!organizerId) {
@@ -11,9 +32,9 @@ router.get('/', authRequired, async (req, res) => {
     }
 
     const result = await pool.query(
-      `SELECT id, name, subject, body_html, body_text, created_at, updated_at 
-       FROM email_templates 
-       WHERE organizer_id = $1 
+      `SELECT id, name, subject, body_html, body_text, created_at, updated_at
+       FROM email_templates
+       WHERE organizer_id = $1
        ORDER BY created_at DESC`,
       [organizerId]
     );
@@ -25,7 +46,7 @@ router.get('/', authRequired, async (req, res) => {
   }
 });
 
-router.post('/', authRequired, async (req, res) => {
+router.post('/api/email-templates', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     if (!organizerId) {
@@ -45,7 +66,8 @@ router.post('/', authRequired, async (req, res) => {
     }
 
     const result = await pool.query(
-      `INSERT INTO email_templates (organizer_id, name, subject, body_html, body_text, created_at, updated_at)
+      `INSERT INTO email_templates
+       (organizer_id, name, subject, body_html, body_text, created_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
        RETURNING id, name, subject, body_html, body_text, created_at, updated_at`,
       [organizerId, name.trim(), subject.trim(), body_html, body_text || null]
