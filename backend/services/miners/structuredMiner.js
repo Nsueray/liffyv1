@@ -1,6 +1,6 @@
 /**
- * Structured Miner v2.3
- * Fixed: Email detection by value format (not just label)
+ * Structured Miner v2.4
+ * Added: Block-level debug, backslash cleanup
  */
 
 const { FIELD_LABELS, detectFieldFromLabel } = require('./labelPatterns');
@@ -14,8 +14,8 @@ function mine(text) {
 
     console.log('   [StructuredMiner] Processing ' + text.length + ' chars');
 
-    // First, try to fix broken "Email" labels
-    const fixedText = fixBrokenLabels(text);
+    const cleanedText = cleanText(text);
+    const fixedText = fixBrokenLabels(cleanedText);
     const normalizedText = normalizeText(fixedText);
     const lines = normalizedText.split('\n').map(l => l.trim()).filter(l => l !== undefined);
     
@@ -31,6 +31,16 @@ function mine(text) {
     }
     
     console.log('   [StructuredMiner] Found ' + contacts.length + ' contacts');
+    
+    // Debug: Show contacts with/without names
+    const withName = contacts.filter(c => c.name);
+    const withoutName = contacts.filter(c => !c.name);
+    console.log('   [StructuredMiner] With name: ' + withName.length + ', Without name: ' + withoutName.length);
+    
+    if (withoutName.length > 0) {
+        console.log('   [StructuredMiner] Contacts without name:');
+        withoutName.forEach(c => console.log('      - ' + c.email + ' | company: ' + (c.company || '-')));
+    }
 
     return {
         contacts,
@@ -43,12 +53,33 @@ function mine(text) {
 }
 
 /**
- * Fix broken labels like "E\nma\nil:" -> "Email:"
+ * Clean text - remove artifacts
+ */
+function cleanText(text) {
+    let cleaned = text;
+    
+    // Remove zero-width characters
+    cleaned = cleaned.replace(/[\u200B-\u200D\uFEFF\u200E\u200F]/g, '');
+    
+    // Remove trailing backslashes (Word artifacts)
+    cleaned = cleaned.replace(/\\$/gm, '');
+    cleaned = cleaned.replace(/\\\n/g, '\n');
+    cleaned = cleaned.replace(/\\/g, '');
+    
+    // Remove markdown link artifacts
+    cleaned = cleaned.replace(/\[([^\]]+)\]\{[^}]*\}/g, '$1');
+    cleaned = cleaned.replace(/\[[^\]]*\]\([^)]*\)/g, '');
+    
+    return cleaned;
+}
+
+/**
+ * Fix broken labels
  */
 function fixBrokenLabels(text) {
     let fixed = text;
     
-    // Fix broken "Email" - various patterns
+    // Fix broken "Email"
     fixed = fixed.replace(/E\s*\n\s*ma\s*\n\s*il\s*:/gi, 'Email:');
     fixed = fixed.replace(/E\s*-?\s*ma\s*-?\s*il\s*:/gi, 'Email:');
     fixed = fixed.replace(/Em\s*\n\s*ail\s*:/gi, 'Email:');
@@ -78,8 +109,17 @@ function parseByBlocks(text) {
     
     console.log('   [StructuredMiner] Found ' + blocks.length + ' blocks');
     
-    for (const block of blocks) {
-        const contact = parseBlock(block);
+    // Debug: Show last 3 blocks (likely Yaprak and Elif)
+    const lastBlocks = blocks.slice(-3);
+    console.log('   [StructuredMiner] Last 3 blocks preview:');
+    lastBlocks.forEach((block, i) => {
+        const preview = block.substring(0, 150).replace(/\n/g, '|');
+        console.log('      Block ' + (blocks.length - 3 + i) + ': ' + preview);
+    });
+    
+    for (let i = 0; i < blocks.length; i++) {
+        const block = blocks[i];
+        const contact = parseBlock(block, i);
         if (contact && contact.email) {
             contacts.push(contact);
         }
@@ -88,7 +128,7 @@ function parseByBlocks(text) {
     return contacts;
 }
 
-function parseBlock(block) {
+function parseBlock(block, blockIndex) {
     const contact = {};
     const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
     
@@ -97,9 +137,8 @@ function parseBlock(block) {
         if (parsed && parsed.value) {
             let { field, value } = parsed;
             
-            // CRITICAL FIX: If value looks like an email, force field to 'email'
+            // If value looks like an email, force field to 'email'
             if (value.match(EMAIL_REGEX) && field !== 'email') {
-                console.log('   [StructuredMiner] Forcing email field for: ' + value);
                 field = 'email';
             }
             
@@ -107,6 +146,12 @@ function parseBlock(block) {
                 contact[field] = cleanFieldValue(field, value);
             }
         }
+    }
+    
+    // Debug for blocks with email but no name
+    if (contact.email && !contact.name) {
+        console.log('   [StructuredMiner] Block ' + blockIndex + ' has email but no name:');
+        console.log('      Lines: ' + lines.slice(0, 5).join(' | '));
     }
     
     return Object.keys(contact).length > 0 ? contact : null;
@@ -134,7 +179,6 @@ function parseSequential(lines) {
         if (parsed) {
             let { field, value } = parsed;
             
-            // CRITICAL FIX: If value looks like an email, force field to 'email'
             if (value && value.match(EMAIL_REGEX) && field !== 'email') {
                 field = 'email';
             }
@@ -183,16 +227,13 @@ function normalizeText(text) {
 function parseLabelValueLine(line) {
     if (!line) return null;
     
-    // Clean zero-width characters first
     const cleanLine = line.replace(/[\u200B-\u200D\uFEFF\u200E\u200F]/g, '').trim();
     
     if (!cleanLine) return null;
     
-    // Try colon separator first
     let match = cleanLine.match(/^([^:\n]{1,50}?)\s*:\s*(.+)$/);
     
     if (!match) {
-        // Try dash separator
         match = cleanLine.match(/^([^-\n]{1,50}?)\s*-\s*(.+)$/);
     }
     
@@ -216,8 +257,7 @@ function parseLabelValueLine(line) {
 function cleanFieldValue(field, value) {
     if (!value) return '';
     
-    // Remove zero-width characters
-    let cleaned = value.replace(/[\u200B-\u200D\uFEFF\u200E\u200F]/g, '').trim();
+    let cleaned = value.replace(/[\u200B-\u200D\uFEFF\u200E\u200F\\]/g, '').trim();
     
     cleaned = cleaned
         .replace(/\[([^\]]+)\]\{[^}]*\}/g, '$1')
@@ -264,6 +304,7 @@ function toTitleCase(str) {
 
 module.exports = {
     mine,
+    cleanText,
     fixBrokenLabels,
     normalizeText,
     parseByBlocks,
