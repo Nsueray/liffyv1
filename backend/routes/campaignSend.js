@@ -2,10 +2,11 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
-const { sendEmail } = require('../mailer');
+const { sendEmail } = require('../mailer'); // Mailer'ın dinamik API Key desteklediğinden emin olmalıyız
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
+// Auth Middleware
 function authRequired(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
@@ -28,16 +29,55 @@ function authRequired(req, res, next) {
   }
 }
 
+/**
+ * Helper: Basit Şablon Değişkeni Değiştirici
+ * {{name}} -> Alıcı İsmi
+ * {{company}} -> Alıcı Şirketi
+ */
+function processTemplate(text, recipient) {
+  if (!text) return "";
+  
+  // Recipient verilerini hazırla
+  const name = recipient.name || "";
+  let company = "";
+  
+  // Meta verisi JSONB olduğu için obje olarak gelebilir
+  if (recipient.meta) {
+      // Eğer meta string ise parse etmeye çalış, değilse direkt kullan
+      const metaObj = typeof recipient.meta === 'string' 
+          ? JSON.parse(recipient.meta) 
+          : recipient.meta;
+          
+      company = metaObj.company || metaObj.company_name || "";
+  }
+
+  // Değiştirme işlemi (Case insensitive)
+  let processed = text;
+  
+  // {{name}} veya {{Name}} değişimi
+  processed = processed.replace(/{{name}}/gi, name);
+  processed = processed.replace(/{{first_name}}/gi, name.split(' ')[0]); // Sadece ilk isim
+  
+  // {{company}} değişimi
+  processed = processed.replace(/{{company}}/gi, company);
+  processed = processed.replace(/{{company_name}}/gi, company);
+
+  return processed;
+}
+
+// POST /api/campaigns/:id/send-batch
+// Bu endpoint Worker veya Frontend tarafından periyodik çağrılır
 router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
   const client = await db.connect();
 
   try {
     const campaign_id = req.params.id;
     const organizer_id = req.auth.organizer_id;
-    const { batch_size } = req.body;
+    const { batch_size } = req.body; // Örn: 10 mail gönder
 
-    const limit = parseInt(batch_size, 10) || 10;
+    const limit = parseInt(batch_size, 10) || 5; // Varsayılan 5 (Güvenli başlangıç)
 
+    // 1. Kampanya ve Template Bilgisini Çek
     const campRes = await client.query(
       `SELECT c.*, t.subject, t.body_html, t.body_text
        FROM campaigns c
@@ -52,39 +92,35 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
 
     const campaign = campRes.rows[0];
 
+    // Durum Kontrolleri
     if (campaign.status === 'paused') {
-      return res.json({
-        success: true,
-        message: "Campaign is paused. No emails sent.",
-        sent: 0,
-        failed: 0,
-        paused: true
-      });
+      return res.json({ success: true, message: "Campaign paused", sent: 0, paused: true });
     }
-
+    
     if (campaign.status !== 'sending') {
+       // Eğer 'ready' ise ve kullanıcı start dediyse 'sending'e çekmek için ayrı bir endpoint var.
+       // Bu endpoint sadece 'sending' durumundakileri işler.
       return res.status(400).json({
         error: `Cannot send: campaign status is '${campaign.status}', expected 'sending'`
       });
     }
 
     if (!campaign.sender_id) {
-      return res.status(400).json({
-        error: "Cannot send: campaign has no sender_id configured"
-      });
+      return res.status(400).json({ error: "Campaign has no sender_id" });
     }
 
+    // 2. Organizer Ayarlarını (API Key) Çek
     const orgRes = await client.query(
-      `SELECT * FROM organizers WHERE id = $1`,
+      `SELECT sendgrid_api_key FROM organizers WHERE id = $1`,
       [organizer_id]
     );
-
-    if (orgRes.rows.length === 0) {
-      return res.status(404).json({ error: "Organizer not found" });
-    }
-
     const organizer = orgRes.rows[0];
 
+    if (!organizer || !organizer.sendgrid_api_key) {
+        return res.status(400).json({ error: "Organizer SendGrid API Key not found in Settings" });
+    }
+
+    // 3. Gönderici Kimliğini Çek
     const senderRes = await client.query(
       `SELECT * FROM sender_identities
        WHERE id = $1 AND organizer_id = $2 AND is_active = true`,
@@ -92,24 +128,26 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
     );
 
     if (senderRes.rows.length === 0) {
-      return res.status(400).json({
-        error: "Sender identity not found or inactive"
-      });
+      return res.status(400).json({ error: "Sender identity inactive or missing" });
     }
-
     const sender = senderRes.rows[0];
 
+    // 4. Gönderilecek Kişileri (Pending) Çek
+    // FOR UPDATE SKIP LOCKED: Aynı anda birden fazla worker çalışırsa çakışmayı önler
     const recRes = await client.query(
       `SELECT * FROM campaign_recipients
        WHERE campaign_id = $1 AND organizer_id = $2 AND status = 'pending'
-       ORDER BY created_at ASC
-       LIMIT $3`,
+       ORDER BY id ASC
+       LIMIT $3
+       FOR UPDATE SKIP LOCKED`, 
       [campaign_id, organizer_id, limit]
     );
 
     const recipients = recRes.rows;
 
+    // Eğer gönderilecek kimse kalmadıysa
     if (recipients.length === 0) {
+      // Bekleyen var mı diye son bir kontrol (Locklanmış olabilir mi?)
       const pendingCheck = await client.query(
         `SELECT COUNT(*) as count FROM campaign_recipients
          WHERE campaign_id = $1 AND organizer_id = $2 AND status = 'pending'`,
@@ -119,102 +157,73 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
       const pendingCount = parseInt(pendingCheck.rows[0].count, 10) || 0;
 
       if (pendingCount === 0) {
+        // Hepsi bitmiş, kampanyayı tamamla
         await client.query(
-          `UPDATE campaigns SET status = 'completed' WHERE id = $1 AND organizer_id = $2`,
+          `UPDATE campaigns SET status = 'completed', completed_at = NOW() 
+           WHERE id = $1 AND organizer_id = $2`,
           [campaign_id, organizer_id]
         );
-
-        return res.json({
-          success: true,
-          message: "No pending recipients. Campaign marked as completed.",
-          sent: 0,
-          failed: 0,
-          completed: true
-        });
+        return res.json({ success: true, message: "Campaign Completed", completed: true });
       }
 
-      return res.json({
-        success: true,
-        message: "No pending recipients",
-        sent: 0,
-        failed: 0
-      });
+      return res.json({ success: true, message: "No available recipients right now (maybe locked)", sent: 0 });
     }
 
+    // 5. Gönderim Döngüsü
     let sentCount = 0;
     let failCount = 0;
 
     for (const r of recipients) {
-      const statusCheck = await client.query(
-        `SELECT status FROM campaigns WHERE id = $1 AND organizer_id = $2`,
-        [campaign_id, organizer_id]
-      );
-
-      if (statusCheck.rows.length > 0 && statusCheck.rows[0].status === 'paused') {
-        return res.json({
-          success: true,
-          message: "Campaign paused during batch. Stopping.",
-          total: recipients.length,
-          sent: sentCount,
-          failed: failCount,
-          paused: true
-        });
-      }
-
       try {
+        // A. Kişiselleştirme (Variable Replacement)
+        const personalizedSubject = processTemplate(campaign.subject, r);
+        const personalizedHtml = processTemplate(campaign.body_html, r);
+        const personalizedText = processTemplate(campaign.body_text || "", r);
+
+        // B. Gönderim (Mailer'a Dinamik Key Gönderiyoruz)
         const mailResp = await sendEmail({
           to: r.email,
-          subject: campaign.subject,
-          text: campaign.body_text || '',
-          html: campaign.body_html,
+          subject: personalizedSubject,
+          text: personalizedText,
+          html: personalizedHtml,
           from_name: sender.from_name,
           from_email: sender.from_email,
           reply_to: sender.reply_to || null,
-          sendgrid_api_key: organizer.sendgrid_api_key
+          sendgrid_api_key: organizer.sendgrid_api_key // ÖNEMLİ: Settings'den gelen key
         });
 
+        // C. Sonucu İşle
         if (mailResp && mailResp.success) {
-          sentCount += 1;
-
+          sentCount++;
+          // Başarılı
           await client.query(
-            `UPDATE campaign_recipients
-             SET status = 'sent', last_error = NULL
-             WHERE id = $1`,
+            `UPDATE campaign_recipients SET status = 'sent', sent_at = NOW(), last_error = NULL WHERE id = $1`,
             [r.id]
           );
-
+          
+          // Logla
           await client.query(
             `INSERT INTO email_logs
              (organizer_id, campaign_id, template_id, recipient_email, recipient_data, status, provider_response, sent_at)
              VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
-            [
-              organizer_id,
-              campaign_id,
-              campaign.template_id,
-              r.email,
-              r.meta,
-              'sent',
-              mailResp
-            ]
+            [organizer_id, campaign_id, campaign.template_id, r.email, r.meta, 'sent', mailResp]
           );
-        } else {
-          failCount += 1;
 
+        } else {
+          failCount++;
+          // Başarısız (SMTP Hatası vb.)
+          const errorMsg = mailResp && mailResp.error ? JSON.stringify(mailResp.error) : 'Unknown Error';
           await client.query(
-            `UPDATE campaign_recipients
-             SET status = 'failed', last_error = $2
-             WHERE id = $1`,
-            [r.id, mailResp && mailResp.error ? mailResp.error : 'Unknown error']
+            `UPDATE campaign_recipients SET status = 'failed', last_error = $2 WHERE id = $1`,
+            [r.id, errorMsg]
           );
         }
-      } catch (e) {
-        console.error("Send error for recipient", r.email, e.message);
-        failCount += 1;
 
+      } catch (e) {
+        failCount++;
+        console.error(`Send error for ${r.email}:`, e.message);
         await client.query(
-          `UPDATE campaign_recipients
-           SET status = 'failed', last_error = $2
-           WHERE id = $1`,
+          `UPDATE campaign_recipients SET status = 'failed', last_error = $2 WHERE id = $1`,
           [r.id, e.message]
         );
       }
@@ -229,7 +238,7 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
     });
 
   } catch (err) {
-    console.error("send-batch error:", err);
+    console.error("send-batch fatal error:", err);
     return res.status(500).json({ error: err.message });
   } finally {
     client.release();
