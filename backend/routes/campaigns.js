@@ -31,7 +31,8 @@ function authRequired(req, res, next) {
 router.post('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    const { name, template_id } = req.body;
+    // GÜNCELLEME: list_id ve sender_id eklendi
+    const { name, template_id, list_id, sender_id } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Campaign name is required' });
@@ -41,6 +42,7 @@ router.post('/', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'Template is required' });
     }
 
+    // Template Kontrolü
     const templateCheck = await db.query(
       `SELECT id FROM email_templates WHERE id = $1 AND organizer_id = $2`,
       [template_id, organizerId]
@@ -50,11 +52,34 @@ router.post('/', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'Template not found or access denied' });
     }
 
+    // List Kontrolü (Eğer seçildiyse)
+    if (list_id) {
+      const listCheck = await db.query(
+        `SELECT id FROM lists WHERE id = $1 AND organizer_id = $2`,
+        [list_id, organizerId]
+      );
+      if (listCheck.rows.length === 0) {
+        return res.status(400).json({ error: 'List not found' });
+      }
+    }
+
+    // Sender Kontrolü (Eğer seçildiyse)
+    if (sender_id) {
+      const senderCheck = await db.query(
+        `SELECT id FROM sender_identities WHERE id = $1 AND organizer_id = $2`,
+        [sender_id, organizerId]
+      );
+      if (senderCheck.rows.length === 0) {
+        return res.status(400).json({ error: 'Sender not found' });
+      }
+    }
+
+    // GÜNCELLEME: list_id ve sender_id insert ediliyor
     const result = await db.query(
-      `INSERT INTO campaigns (organizer_id, template_id, name, status)
-       VALUES ($1, $2, $3, 'draft')
+      `INSERT INTO campaigns (organizer_id, template_id, list_id, sender_id, name, status)
+       VALUES ($1, $2, $3, $4, $5, 'draft')
        RETURNING *`,
-      [organizerId, template_id, name.trim()]
+      [organizerId, template_id, list_id || null, sender_id || null, name.trim()]
     );
 
     res.status(201).json(result.rows[0]);
