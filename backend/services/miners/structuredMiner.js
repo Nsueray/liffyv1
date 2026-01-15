@@ -28,7 +28,7 @@ function mine(text) {
         return { contacts: [], stats: { method: 'structured', parsed: 0 } };
     }
 
-    console.log(`   [StructuredMiner] Processing ${text.length} chars`);
+    console.log('   [StructuredMiner] Processing ' + text.length + ' chars');
 
     // Normalize text first
     const normalizedText = normalizeText(text);
@@ -36,17 +36,20 @@ function mine(text) {
     // Split into lines
     const lines = normalizedText.split('\n').map(l => l.trim()).filter(l => l !== undefined);
     
-    console.log(`   [StructuredMiner] ${lines.filter(l => l).length} lines`);
+    console.log('   [StructuredMiner] ' + lines.filter(l => l).length + ' lines');
 
     // Try block-based parsing first (separated by blank lines)
     let contacts = parseByBlocks(normalizedText);
     
+    console.log('   [StructuredMiner] parseByBlocks found: ' + contacts.length);
+    
     // If block parsing didn't work well, try sequential parsing
     if (contacts.length === 0) {
         contacts = parseSequential(lines);
+        console.log('   [StructuredMiner] parseSequential found: ' + contacts.length);
     }
     
-    console.log(`   [StructuredMiner] Found ${contacts.length} contacts`);
+    console.log('   [StructuredMiner] Found ' + contacts.length + ' contacts');
 
     return {
         contacts,
@@ -67,6 +70,8 @@ function parseByBlocks(text) {
     
     // Split by double newline or multiple newlines
     const blocks = text.split(/\n\s*\n/).filter(block => block.trim());
+    
+    console.log('   [StructuredMiner] Found ' + blocks.length + ' blocks');
     
     for (const block of blocks) {
         const contact = parseBlock(block);
@@ -167,7 +172,7 @@ function normalizeText(text) {
     for (const label of allLabels) {
         // Case-insensitive replacement
         const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const pattern = new RegExp(`(?<!^|\\n)(${escapedLabel})\\s*[:\\-]`, 'gim');
+        const pattern = new RegExp('(?<!^|\\n)(' + escapedLabel + ')\\s*[:\\-]', 'gim');
         normalized = normalized.replace(pattern, '\n$1:');
     }
     
