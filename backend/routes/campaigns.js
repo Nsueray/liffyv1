@@ -27,7 +27,8 @@ function authRequired(req, res, next) {
   }
 }
 
-router.post('/api/campaigns', authRequired, async (req, res) => {
+// POST /api/campaigns
+router.post('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     const { name, template_id } = req.body;
@@ -63,7 +64,8 @@ router.post('/api/campaigns', authRequired, async (req, res) => {
   }
 });
 
-router.get('/api/campaigns', authRequired, async (req, res) => {
+// GET /api/campaigns
+router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
 
@@ -82,7 +84,8 @@ router.get('/api/campaigns', authRequired, async (req, res) => {
   }
 });
 
-router.get('/api/campaigns/:id', authRequired, async (req, res) => {
+// GET /api/campaigns/:id
+router.get('/:id', authRequired, async (req, res) => {
   try {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
@@ -105,27 +108,132 @@ router.get('/api/campaigns/:id', authRequired, async (req, res) => {
   }
 });
 
-router.delete('/api/campaigns/:id', authRequired, async (req, res) => {
+// DELETE /api/campaigns/:id
+router.delete('/:id', authRequired, async (req, res) => {
   try {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
 
-    const result = await db.query(
-      `DELETE FROM campaigns WHERE id = $1 AND organizer_id = $2 RETURNING *`,
+    const campRes = await db.query(
+      `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
       [campaignId, organizerId]
     );
 
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Campaign not found' });
+    if (campRes.rows.length === 0) {
+      return res.status(404).json({ error: "Campaign not found" });
     }
 
-    res.json({ message: 'Campaign deleted successfully', campaign: result.rows[0] });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
+    const campaign = campRes.rows[0];
+
+    if (campaign.status === 'sending') {
+      return res.status(400).json({ 
+        error: "Cannot delete campaign while it is sending" 
+      });
+    }
+
+    await db.query(
+      `DELETE FROM campaign_recipients WHERE campaign_id = $1 AND organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
+    await db.query(
+      `DELETE FROM campaigns WHERE id = $1 AND organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
+    return res.json({ success: true, deleted: campaignId });
+  } catch (err) {
+    console.error("Delete campaign error:", err);
+    return res.status(500).json({ error: err.message });
   }
 });
 
-router.post('/api/campaigns/:id/resolve', authRequired, async (req, res) => {
+// PATCH /api/campaigns/:id
+router.patch('/:id', authRequired, async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const organizerId = req.auth.organizer_id;
+    const { list_id, sender_id, include_risky } = req.body;
+
+    const campRes = await db.query(
+      `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
+    if (campRes.rows.length === 0) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    const campaign = campRes.rows[0];
+
+    if (campaign.status !== 'draft') {
+      return res.status(400).json({
+        error: `Cannot update campaign: status is '${campaign.status}', expected 'draft'`
+      });
+    }
+
+    const updates = [];
+    const values = [];
+    let idx = 1;
+
+    if (list_id !== undefined) {
+      if (list_id) {
+        const listCheck = await db.query(
+          `SELECT id FROM lists WHERE id = $1 AND organizer_id = $2`,
+          [list_id, organizerId]
+        );
+        if (listCheck.rows.length === 0) {
+          return res.status(400).json({ error: "List not found or access denied" });
+        }
+      }
+      updates.push(`list_id = $${idx++}`);
+      values.push(list_id || null);
+    }
+
+    if (sender_id !== undefined) {
+      if (sender_id) {
+        const senderCheck = await db.query(
+          `SELECT id FROM sender_identities WHERE id = $1 AND organizer_id = $2 AND is_active = true`,
+          [sender_id, organizerId]
+        );
+        if (senderCheck.rows.length === 0) {
+          return res.status(400).json({ error: "Sender not found, inactive, or access denied" });
+        }
+      }
+      updates.push(`sender_id = $${idx++}`);
+      values.push(sender_id || null);
+    }
+
+    if (include_risky !== undefined) {
+      updates.push(`include_risky = $${idx++}`);
+      values.push(Boolean(include_risky));
+    }
+
+    if (updates.length === 0) {
+      return res.status(400).json({ error: "No valid fields to update" });
+    }
+
+    values.push(campaignId);
+    values.push(organizerId);
+
+    const updateQuery = `
+      UPDATE campaigns
+      SET ${updates.join(', ')}
+      WHERE id = $${idx++} AND organizer_id = $${idx}
+      RETURNING *
+    `;
+
+    const result = await db.query(updateQuery, values);
+
+    return res.json(result.rows[0]);
+  } catch (err) {
+    console.error("Patch campaign error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/campaigns/:id/resolve
+router.post('/:id/resolve', authRequired, async (req, res) => {
   const client = await db.connect();
 
   try {
@@ -135,9 +243,7 @@ router.post('/api/campaigns/:id/resolve', authRequired, async (req, res) => {
     await client.query('BEGIN');
 
     const campRes = await client.query(
-      `SELECT * FROM campaigns 
-       WHERE id = $1 AND organizer_id = $2
-       FOR UPDATE`,
+      `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
       [campaignId, organizerId]
     );
 
@@ -158,33 +264,19 @@ router.post('/api/campaigns/:id/resolve', authRequired, async (req, res) => {
     if (!campaign.list_id) {
       await client.query('ROLLBACK');
       return res.status(400).json({
-        error: "Cannot resolve campaign: list_id is not set"
+        error: "Cannot resolve campaign: no list assigned"
       });
     }
 
     if (!campaign.sender_id) {
       await client.query('ROLLBACK');
       return res.status(400).json({
-        error: "Cannot resolve campaign: sender_id is not set"
-      });
-    }
-
-    const listRes = await client.query(
-      `SELECT id FROM lists 
-       WHERE id = $1 AND organizer_id = $2`,
-      [campaign.list_id, organizerId]
-    );
-
-    if (listRes.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({
-        error: "Cannot resolve campaign: list not found or access denied"
+        error: "Cannot resolve campaign: no sender identity assigned"
       });
     }
 
     const senderRes = await client.query(
-      `SELECT id FROM sender_identities 
-       WHERE id = $1 AND organizer_id = $2 AND is_active = true`,
+      `SELECT id FROM sender_identities WHERE id = $1 AND organizer_id = $2 AND is_active = true`,
       [campaign.sender_id, organizerId]
     );
 
@@ -365,7 +457,8 @@ router.post('/api/campaigns/:id/resolve', authRequired, async (req, res) => {
   }
 });
 
-router.post('/api/campaigns/:id/pause', authRequired, async (req, res) => {
+// POST /api/campaigns/:id/pause
+router.post('/:id/pause', authRequired, async (req, res) => {
   try {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
@@ -410,7 +503,8 @@ router.post('/api/campaigns/:id/pause', authRequired, async (req, res) => {
   }
 });
 
-router.post('/api/campaigns/:id/resume', authRequired, async (req, res) => {
+// POST /api/campaigns/:id/resume
+router.post('/:id/resume', authRequired, async (req, res) => {
   try {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
