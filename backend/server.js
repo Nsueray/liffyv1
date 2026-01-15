@@ -19,6 +19,7 @@ const miningJobsRouter = require('./routes/miningJobs');
 const miningResultsRouter = require('./routes/miningResults');
 const leadsRouter = require('./routes/leads');
 const listsRouter = require('./routes/lists');
+const settingsRouter = require('./routes/settings');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -55,6 +56,7 @@ app.use(miningJobsRouter);
 app.use(miningResultsRouter);
 app.use('/api/leads', leadsRouter);
 app.use('/api/lists', listsRouter);
+app.use('/api/settings', settingsRouter);
 app.use('/api/campaigns', campaignsRouter);
 
 // 404 fallback (JSON)
