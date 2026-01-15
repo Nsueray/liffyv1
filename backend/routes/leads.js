@@ -27,6 +27,7 @@ function authRequired(req, res, next) {
   }
 }
 
+// GET /api/leads - List all leads (from prospects table)
 router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -85,6 +86,7 @@ router.get('/', authRequired, async (req, res) => {
         source_type,
         source_ref,
         tags,
+        meta,
         created_at
       FROM prospects
       ${whereClause}
@@ -100,7 +102,10 @@ router.get('/', authRequired, async (req, res) => {
       total,
       leads: dataResult.rows.map(row => ({
         ...row,
-        tags: row.tags || []
+        tags: row.tags || [],
+        // Extract phone/website from meta if available
+        phone: row.meta?.phone || null,
+        website: row.meta?.website || null
       }))
     });
   } catch (err) {
@@ -109,6 +114,140 @@ router.get('/', authRequired, async (req, res) => {
   }
 });
 
+/**
+ * Import mining results to leads (prospects table)
+ * POST /api/leads/import
+ * Body: { result_ids: [uuid, uuid, ...] }
+ */
+router.post('/import', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const { result_ids } = req.body;
+
+    if (!Array.isArray(result_ids) || result_ids.length === 0) {
+      return res.status(400).json({ error: 'result_ids array is required' });
+    }
+
+    console.log(`Importing ${result_ids.length} mining results to leads for organizer ${organizerId}`);
+
+    // Get mining results that belong to this organizer
+    const resultsQuery = await db.query(`
+      SELECT mr.* 
+      FROM mining_results mr
+      JOIN mining_jobs mj ON mr.job_id = mj.id
+      WHERE mr.id = ANY($1) AND mj.organizer_id = $2
+    `, [result_ids, organizerId]);
+
+    if (resultsQuery.rows.length === 0) {
+      return res.status(404).json({ error: 'No valid mining results found' });
+    }
+
+    const results = resultsQuery.rows;
+    let imported = 0;
+    let updated = 0;
+    const errors = [];
+
+    for (const result of results) {
+      try {
+        // Get first email from emails array
+        const email = Array.isArray(result.emails) && result.emails.length > 0
+          ? result.emails[0].toLowerCase().trim()
+          : null;
+
+        if (!email) {
+          errors.push({ id: result.id, error: 'No email found' });
+          continue;
+        }
+
+        // Build meta object for extra fields (phone, website, etc.)
+        const meta = {
+          phone: result.phone || null,
+          website: result.website || null,
+          job_title: result.job_title || null,
+          city: result.city || null,
+          address: result.address || null,
+          source_url: result.source_url || null,
+          mining_job_id: result.job_id
+        };
+
+        // Check if email already exists in prospects
+        const existingCheck = await db.query(
+          'SELECT id, meta FROM prospects WHERE LOWER(email) = LOWER($1) AND organizer_id = $2',
+          [email, organizerId]
+        );
+
+        if (existingCheck.rows.length > 0) {
+          // Update existing record - merge meta
+          const existingMeta = existingCheck.rows[0].meta || {};
+          const mergedMeta = { ...existingMeta, ...meta };
+          
+          await db.query(`
+            UPDATE prospects SET
+              name = COALESCE(NULLIF($1, ''), name),
+              company = COALESCE(NULLIF($2, ''), company),
+              country = COALESCE(NULLIF($3, ''), country),
+              meta = $4,
+              verification_status = COALESCE(NULLIF($5, ''), verification_status)
+            WHERE id = $6
+          `, [
+            result.contact_name,
+            result.company_name,
+            result.country,
+            JSON.stringify(mergedMeta),
+            result.verification_status,
+            existingCheck.rows[0].id
+          ]);
+          updated++;
+        } else {
+          // Insert new record
+          await db.query(`
+            INSERT INTO prospects (
+              organizer_id, email, name, company, country,
+              source_type, source_ref, verification_status, meta, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+          `, [
+            organizerId,
+            email,
+            result.contact_name || null,
+            result.company_name || null,
+            result.country || null,
+            'mining',
+            result.job_id,
+            result.verification_status || 'unverified',
+            JSON.stringify(meta)
+          ]);
+          imported++;
+        }
+
+        // Mark mining result as imported
+        await db.query(
+          'UPDATE mining_results SET status = $1, updated_at = NOW() WHERE id = $2',
+          ['imported', result.id]
+        );
+
+      } catch (insertErr) {
+        console.error(`Error importing result ${result.id}:`, insertErr.message);
+        errors.push({ id: result.id, error: insertErr.message });
+      }
+    }
+
+    console.log(`Import complete: ${imported} new, ${updated} updated, ${errors.length} errors`);
+
+    res.json({
+      success: true,
+      imported,
+      updated,
+      total: results.length,
+      errors: errors.length > 0 ? errors : undefined
+    });
+
+  } catch (err) {
+    console.error('POST /api/leads/import error:', err);
+    res.status(500).json({ error: 'Failed to import leads', details: err.message });
+  }
+});
+
+// POST /api/leads/:id/tags - Update tags for single lead
 router.post('/:id/tags', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -146,6 +285,7 @@ router.post('/:id/tags', authRequired, async (req, res) => {
   }
 });
 
+// POST /api/leads/bulk-tags - Bulk update tags
 router.post('/bulk-tags', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
