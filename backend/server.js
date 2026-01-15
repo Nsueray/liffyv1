@@ -56,6 +56,7 @@ app.use(miningJobsRouter);
 app.use(miningResultsRouter);
 app.use('/api/leads', leadsRouter);
 app.use('/api/lists', listsRouter);
+app.use('/api/campaigns', campaignsRouter);
 
 // 404 fallback (JSON)
 app.use((req, res) => {
