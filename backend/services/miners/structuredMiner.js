@@ -1,5 +1,6 @@
 /**
- * Structured Miner v2.2 - DEBUG VERSION
+ * Structured Miner v2.3
+ * Fixed: Email detection by value format (not just label)
  */
 
 const { FIELD_LABELS, detectFieldFromLabel } = require('./labelPatterns');
@@ -12,26 +13,13 @@ function mine(text) {
     }
 
     console.log('   [StructuredMiner] Processing ' + text.length + ' chars');
-    
-    // DEBUG: Show first 500 chars of text
-    console.log('   [StructuredMiner] TEXT PREVIEW:');
-    console.log('   ---START---');
-    console.log(text.substring(0, 500));
-    console.log('   ---END---');
 
-    const normalizedText = normalizeText(text);
+    // First, try to fix broken "Email" labels
+    const fixedText = fixBrokenLabels(text);
+    const normalizedText = normalizeText(fixedText);
     const lines = normalizedText.split('\n').map(l => l.trim()).filter(l => l !== undefined);
     
     console.log('   [StructuredMiner] ' + lines.filter(l => l).length + ' lines');
-    
-    // DEBUG: Show first 10 non-empty lines
-    const nonEmptyLines = lines.filter(l => l && l.trim());
-    console.log('   [StructuredMiner] First 10 lines:');
-    for (let i = 0; i < Math.min(10, nonEmptyLines.length); i++) {
-        const line = nonEmptyLines[i];
-        const parsed = parseLabelValueLine(line);
-        console.log('   Line ' + i + ': "' + line + '" => ' + (parsed ? JSON.stringify(parsed) : 'null'));
-    }
 
     let contacts = parseByBlocks(normalizedText);
     
@@ -54,19 +42,41 @@ function mine(text) {
     };
 }
 
+/**
+ * Fix broken labels like "E\nma\nil:" -> "Email:"
+ */
+function fixBrokenLabels(text) {
+    let fixed = text;
+    
+    // Fix broken "Email" - various patterns
+    fixed = fixed.replace(/E\s*\n\s*ma\s*\n\s*il\s*:/gi, 'Email:');
+    fixed = fixed.replace(/E\s*-?\s*ma\s*-?\s*il\s*:/gi, 'Email:');
+    fixed = fixed.replace(/Em\s*\n\s*ail\s*:/gi, 'Email:');
+    fixed = fixed.replace(/Ema\s*\n\s*il\s*:/gi, 'Email:');
+    
+    // Fix broken "Company"
+    fixed = fixed.replace(/Com\s*\n\s*pany\s*:/gi, 'Company:');
+    fixed = fixed.replace(/Comp\s*\n\s*any\s*:/gi, 'Company:');
+    
+    // Fix broken "Phone"
+    fixed = fixed.replace(/Ph\s*\n\s*one\s*:/gi, 'Phone:');
+    fixed = fixed.replace(/Pho\s*\n\s*ne\s*:/gi, 'Phone:');
+    
+    // Fix broken "Country"
+    fixed = fixed.replace(/Coun\s*\n\s*try\s*:/gi, 'Country:');
+    fixed = fixed.replace(/Count\s*\n\s*ry\s*:/gi, 'Country:');
+    
+    // Fix broken "Name"
+    fixed = fixed.replace(/Na\s*\n\s*me\s*:/gi, 'Name:');
+    
+    return fixed;
+}
+
 function parseByBlocks(text) {
     const contacts = [];
     const blocks = text.split(/\n\s*\n/).filter(block => block.trim());
     
     console.log('   [StructuredMiner] Found ' + blocks.length + ' blocks');
-    
-    // DEBUG: Show first block
-    if (blocks.length > 0) {
-        console.log('   [StructuredMiner] First block:');
-        console.log('   ---BLOCK---');
-        console.log(blocks[0].substring(0, 300));
-        console.log('   ---END BLOCK---');
-    }
     
     for (const block of blocks) {
         const contact = parseBlock(block);
@@ -85,7 +95,14 @@ function parseBlock(block) {
     for (const line of lines) {
         const parsed = parseLabelValueLine(line);
         if (parsed && parsed.value) {
-            const { field, value } = parsed;
+            let { field, value } = parsed;
+            
+            // CRITICAL FIX: If value looks like an email, force field to 'email'
+            if (value.match(EMAIL_REGEX) && field !== 'email') {
+                console.log('   [StructuredMiner] Forcing email field for: ' + value);
+                field = 'email';
+            }
+            
             if (!contact[field]) {
                 contact[field] = cleanFieldValue(field, value);
             }
@@ -115,7 +132,12 @@ function parseSequential(lines) {
         const parsed = parseLabelValueLine(line);
         
         if (parsed) {
-            const { field, value } = parsed;
+            let { field, value } = parsed;
+            
+            // CRITICAL FIX: If value looks like an email, force field to 'email'
+            if (value && value.match(EMAIL_REGEX) && field !== 'email') {
+                field = 'email';
+            }
             
             if (field === 'company' && hasSeenEmail && currentContact.email) {
                 contacts.push({ ...currentContact });
@@ -161,12 +183,17 @@ function normalizeText(text) {
 function parseLabelValueLine(line) {
     if (!line) return null;
     
+    // Clean zero-width characters first
+    const cleanLine = line.replace(/[\u200B-\u200D\uFEFF\u200E\u200F]/g, '').trim();
+    
+    if (!cleanLine) return null;
+    
     // Try colon separator first
-    let match = line.match(/^([^:\n]{1,50}?)\s*:\s*(.+)$/);
+    let match = cleanLine.match(/^([^:\n]{1,50}?)\s*:\s*(.+)$/);
     
     if (!match) {
         // Try dash separator
-        match = line.match(/^([^-\n]{1,50}?)\s*-\s*(.+)$/);
+        match = cleanLine.match(/^([^-\n]{1,50}?)\s*-\s*(.+)$/);
     }
     
     if (!match) return null;
@@ -189,13 +216,13 @@ function parseLabelValueLine(line) {
 function cleanFieldValue(field, value) {
     if (!value) return '';
     
-    let cleaned = value.trim();
+    // Remove zero-width characters
+    let cleaned = value.replace(/[\u200B-\u200D\uFEFF\u200E\u200F]/g, '').trim();
     
     cleaned = cleaned
         .replace(/\[([^\]]+)\]\{[^}]*\}/g, '$1')
         .replace(/\[[^\]]*\]\([^)]*\)/g, '')
         .replace(/<[^>]+>/g, '')
-        .replace(/[\u200B-\u200D\uFEFF]/g, '')
         .trim();
     
     switch (field) {
@@ -237,6 +264,7 @@ function toTitleCase(str) {
 
 module.exports = {
     mine,
+    fixBrokenLabels,
     normalizeText,
     parseByBlocks,
     parseSequential,
