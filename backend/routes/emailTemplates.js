@@ -5,9 +5,6 @@ const jwt = require('jsonwebtoken');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
-/**
- * Local auth middleware (same pattern as campaigns, lists, prospects)
- */
 function authRequired(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -28,12 +25,9 @@ function authRequired(req, res, next) {
 router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    if (!organizerId) {
-      return res.status(403).json({ error: 'Organizer ID not found in token' });
-    }
-
+    // DÜZELTME: 'updated_at' silindi
     const result = await pool.query(
-      `SELECT id, name, subject, body_html, body_text, created_at, updated_at
+      `SELECT id, name, subject, body_html, body_text, created_at
        FROM email_templates
        WHERE organizer_id = $1
        ORDER BY created_at DESC`,
@@ -51,27 +45,18 @@ router.get('/', authRequired, async (req, res) => {
 router.post('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    if (!organizerId) {
-      return res.status(403).json({ error: 'Organizer ID not found in token' });
-    }
-
     const { name, subject, body_html, body_text } = req.body;
 
-    if (!name || !name.trim()) {
-      return res.status(400).json({ error: 'Name is required' });
-    }
-    if (!subject || !subject.trim()) {
-      return res.status(400).json({ error: 'Subject is required' });
-    }
-    if (!body_html || !body_html.trim()) {
-      return res.status(400).json({ error: 'Body HTML is required' });
-    }
+    if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
+    if (!subject || !subject.trim()) return res.status(400).json({ error: 'Subject is required' });
+    if (!body_html || !body_html.trim()) return res.status(400).json({ error: 'Body HTML is required' });
 
+    // DÜZELTME: 'updated_at' insert ve returning kısımlarından silindi
     const result = await pool.query(
       `INSERT INTO email_templates
-       (organizer_id, name, subject, body_html, body_text, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-       RETURNING id, name, subject, body_html, body_text, created_at, updated_at`,
+       (organizer_id, name, subject, body_html, body_text, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       RETURNING id, name, subject, body_html, body_text, created_at`,
       [organizerId, name.trim(), subject.trim(), body_html, body_text || null]
     );
 
@@ -88,12 +73,9 @@ router.get('/:id', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
     const templateId = req.params.id;
 
-    if (!organizerId) {
-      return res.status(403).json({ error: 'Organizer ID not found in token' });
-    }
-
+    // DÜZELTME: 'updated_at' silindi
     const result = await pool.query(
-      `SELECT id, name, subject, body_html, body_text, created_at, updated_at
+      `SELECT id, name, subject, body_html, body_text, created_at
        FROM email_templates
        WHERE id = $1 AND organizer_id = $2`,
       [templateId, organizerId]
