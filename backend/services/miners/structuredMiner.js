@@ -1,5 +1,5 @@
 /**
- * Structured Miner
+ * Structured Miner v2.1
  * Extracts contacts from label-based structured text
  * 
  * Handles formats like:
@@ -9,6 +9,7 @@
  *   Phone: +905332095377
  *   Country: Turkey
  * 
+ * Fixed: Block detection now uses blank lines + email as block end marker
  * Supports 10+ languages
  */
 
@@ -33,12 +34,17 @@ function mine(text) {
     const normalizedText = normalizeText(text);
     
     // Split into lines
-    const lines = normalizedText.split('\n').map(l => l.trim()).filter(Boolean);
+    const lines = normalizedText.split('\n').map(l => l.trim()).filter(l => l !== undefined);
     
-    console.log(`   [StructuredMiner] ${lines.length} lines`);
+    console.log(`   [StructuredMiner] ${lines.filter(l => l).length} lines`);
 
-    // Parse contacts
-    const contacts = parseStructuredContacts(lines);
+    // Try block-based parsing first (separated by blank lines)
+    let contacts = parseByBlocks(normalizedText);
+    
+    // If block parsing didn't work well, try sequential parsing
+    if (contacts.length === 0) {
+        contacts = parseSequential(lines);
+    }
     
     console.log(`   [StructuredMiner] Found ${contacts.length} contacts`);
 
@@ -50,6 +56,102 @@ function mine(text) {
             contacts: contacts.length
         }
     };
+}
+
+/**
+ * Parse by splitting text into blocks (separated by blank lines)
+ * This works well for repeated structured entries
+ */
+function parseByBlocks(text) {
+    const contacts = [];
+    
+    // Split by double newline or multiple newlines
+    const blocks = text.split(/\n\s*\n/).filter(block => block.trim());
+    
+    for (const block of blocks) {
+        const contact = parseBlock(block);
+        if (contact && contact.email) {
+            contacts.push(contact);
+        }
+    }
+    
+    return contacts;
+}
+
+/**
+ * Parse a single block of text for contact info
+ */
+function parseBlock(block) {
+    const contact = {};
+    const lines = block.split('\n').map(l => l.trim()).filter(Boolean);
+    
+    for (const line of lines) {
+        const parsed = parseLabelValueLine(line);
+        if (parsed && parsed.value) {
+            const { field, value } = parsed;
+            // Don't overwrite if already set (take first value)
+            if (!contact[field]) {
+                contact[field] = cleanFieldValue(field, value);
+            }
+        }
+    }
+    
+    return Object.keys(contact).length > 0 ? contact : null;
+}
+
+/**
+ * Sequential parsing - accumulate fields until we have a complete contact
+ * A contact is "complete" when we hit an email, then we save on next company/name
+ */
+function parseSequential(lines) {
+    const contacts = [];
+    let currentContact = {};
+    let hasSeenEmail = false;
+    
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        
+        // Skip empty lines but use them as potential block separators
+        if (!line || !line.trim()) {
+            // If we have a complete contact (with email), save it
+            if (hasSeenEmail && currentContact.email) {
+                contacts.push({ ...currentContact });
+                currentContact = {};
+                hasSeenEmail = false;
+            }
+            continue;
+        }
+        
+        const parsed = parseLabelValueLine(line);
+        
+        if (parsed) {
+            const { field, value } = parsed;
+            
+            // If we see a new "Company:" and already have a complete contact, save it
+            if (field === 'company' && hasSeenEmail && currentContact.email) {
+                contacts.push({ ...currentContact });
+                currentContact = {};
+                hasSeenEmail = false;
+            }
+            
+            // Store the value
+            if (value && value.trim()) {
+                currentContact[field] = cleanFieldValue(field, value);
+                
+                // Mark that we've seen an email
+                if (field === 'email') {
+                    hasSeenEmail = true;
+                }
+            }
+        }
+    }
+    
+    // Don't forget the last contact
+    if (currentContact.email) {
+        contacts.push({ ...currentContact });
+    }
+    
+    return contacts;
 }
 
 /**
@@ -79,71 +181,21 @@ function normalizeText(text) {
 }
 
 /**
- * Parse contacts from lines
- */
-function parseStructuredContacts(lines) {
-    const contacts = [];
-    let currentContact = {};
-    let lastField = null;
-    
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i];
-        
-        // Try to parse as "Label: Value"
-        const parsed = parseLabelValueLine(line);
-        
-        if (parsed) {
-            const { field, value } = parsed;
-            
-            // If we hit a new contact block (company or name at start)
-            if ((field === 'company' || field === 'name') && hasMinimumData(currentContact)) {
-                // Save current contact if it has email
-                if (currentContact.email) {
-                    contacts.push({ ...currentContact });
-                }
-                currentContact = {};
-            }
-            
-            // Store the value
-            if (value && value.trim()) {
-                // Clean up the value
-                currentContact[field] = cleanFieldValue(field, value);
-            }
-            
-            lastField = field;
-        } else {
-            // Not a label line - could be a continuation or separator
-            // If it's a blank line, might be end of contact block
-            if (!line.trim() && hasMinimumData(currentContact)) {
-                if (currentContact.email) {
-                    contacts.push({ ...currentContact });
-                }
-                currentContact = {};
-                lastField = null;
-            }
-        }
-    }
-    
-    // Don't forget last contact
-    if (currentContact.email) {
-        contacts.push({ ...currentContact });
-    }
-    
-    return contacts;
-}
-
-/**
  * Parse a line as "Label: Value"
  */
 function parseLabelValueLine(line) {
     if (!line) return null;
     
     // Pattern: LabelText : Value (or LabelText - Value)
-    const match = line.match(/^([^:\-\n]{1,50})\s*[:\-]\s*(.*)$/);
+    // Allow more characters in label (up to first : or -)
+    const match = line.match(/^([^:\n]{1,50}?)\s*[:\-]\s*(.*)$/);
     
     if (!match) return null;
     
     const [, labelPart, valuePart] = match;
+    
+    // Skip if label part is too short or looks like a value
+    if (!labelPart || labelPart.length < 2) return null;
     
     // Detect field from label
     const field = detectFieldFromLabel(labelPart);
@@ -213,18 +265,6 @@ function cleanFieldValue(field, value) {
 }
 
 /**
- * Check if contact has minimum data
- */
-function hasMinimumData(contact) {
-    return contact && (
-        contact.email ||
-        contact.company ||
-        contact.name ||
-        contact.phone
-    );
-}
-
-/**
  * Convert to title case
  */
 function toTitleCase(str) {
@@ -234,7 +274,9 @@ function toTitleCase(str) {
 module.exports = {
     mine,
     normalizeText,
-    parseStructuredContacts,
+    parseByBlocks,
+    parseSequential,
+    parseBlock,
     parseLabelValueLine,
     cleanFieldValue,
 };
