@@ -4,19 +4,14 @@ const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
 
 // --- MULTER AYARLARI (MEMORY STORAGE) ---
-// Dosyayı diske değil, RAM'e (Buffer) alıyoruz.
-// Böylece veritabanına BYTEA olarak kaydedebiliriz.
 const storage = multer.memoryStorage();
-
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 10 * 1024 * 1024 } // 10MB Limit (Güvenlik için)
+    limits: { fileSize: 50 * 1024 * 1024 } // 50MB Limit
 });
 
 /**
@@ -65,6 +60,16 @@ function validateJobId(req, res, next) {
 }
 
 /**
+ * Helper: Convert Buffer to PostgreSQL bytea hex format
+ * Bu fonksiyon binary veriyi güvenli bir şekilde PostgreSQL'e kaydeder
+ */
+function bufferToByteaHex(buffer) {
+  if (!buffer || !Buffer.isBuffer(buffer)) return null;
+  // PostgreSQL bytea hex format: \x followed by hex string
+  return '\\x' + buffer.toString('hex');
+}
+
+/**
  * POST /api/mining/jobs
  * Hem JSON (URL) hem Multipart (Dosya) kabul eder
  */
@@ -75,14 +80,25 @@ router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req,
     // Body'den verileri al
     let { type, input, name, strategy, site_profile, config } = req.body;
     let fileBuffer = null;
+    let fileHex = null;
 
     // Dosya Yüklendiyse (Multipart)
     if (req.file) {
+        console.log(`📁 File upload received: ${req.file.originalname}`);
+        console.log(`   Original size: ${req.file.size} bytes`);
+        console.log(`   Buffer size: ${req.file.buffer.length} bytes`);
+        console.log(`   Magic bytes: ${req.file.buffer.slice(0, 4).toString('hex')}`);
+        
         type = 'file';
-        input = req.file.originalname; // Dosya ismini input olarak sakla
+        input = req.file.originalname;
         name = name || req.file.originalname;
-        strategy = 'auto'; // Dosyalar için her zaman auto
-        fileBuffer = req.file.buffer; // Dosyanın binary verisi
+        strategy = 'auto';
+        fileBuffer = req.file.buffer;
+        
+        // ÖNEMLİ: Buffer'ı hex string'e çevir - encoding sorununu önler
+        fileHex = bufferToByteaHex(fileBuffer);
+        
+        console.log(`   Hex string length: ${fileHex ? fileHex.length : 0}`);
     }
 
     // Validation
@@ -106,29 +122,53 @@ router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req,
         try { config = JSON.parse(config); } catch(e) { config = {} }
     }
 
-    // DB'ye Kayıt (file_data sütununa buffer'ı ekliyoruz)
-    const result = await db.query(
-      `INSERT INTO mining_jobs
-       (organizer_id, type, input, name, strategy, site_profile, config, status, file_data)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
-       RETURNING id, organizer_id, type, input, name, strategy, site_profile, config, status, created_at`, 
-       // Not: file_data'yı RETURNING ile geri döndürmüyoruz, performans için.
-      [
-        organizer_id,
-        type,
-        input,
-        name || `Mining Job ${new Date().toISOString()}`,
-        strategy || 'auto',
-        site_profile || null,
-        config || {},
-        fileBuffer
-      ]
-    );
+    // DB'ye Kayıt
+    // NOT: file_data için raw SQL kullanıyoruz çünkü pg driver bazen buffer'ı yanlış encode ediyor
+    let result;
+    
+    if (fileHex) {
+      // Dosya varsa - hex string olarak kaydet
+      result = await db.query(
+        `INSERT INTO mining_jobs
+         (organizer_id, type, input, name, strategy, site_profile, config, status, file_data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', decode($8, 'hex'))
+         RETURNING id, organizer_id, type, input, name, strategy, site_profile, config, status, created_at`,
+        [
+          organizer_id,
+          type,
+          input,
+          name || `Mining Job ${new Date().toISOString()}`,
+          strategy || 'auto',
+          site_profile || null,
+          config || {},
+          fileHex.slice(2) // Remove '\x' prefix, decode() expects pure hex
+        ]
+      );
+    } else {
+      // Dosya yoksa (URL job)
+      result = await db.query(
+        `INSERT INTO mining_jobs
+         (organizer_id, type, input, name, strategy, site_profile, config, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+         RETURNING id, organizer_id, type, input, name, strategy, site_profile, config, status, created_at`,
+        [
+          organizer_id,
+          type,
+          input,
+          name || `Mining Job ${new Date().toISOString()}`,
+          strategy || 'auto',
+          site_profile || null,
+          config || {}
+        ]
+      );
+    }
 
+    console.log(`✅ Mining job created: ${result.rows[0].id}`);
+    
     return res.json({ success: true, job: result.rows[0] });
   } catch (err) {
     console.error('POST /mining/jobs error:', err);
-    return res.status(500).json({ error: 'Failed to create mining job' });
+    return res.status(500).json({ error: 'Failed to create mining job', details: err.message });
   }
 });
 
@@ -162,11 +202,11 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
       idx++;
     }
 
-    // ÖNEMLİ: file_data sütununu bilerek seçmiyoruz (*) kullanmıyoruz.
-    // Çünkü listelemede binary dosya verisini çekersek API çok yavaşlar.
+    // ÖNEMLİ: file_data sütununu seçmiyoruz - performans için
     const jobsRes = await db.query(
       `SELECT id, organizer_id, type, input, name, strategy, site_profile, config, status, 
-              progress, total_found, total_emails_raw, stats, created_at, completed_at
+              progress, total_found, total_emails_raw, stats, error, created_at, completed_at,
+              manual_required, manual_reason
        FROM mining_jobs
        WHERE ${where.join(' AND ')}
        ORDER BY created_at DESC
@@ -206,19 +246,26 @@ router.get('/api/mining/jobs/:id', authRequired, validateJobId, async (req, res)
   const { organizer_id } = req.auth;
   const job_id = req.params.id;
 
-  // Detayda da file_data'yı çekmiyoruz, gerekirse ayrı endpoint yapılır.
-  const result = await db.query(
-    `SELECT id, organizer_id, type, input, name, strategy, site_profile, config, status, 
-            progress, total_found, total_emails_raw, stats, created_at, completed_at
-     FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
-    [job_id, organizer_id]
-  );
+  try {
+    // file_data'yı çekmiyoruz - sadece metadata
+    const result = await db.query(
+      `SELECT id, organizer_id, type, input, name, strategy, site_profile, config, status, 
+              progress, total_found, total_emails_raw, stats, error, created_at, completed_at,
+              manual_required, manual_reason,
+              CASE WHEN file_data IS NOT NULL THEN true ELSE false END as has_file
+       FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      [job_id, organizer_id]
+    );
 
-  if (!result.rows.length) {
-    return res.status(404).json({ error: 'Job not found' });
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    return res.json({ job: result.rows[0] });
+  } catch (err) {
+    console.error('GET /mining/jobs/:id error:', err);
+    return res.status(500).json({ error: 'Failed to fetch job' });
   }
-
-  return res.json({ job: result.rows[0] });
 });
 
 /**
@@ -228,68 +275,84 @@ router.patch('/api/mining/jobs/:id', authRequired, validateJobId, async (req, re
   const { organizer_id } = req.auth;
   const job_id = req.params.id;
 
-  const updates = req.body || {};
-  const keys = Object.keys(updates);
-  if (!keys.length) {
-    return res.status(400).json({ error: 'No fields to update' });
+  try {
+    const updates = req.body || {};
+    const keys = Object.keys(updates);
+    
+    // file_data güncellemesine izin verme
+    const allowedKeys = keys.filter(k => k !== 'file_data');
+    
+    if (!allowedKeys.length) {
+      return res.status(400).json({ error: 'No valid fields to update' });
+    }
+
+    const setClause = allowedKeys.map((k, i) => `${k} = $${i + 3}`).join(', ');
+    const values = [job_id, organizer_id, ...allowedKeys.map(k => updates[k])];
+
+    const result = await db.query(
+      `UPDATE mining_jobs SET ${setClause} WHERE id = $1 AND organizer_id = $2 
+       RETURNING id, organizer_id, type, input, name, status, config, stats, error`,
+      values
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    return res.json({ job: result.rows[0] });
+  } catch (err) {
+    console.error('PATCH /mining/jobs/:id error:', err);
+    return res.status(500).json({ error: 'Failed to update job' });
   }
-
-  const setClause = keys.map((k, i) => `${k} = $${i + 3}`).join(', ');
-  const values = [job_id, organizer_id, ...Object.values(updates)];
-
-  // file_data hariç dön
-  const result = await db.query(
-    `UPDATE mining_jobs SET ${setClause} WHERE id = $1 AND organizer_id = $2 
-     RETURNING id, organizer_id, type, input, name, status, config, stats`,
-    values
-  );
-
-  if (!result.rows.length) {
-    return res.status(404).json({ error: 'Job not found' });
-  }
-
-  return res.json({ job: result.rows[0] });
 });
 
 /**
  * POST /api/mining/jobs/:id/retry
- * Create retry job ONLY (worker will pick it up)
+ * Job'u yeniden dener - file_data'yı da kopyalar
  */
 router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (req, res) => {
   const organizer_id = req.auth.organizer_id;
   const job_id = req.params.id;
 
-  // Retry için orijinal veriyi (binary file_data dahil) çekmemiz lazım
-  const jobRes = await db.query(
-    `SELECT * FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
-    [job_id, organizer_id]
-  );
+  try {
+    // Orijinal job'u al (file_data dahil)
+    const jobRes = await db.query(
+      `SELECT type, input, name, strategy, site_profile, config, file_data 
+       FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      [job_id, organizer_id]
+    );
 
-  if (!jobRes.rows.length) {
-    return res.status(404).json({ error: 'Job not found' });
+    if (!jobRes.rows.length) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    const j = jobRes.rows[0];
+
+    // Yeni job oluştur
+    const newJob = await db.query(
+      `INSERT INTO mining_jobs
+       (organizer_id, type, input, name, strategy, site_profile, config, status, file_data)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+       RETURNING id, organizer_id, type, input, name, status`,
+      [
+        organizer_id,
+        j.type,
+        j.input,
+        `${j.name} (Retry)`,
+        j.strategy,
+        j.site_profile,
+        j.config,
+        j.file_data // file_data olduğu gibi kopyalanıyor
+      ]
+    );
+
+    console.log(`🔄 Retry job created: ${newJob.rows[0].id} from ${job_id}`);
+    
+    return res.json({ job: newJob.rows[0] });
+  } catch (err) {
+    console.error('POST /mining/jobs/:id/retry error:', err);
+    return res.status(500).json({ error: 'Failed to create retry job' });
   }
-
-  const j = jobRes.rows[0];
-
-  // Yeni job oluştururken eski binary datayı da kopyalıyoruz
-  const newJob = await db.query(
-    `INSERT INTO mining_jobs
-     (organizer_id, type, input, name, strategy, site_profile, config, status, file_data)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,'pending', $8)
-     RETURNING id, organizer_id, type, input, name, status`,
-    [
-      organizer_id,
-      j.type,
-      j.input,
-      `${j.name} (Retry)`,
-      j.strategy,
-      j.site_profile,
-      j.config,
-      j.file_data // Eski dosya verisi
-    ]
-  );
-
-  return res.json({ job: newJob.rows[0] });
 });
 
 /**
@@ -309,16 +372,69 @@ router.delete('/api/mining/jobs/:id', authRequired, validateJobId, async (req, r
       return res.status(404).json({ error: 'Job not found' });
     }
 
-    // Delete job (assuming CASCADE is set up in DB for results)
+    // mining_results'lar CASCADE ile silinecek
     await db.query(
       `DELETE FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [job_id, organizer_id]
     );
 
+    console.log(`🗑️ Job deleted: ${job_id}`);
+    
     return res.json({ success: true, message: 'Job deleted successfully' });
   } catch (err) {
     console.error('DELETE /mining/jobs/:id error:', err);
     return res.status(500).json({ error: 'Failed to delete job' });
+  }
+});
+
+/**
+ * GET /api/mining/jobs/:id/file
+ * Job'un dosyasını indir (debugging için)
+ */
+router.get('/api/mining/jobs/:id/file', authRequired, validateJobId, async (req, res) => {
+  const { organizer_id } = req.auth;
+  const job_id = req.params.id;
+
+  try {
+    const result = await db.query(
+      `SELECT input, file_data FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      [job_id, organizer_id]
+    );
+
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    const job = result.rows[0];
+    
+    if (!job.file_data) {
+      return res.status(404).json({ error: 'No file data available' });
+    }
+
+    // Dosya tipini belirle
+    const filename = job.input || 'download';
+    const ext = filename.split('.').pop().toLowerCase();
+    
+    const mimeTypes = {
+      'pdf': 'application/pdf',
+      'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'doc': 'application/msword',
+      'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'xls': 'application/vnd.ms-excel',
+      'csv': 'text/csv',
+      'txt': 'text/plain'
+    };
+    
+    const contentType = mimeTypes[ext] || 'application/octet-stream';
+    
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Length', job.file_data.length);
+    
+    return res.send(job.file_data);
+  } catch (err) {
+    console.error('GET /mining/jobs/:id/file error:', err);
+    return res.status(500).json({ error: 'Failed to download file' });
   }
 });
 
