@@ -43,7 +43,6 @@ app.get('/api/health', async (req, res) => {
 
 // API routes
 app.use('/api/email-templates', emailTemplatesRouter);
-app.use(campaignsRouter);
 app.use(emailLogsRouter);
 app.use(testEmailRouter);
 app.use(authRouter);
