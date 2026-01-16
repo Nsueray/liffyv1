@@ -19,6 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY package.json package-lock.json ./
 RUN npm ci
 
+# --- PLAYWRIGHT BROWSER (Chromium for mining) ---
+RUN npx playwright install chromium --with-deps
+
 COPY backend ./backend
 
 RUN mkdir -p uploads && mkdir -p /tmp
