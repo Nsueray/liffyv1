@@ -172,15 +172,21 @@ router.get('/tags', authRequired, async (req, res) => {
   }
 });
 
-// GET /api/lists/mining-jobs - Get mining jobs for selection (proxies to mining API data)
+// GET /api/lists/mining-jobs - Get mining jobs for selection
 router.get('/mining-jobs', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
 
-    // Get jobs from mining_jobs table
+    // Get jobs from mining_jobs table - include name field
     const result = await db.query(
       `
-      SELECT *
+      SELECT 
+        id,
+        name,
+        target_url,
+        status,
+        total_found,
+        created_at
       FROM mining_jobs
       WHERE organizer_id = $1
       ORDER BY created_at DESC
@@ -206,17 +212,36 @@ router.get('/mining-jobs', authRequired, async (req, res) => {
     });
 
     res.json({
-      jobs: result.rows.map(row => ({
-        id: row.id,
-        target_url: row.target_url || row.url || row.source_url || 'Unknown',
-        status: row.status || 'unknown',
-        created_at: row.created_at,
-        lead_count: countMap.get(row.id) || countMap.get(String(row.id)) || 0
-      }))
+      jobs: result.rows.map(row => {
+        // Build a display name: use name if available, otherwise extract domain from URL
+        let displayName = row.name;
+        
+        if (!displayName && row.target_url) {
+          try {
+            const url = new URL(row.target_url);
+            displayName = url.hostname.replace('www.', '');
+          } catch {
+            displayName = row.target_url.substring(0, 50);
+          }
+        }
+        
+        if (!displayName) {
+          displayName = `Job ${row.id.substring(0, 8)}`;
+        }
+
+        return {
+          id: row.id,
+          name: displayName,
+          target_url: row.target_url || null,
+          status: row.status || 'unknown',
+          total_found: row.total_found || 0,
+          created_at: row.created_at,
+          lead_count: countMap.get(row.id) || countMap.get(String(row.id)) || 0
+        };
+      })
     });
   } catch (err) {
     console.error('GET /api/lists/mining-jobs error:', err);
-    // Return empty array on error so frontend doesn't break
     res.json({ jobs: [] });
   }
 });
