@@ -644,4 +644,129 @@ router.post('/:id/resume', authRequired, async (req, res) => {
   }
 });
 
+// ============================================================
+// NEW ENDPOINTS ADDED BELOW - V2
+// ============================================================
+
+// GET /api/campaigns/:id/stats - Campaign statistics
+router.get('/:id/stats', authRequired, async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const organizerId = req.auth.organizer_id;
+
+    // Verify campaign exists and belongs to organizer
+    const campRes = await db.query(
+      `SELECT id, name, status, recipient_count, started_at, completed_at
+       FROM campaigns 
+       WHERE id = $1 AND organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
+    if (campRes.rows.length === 0) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    // Get recipient status counts
+    const statsRes = await db.query(
+      `SELECT 
+         COUNT(*) FILTER (WHERE status = 'pending') as pending,
+         COUNT(*) FILTER (WHERE status = 'sent') as sent,
+         COUNT(*) FILTER (WHERE status = 'failed') as failed,
+         COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
+         COUNT(*) FILTER (WHERE status = 'opened') as opened,
+         COUNT(*) FILTER (WHERE status = 'clicked') as clicked,
+         COUNT(*) FILTER (WHERE status = 'bounced') as bounced,
+         COUNT(*) as total
+       FROM campaign_recipients
+       WHERE campaign_id = $1 AND organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
+    const stats = statsRes.rows[0];
+
+    return res.json({
+      campaign: campRes.rows[0],
+      stats: {
+        total: parseInt(stats.total) || 0,
+        pending: parseInt(stats.pending) || 0,
+        sent: parseInt(stats.sent) || 0,
+        failed: parseInt(stats.failed) || 0,
+        delivered: parseInt(stats.delivered) || 0,
+        opened: parseInt(stats.opened) || 0,
+        clicked: parseInt(stats.clicked) || 0,
+        bounced: parseInt(stats.bounced) || 0
+      }
+    });
+
+  } catch (err) {
+    console.error("Campaign stats error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/campaigns/:id/recipients - Campaign recipients list
+router.get('/:id/recipients', authRequired, async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const organizerId = req.auth.organizer_id;
+    const { status, limit = 100, offset = 0 } = req.query;
+
+    // Verify campaign exists and belongs to organizer
+    const campRes = await db.query(
+      `SELECT id FROM campaigns WHERE id = $1 AND organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
+    if (campRes.rows.length === 0) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    // Build query with optional status filter
+    let query = `
+      SELECT id, email, name, status, meta, sent_at, last_error, created_at
+      FROM campaign_recipients
+      WHERE campaign_id = $1 AND organizer_id = $2
+    `;
+    const params = [campaignId, organizerId];
+
+    if (status) {
+      query += ` AND status = $3`;
+      params.push(status);
+    }
+
+    query += ` ORDER BY created_at ASC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
+    params.push(parseInt(limit), parseInt(offset));
+
+    const recipientsRes = await db.query(query, params);
+
+    // Get total count
+    let countQuery = `
+      SELECT COUNT(*) as total
+      FROM campaign_recipients
+      WHERE campaign_id = $1 AND organizer_id = $2
+    `;
+    const countParams = [campaignId, organizerId];
+
+    if (status) {
+      countQuery += ` AND status = $3`;
+      countParams.push(status);
+    }
+
+    const countRes = await db.query(countQuery, countParams);
+
+    return res.json({
+      recipients: recipientsRes.rows,
+      pagination: {
+        total: parseInt(countRes.rows[0].total) || 0,
+        limit: parseInt(limit),
+        offset: parseInt(offset)
+      }
+    });
+
+  } catch (err) {
+    console.error("Campaign recipients error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
