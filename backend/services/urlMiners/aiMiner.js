@@ -137,9 +137,18 @@ Rules:
 - Extract ALL fields you can find
 - If a field is not present, use null
 - For phone numbers, keep original format
-- For country/state/city, infer from address if possible
 - Company name is usually the first line or in bold
 - Return ONLY the JSON object, no explanation
+
+IMPORTANT for location fields:
+- country: ONLY the country name (e.g., "Nigeria", "USA", "UK"). Never put state/city here.
+- state: The state/province/region (e.g., "Kano State", "Lagos State", "California")
+- city: The city name only (e.g., "Kano", "Lagos", "Abuja")
+- If address contains "Kano State, Nigeria", then country="Nigeria", state="Kano State", city="Kano"
+
+IMPORTANT for website:
+- Only extract actual company websites, not the source page URL
+- If no company website is mentioned, use null
 
 JSON Schema:
 {
@@ -148,11 +157,11 @@ JSON Schema:
   "job_title": "string or null",
   "email": "string or null",
   "phone": "string or null (multiple phones comma separated)",
-  "address": "string or null",
-  "city": "string or null",
-  "state": "string or null", 
-  "country": "string or null",
-  "website": "string or null"
+  "address": "string or null (full address)",
+  "city": "string or null (city name only)",
+  "state": "string or null (state/province name)", 
+  "country": "string or null (ONLY country name like Nigeria, USA, UK)",
+  "website": "string or null (company website only, not source URL)"
 }`;
 
     const prompt = `Extract contact information from this text:\n\n${blockText}`;
