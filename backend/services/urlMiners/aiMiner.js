@@ -1,7 +1,7 @@
 /**
  * AI Miner - Claude API Powered Data Extraction
  * 
- * Uses Claude 3.5 Haiku for intelligent contact extraction
+ * Uses Claude 3 Haiku for intelligent contact extraction
  * Handles: tables, cards, lists, any messy HTML
  * 
  * Returns perfectly structured JSON every time
@@ -10,7 +10,7 @@
 const { chromium } = require('playwright');
 
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
-const MODEL = 'claude-3-5-haiku-20241022';
+const MODEL = 'claude-3-haiku-20240307';
 
 /**
  * Call Claude API
