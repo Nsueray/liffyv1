@@ -120,11 +120,20 @@ router.get('/', authRequired, async (req, res) => {
  * Accepts TWO formats:
  * 1. { leads: [{ email, name, company, ... }] } - Frontend format
  * 2. { result_ids: [uuid, ...] } - Mining result IDs
+ * 
+ * Additional options:
+ * - tags: string[] - Tags to add to all imported leads
+ * - create_list: boolean - Whether to create a list with imported leads
+ * - list_name: string - Name for the new list (required if create_list is true)
  */
 router.post('/import', authRequired, async (req, res) => {
+  const client = await db.connect();
+  
   try {
     const organizerId = req.auth.organizer_id;
-    const { leads, result_ids } = req.body;
+    const { leads, result_ids, tags, create_list, list_name } = req.body;
+
+    await client.query('BEGIN');
 
     // Determine which format was sent
     let leadsToImport = [];
@@ -137,7 +146,7 @@ router.post('/import', authRequired, async (req, res) => {
       // Mining results format - fetch from DB
       console.log(`Importing ${result_ids.length} mining results for organizer ${organizerId}`);
       
-      const resultsQuery = await db.query(`
+      const resultsQuery = await client.query(`
         SELECT mr.* 
         FROM mining_results mr
         JOIN mining_jobs mj ON mr.job_id = mj.id
@@ -145,6 +154,7 @@ router.post('/import', authRequired, async (req, res) => {
       `, [result_ids, organizerId]);
 
       if (resultsQuery.rows.length === 0) {
+        await client.query('ROLLBACK');
         return res.status(404).json({ error: 'No valid mining results found' });
       }
 
@@ -168,12 +178,22 @@ router.post('/import', authRequired, async (req, res) => {
         }
       }));
     } else {
+      await client.query('ROLLBACK');
       return res.status(400).json({ error: 'Either leads array or result_ids array is required' });
+    }
+
+    // Normalize tags
+    let normalizedTags = [];
+    if (Array.isArray(tags) && tags.length > 0) {
+      normalizedTags = tags
+        .map(t => (typeof t === 'string' ? t.trim().toLowerCase() : ''))
+        .filter(t => t.length > 0);
     }
 
     let imported = 0;
     let updated = 0;
     const errors = [];
+    const importedProspectIds = []; // Track imported prospect IDs for list creation
 
     for (const lead of leadsToImport) {
       try {
@@ -190,40 +210,49 @@ router.post('/import', authRequired, async (req, res) => {
         if (lead.website) meta.website = lead.website;
 
         // Check if email already exists
-        const existingCheck = await db.query(
-          'SELECT id, meta FROM prospects WHERE LOWER(email) = LOWER($1) AND organizer_id = $2',
+        const existingCheck = await client.query(
+          'SELECT id, meta, tags FROM prospects WHERE LOWER(email) = LOWER($1) AND organizer_id = $2',
           [email, organizerId]
         );
 
         if (existingCheck.rows.length > 0) {
-          // Update existing - merge meta
+          // Update existing - merge meta and tags
           const existingMeta = existingCheck.rows[0].meta || {};
+          const existingTags = existingCheck.rows[0].tags || [];
           const mergedMeta = { ...existingMeta, ...meta };
           
-          await db.query(`
+          // Merge tags (union of existing and new)
+          const mergedTags = [...new Set([...existingTags, ...normalizedTags])];
+          
+          await client.query(`
             UPDATE prospects SET
               name = COALESCE(NULLIF($1, ''), name),
               company = COALESCE(NULLIF($2, ''), company),
               country = COALESCE(NULLIF($3, ''), country),
               meta = $4,
-              verification_status = COALESCE(NULLIF($5, ''), verification_status)
-            WHERE id = $6
+              tags = $5,
+              verification_status = COALESCE(NULLIF($6, ''), verification_status)
+            WHERE id = $7
           `, [
             lead.name,
             lead.company,
             lead.country,
             JSON.stringify(mergedMeta),
+            mergedTags,
             lead.verification_status,
             existingCheck.rows[0].id
           ]);
+          
+          importedProspectIds.push(existingCheck.rows[0].id);
           updated++;
         } else {
           // Insert new
-          await db.query(`
+          const insertResult = await client.query(`
             INSERT INTO prospects (
               organizer_id, email, name, company, country,
-              source_type, source_ref, verification_status, meta, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+              source_type, source_ref, verification_status, meta, tags, created_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+            RETURNING id
           `, [
             organizerId,
             email,
@@ -233,14 +262,17 @@ router.post('/import', authRequired, async (req, res) => {
             lead.source_type || 'import',
             lead.source_ref || null,
             lead.verification_status || 'unverified',
-            JSON.stringify(meta)
+            JSON.stringify(meta),
+            normalizedTags
           ]);
+          
+          importedProspectIds.push(insertResult.rows[0].id);
           imported++;
         }
 
         // If we have mining_result_id, mark it as imported
         if (meta.mining_result_id) {
-          await db.query(
+          await client.query(
             'UPDATE mining_results SET status = $1, updated_at = NOW() WHERE id = $2',
             ['imported', meta.mining_result_id]
           );
@@ -252,6 +284,36 @@ router.post('/import', authRequired, async (req, res) => {
       }
     }
 
+    // Create list if requested
+    let createdList = null;
+    if (create_list && list_name && importedProspectIds.length > 0) {
+      const trimmedListName = list_name.trim();
+      
+      if (trimmedListName) {
+        // Create the list
+        const listResult = await client.query(`
+          INSERT INTO lists (organizer_id, name, created_at)
+          VALUES ($1, $2, NOW())
+          RETURNING id, name
+        `, [organizerId, trimmedListName]);
+        
+        createdList = listResult.rows[0];
+        
+        // Add prospects to list_members
+        for (const prospectId of importedProspectIds) {
+          await client.query(`
+            INSERT INTO list_members (organizer_id, list_id, prospect_id, created_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT DO NOTHING
+          `, [organizerId, createdList.id, prospectId]);
+        }
+        
+        console.log(`Created list "${trimmedListName}" with ${importedProspectIds.length} members`);
+      }
+    }
+
+    await client.query('COMMIT');
+
     console.log(`Import complete: ${imported} new, ${updated} updated, ${errors.length} errors`);
 
     res.json({
@@ -259,12 +321,17 @@ router.post('/import', authRequired, async (req, res) => {
       imported,
       updated,
       total: leadsToImport.length,
+      tags_applied: normalizedTags,
+      list_created: createdList,
       errors: errors.length > 0 ? errors : undefined
     });
 
   } catch (err) {
+    await client.query('ROLLBACK');
     console.error('POST /api/leads/import error:', err);
     res.status(500).json({ error: 'Failed to import leads', details: err.message });
+  } finally {
+    client.release();
   }
 });
 
