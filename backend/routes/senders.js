@@ -5,10 +5,6 @@ const jwt = require('jsonwebtoken');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
-/**
- * Simple auth middleware using Bearer token.
- * Attaches req.auth = { user_id, organizer_id, role }
- */
 async function authRequired(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
@@ -55,14 +51,28 @@ router.get('/api/senders', authRequired, async (req, res) => {
          is_active,
          created_at
        FROM sender_identities
-       WHERE organizer_id = $1
-       ORDER BY created_at DESC`,
+       WHERE organizer_id = $1 AND is_active = true
+       ORDER BY is_default DESC, created_at DESC`,
       [organizer_id]
     );
 
+    // Map to expected format for frontend
+    const identities = result.rows.map(row => ({
+      id: row.id,
+      name: row.from_name || row.label || 'Unnamed',
+      email: row.from_email,
+      label: row.label,
+      from_name: row.from_name,
+      reply_to: row.reply_to,
+      is_default: row.is_default,
+      is_active: row.is_active,
+      created_at: row.created_at
+    }));
+
     return res.json({
       success: true,
-      items: result.rows
+      identities: identities,  // Frontend expects this
+      items: identities        // Keep for backward compatibility
     });
 
   } catch (err) {
@@ -73,15 +83,7 @@ router.get('/api/senders', authRequired, async (req, res) => {
 
 /**
  * POST /api/senders
- * Create new sender identity for current organizer/user
- * Body:
- * {
- *   "label": "Elif - SiemaExpo",
- *   "from_name": "Elif from SiemaExpo",
- *   "from_email": "elif@siemaexpo.com",
- *   "reply_to": "elif@elan-expo.com", (optional)
- *   "is_default": true/false (optional)
- * }
+ * Create new sender identity
  */
 router.post('/api/senders', authRequired, async (req, res) => {
   try {
@@ -106,17 +108,7 @@ router.post('/api/senders', authRequired, async (req, res) => {
       `INSERT INTO sender_identities
        (organizer_id, user_id, label, from_name, from_email, reply_to, is_default)
        VALUES ($1,$2,$3,$4,$5,$6,$7)
-       RETURNING 
-         id,
-         organizer_id,
-         user_id,
-         label,
-         from_name,
-         from_email,
-         reply_to,
-         is_default,
-         is_active,
-         created_at`,
+       RETURNING *`,
       [
         organizer_id,
         user_id,
@@ -128,13 +120,54 @@ router.post('/api/senders', authRequired, async (req, res) => {
       ]
     );
 
+    const row = insertResult.rows[0];
+
     return res.json({
       success: true,
-      sender: insertResult.rows[0]
+      sender: {
+        id: row.id,
+        name: row.from_name || row.label,
+        email: row.from_email,
+        label: row.label,
+        from_name: row.from_name,
+        reply_to: row.reply_to,
+        is_default: row.is_default,
+        is_active: row.is_active,
+        created_at: row.created_at
+      }
     });
 
   } catch (err) {
     console.error("POST /api/senders error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/senders/:id
+ * Soft delete (set is_active = false)
+ */
+router.delete('/api/senders/:id', authRequired, async (req, res) => {
+  try {
+    const { organizer_id } = req.auth;
+    const { id } = req.params;
+
+    const result = await db.query(
+      `UPDATE sender_identities 
+       SET is_active = false 
+       WHERE id = $1 AND organizer_id = $2
+       RETURNING id`,
+      [id, organizer_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "Sender not found" });
+    }
+
+    return res.json({ success: true, deleted: id });
+
+  } catch (err) {
+    console.error("DELETE /api/senders error:", err);
     return res.status(500).json({ error: err.message });
   }
 });
