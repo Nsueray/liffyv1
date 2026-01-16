@@ -5,12 +5,18 @@
  * - URL jobs → miningWorker (Playwright) via Orchestrator
  * - File jobs → fileOrchestrator (new system)
  * 
- * v2 - Fixed: Proper wrappers for orchestrator compatibility
+ * v3 - Fixed: PARTIAL status when no emails found (triggers next miner)
  * 
- * FLOW PRESERVED:
- * 1. Orchestrator tries miners in sequence (axios → playwright)
- * 2. On BLOCK_DETECTED → triggers email for manual mining
- * 3. Manual mining from local Mac pushes results to liffy.app
+ * FLOW:
+ * 1. AxiosMiner (HTTP/Cheerio) - fast, for simple sites
+ *    → SUCCESS (emails found) → STOP
+ *    → PARTIAL (no emails) → TRY NEXT
+ *    → ERROR → TRY NEXT
+ * 
+ * 2. PlaywrightMiner (Browser) - for JS-rendered sites
+ *    → SUCCESS/PARTIAL/BLOCKED
+ * 
+ * 3. On BLOCK_DETECTED → Email sent for manual mining from local Mac
  */
 
 const { orchestrate: orchestrateMining } = require('./miningOrchestrator');
@@ -26,33 +32,53 @@ let playwrightMiner = null;
 /**
  * Axios/HTTP Miner (urlMiner.js)
  * Lightweight HTTP-based scraping, tried first
+ * Good for simple HTML sites, fails on JS-rendered content
  */
 try {
     const urlMinerModule = require('./urlMiner');
     
-    // Wrapper: Convert runUrlMiningJob to ScrapeResult format
     axiosMiner = async (job) => {
+        console.log(`[AxiosMiner] Starting for job ${job.id}`);
+        
         try {
-            // urlMiner expects (jobId, organizerId) not job object
             const result = await urlMinerModule.runUrlMiningJob(job.id, job.organizer_id);
             
+            const emailCount = result.total_emails_raw || 0;
+            console.log(`[AxiosMiner] Found ${emailCount} emails`);
+            
+            // CRITICAL: If no emails found, return PARTIAL so next miner is tried
+            if (emailCount === 0) {
+                console.log(`[AxiosMiner] No emails found → returning PARTIAL to try PlaywrightMiner`);
+                return {
+                    status: "PARTIAL",
+                    emails: [],
+                    extracted_links: [],
+                    http_code: 200,
+                    meta: {
+                        source: "urlMiner",
+                        job_id: job.id,
+                        note: "No emails found with HTTP scraping, site may need browser rendering"
+                    }
+                };
+            }
+            
+            // Emails found - success
             return {
-                status: result.success ? "SUCCESS" : "ERROR",
-                emails: [], // Already saved to DB by urlMiner
+                status: "SUCCESS",
+                emails: [], // Already saved to DB
                 extracted_links: [],
-                http_code: result.success ? 200 : 500,
+                http_code: 200,
                 meta: {
                     source: "urlMiner",
                     job_id: job.id,
-                    total_emails_raw: result.total_emails_raw || 0,
+                    total_emails_raw: emailCount,
                     total_prospects_created: result.total_prospects_created || 0,
-                    list_id: result.list_id,
-                    stats: result.stats
+                    list_id: result.list_id
                 }
             };
+            
         } catch (err) {
-            console.log(`[MiningService] urlMiner error: ${err.message}`);
-            // Return ERROR so orchestrator tries next miner
+            console.log(`[AxiosMiner] Error: ${err.message} → trying next miner`);
             return {
                 status: "ERROR",
                 emails: [],
@@ -73,33 +99,60 @@ try {
 
 /**
  * Playwright Miner (miningWorker.js)
- * Full browser-based scraping, tried if axios fails
+ * Full browser-based scraping for JS-rendered sites
  * Throws BLOCK_DETECTED for manual mining trigger
  */
 try {
     const { runMiningTest } = require('./miningWorker');
     
-    // Wrapper: Convert runMiningTest to ScrapeResult format
     playwrightMiner = async (job) => {
+        console.log(`[PlaywrightMiner] Starting for job ${job.id}`);
+        
         try {
-            // runMiningTest saves results directly to DB
             await runMiningTest(job);
+            
+            // Check how many results were saved
+            // miningWorker saves directly to DB, we need to check
+            const db = require('../db');
+            const countResult = await db.query(
+                'SELECT COUNT(*) as count FROM mining_results WHERE job_id = $1',
+                [job.id]
+            );
+            const resultCount = parseInt(countResult.rows[0]?.count || 0);
+            
+            console.log(`[PlaywrightMiner] Saved ${resultCount} results to DB`);
+            
+            if (resultCount === 0) {
+                console.log(`[PlaywrightMiner] No results found → PARTIAL`);
+                return {
+                    status: "PARTIAL",
+                    emails: [],
+                    extracted_links: [],
+                    http_code: 200,
+                    meta: {
+                        source: "playwrightMiner",
+                        job_id: job.id,
+                        note: "Browser scraping completed but no contacts found"
+                    }
+                };
+            }
             
             return {
                 status: "SUCCESS",
-                emails: [], // Already saved to DB by miningWorker
+                emails: [],
                 extracted_links: [],
                 http_code: 200,
                 meta: {
                     source: "playwrightMiner",
                     job_id: job.id,
-                    note: "Results saved directly to DB"
+                    results_saved: resultCount
                 }
             };
+            
         } catch (err) {
-            // CRITICAL: Preserve BLOCK_DETECTED for manual mining trigger
+            // CRITICAL: Preserve BLOCK_DETECTED for manual mining
             if (err.message && err.message.includes("BLOCK_DETECTED")) {
-                console.log(`[MiningService] 🚫 BLOCK detected for job ${job.id} → Manual mining will be triggered`);
+                console.log(`[PlaywrightMiner] 🚫 BLOCK detected → Manual mining will be triggered`);
                 return {
                     status: "BLOCKED",
                     emails: [],
@@ -109,12 +162,12 @@ try {
                         source: "playwrightMiner",
                         job_id: job.id,
                         error: "BLOCK_DETECTED",
-                        note: "Site blocked - manual mining required"
+                        note: "Site blocked - manual mining required from local Mac"
                     }
                 };
             }
             
-            // Other errors - let orchestrator handle
+            console.log(`[PlaywrightMiner] Error: ${err.message}`);
             throw err;
         }
     };
@@ -142,8 +195,6 @@ try {
 
 /**
  * Process a mining job
- * @param {Object} job - Mining job from database
- * @returns {Promise<Object>} - Mining result
  */
 async function processMiningJob(job) {
     const jobType = normalizeJobType(job.type);
@@ -152,24 +203,23 @@ async function processMiningJob(job) {
     console.log(`[MiningService] Type: ${jobType}, Input: ${job.input}`);
     console.log(`[MiningService] Miners loaded: axios=${!!axiosMiner}, playwright=${!!playwrightMiner}, file=${!!fileMiner}`);
 
-    // FILE JOBS → New File Orchestrator
+    // FILE JOBS → File Orchestrator
     if (jobType === 'file') {
         console.log(`[MiningService] Routing to File Orchestrator`);
         return orchestrateFile(job);
     }
 
-    // URL JOBS → Original Orchestrator with miner sequence
+    // URL JOBS → Mining Orchestrator with miner sequence
     if (jobType === 'url') {
         console.log(`[MiningService] Routing to URL Mining Orchestrator`);
         
         return orchestrateMining(job, {
             axiosMiner: axiosMiner,           // HTTP-based (tried first)
-            playwrightMiner: playwrightMiner, // Browser-based (tried second)
+            playwrightMiner: playwrightMiner, // Browser-based (tried if axios fails/partial)
             fileMiner: fileMiner?.runFileMining
         });
     }
 
-    // Unknown type
     throw new Error(`Unknown job type: ${job.type}`);
 }
 
