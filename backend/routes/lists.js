@@ -106,7 +106,7 @@ function buildLeadsFilter(organizerId, filters) {
   return { whereClause, params, paramIndex };
 }
 
-// GET /api/lists - Get all lists with CORRECT counts using subqueries
+// GET /api/lists - Get all lists with counts
 router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -177,13 +177,14 @@ router.get('/mining-jobs', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
 
-    // Get jobs from mining_jobs table - include name field
+    // Get jobs from mining_jobs table
+    // NOTE: Using 'input' column instead of 'target_url' (which doesn't exist)
     const result = await db.query(
       `
       SELECT 
         id,
         name,
-        target_url,
+        input,
         status,
         total_found,
         created_at
@@ -213,15 +214,17 @@ router.get('/mining-jobs', authRequired, async (req, res) => {
 
     res.json({
       jobs: result.rows.map(row => {
-        // Build a display name: use name if available, otherwise extract domain from URL
+        // Build a display name: use name if available, otherwise extract from input
         let displayName = row.name;
         
-        if (!displayName && row.target_url) {
+        if (!displayName && row.input) {
+          // Try to parse as URL
           try {
-            const url = new URL(row.target_url);
+            const url = new URL(row.input);
             displayName = url.hostname.replace('www.', '');
           } catch {
-            displayName = row.target_url.substring(0, 50);
+            // Not a URL, use first 50 chars of input
+            displayName = row.input.substring(0, 50);
           }
         }
         
@@ -232,7 +235,7 @@ router.get('/mining-jobs', authRequired, async (req, res) => {
         return {
           id: row.id,
           name: displayName,
-          target_url: row.target_url || null,
+          input: row.input || null,
           status: row.status || 'unknown',
           total_found: row.total_found || 0,
           created_at: row.created_at,
@@ -506,4 +509,3 @@ router.delete('/:id/members/:prospectId', authRequired, async (req, res) => {
 });
 
 module.exports = router;
-// force deploy Fri Jan 16 23:17:17 +03 2026
