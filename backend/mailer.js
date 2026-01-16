@@ -2,6 +2,25 @@ const sgMail = require('@sendgrid/mail');
 const config = require('./config');
 
 /**
+ * Strips HTML tags and returns plain text
+ */
+function htmlToPlainText(html) {
+  if (!html) return '';
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<[^>]*>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
  * Sends email via SendGrid.
  */
 const sendEmail = async ({
@@ -11,15 +30,14 @@ const sendEmail = async ({
   html,
   fromEmail,
   fromName,
-  from_email,   // Also accept snake_case
-  from_name,    // Also accept snake_case
+  from_email,
+  from_name,
   replyTo,
-  reply_to,     // Also accept snake_case
+  reply_to,
   sendgrid_api_key,
   sendgridApiKey
 }) => {
   try {
-    // Handle both camelCase and snake_case
     const apiKey = sendgrid_api_key || sendgridApiKey || config.SENDGRID_API_KEY;
     const senderEmail = from_email || fromEmail || 'noreply@liffy.app';
     const senderName = from_name || fromName || 'Liffy';
@@ -35,6 +53,25 @@ const sendEmail = async ({
 
     sgMail.setApiKey(apiKey);
 
+    // Prepare content - SendGrid requires at least 1 character
+    let finalHtml = html && html.trim() ? html.trim() : null;
+    let finalText = text && text.trim() ? text.trim() : null;
+
+    // If no text but html exists, generate text from html
+    if (!finalText && finalHtml) {
+      finalText = htmlToPlainText(finalHtml);
+    }
+
+    // If still no text, use a space (SendGrid minimum requirement)
+    if (!finalText) {
+      finalText = ' ';
+    }
+
+    // If no html but text exists, use text as html
+    if (!finalHtml && finalText) {
+      finalHtml = finalText.replace(/\n/g, '<br>');
+    }
+
     const msg = {
       to,
       from: {
@@ -42,8 +79,8 @@ const sendEmail = async ({
         name: senderName
       },
       subject: subject || '(No Subject)',
-      text: text || '',
-      html: html || text || ''
+      text: finalText,
+      html: finalHtml
     };
 
     if (replyToEmail) {
@@ -64,7 +101,6 @@ const sendEmail = async ({
       } : null
     };
   } catch (error) {
-    // Log detailed error
     console.error('❌ Email send error:', error.message);
     
     if (error.response) {
