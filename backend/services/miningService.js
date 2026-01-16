@@ -1,16 +1,12 @@
 /**
- * Mining Service v4 - Full Mining Pipeline
+ * Mining Service v5 - Multi-Mode Mining Pipeline
  * 
- * Philosophy: Run ALL miners, merge results, get richest data
+ * Mining Modes:
+ * - quick: Only HTTP miner (fast, free)
+ * - full: All miners + merge (comprehensive, free)
+ * - ai: Claude AI extraction (best quality, paid)
  * 
- * URL Mining Pipeline:
- * 1. httpBasicMiner (urlMiner.js) - Fast HTTP scraping
- * 2. playwrightTableMiner (urlMiners/) - Single page tables
- * 3. playwrightDetailMiner (miningWorker.js) - Detail page crawler
- * 
- * All results are merged by resultMerger to produce enriched contacts
- * 
- * File jobs still use fileOrchestrator (unchanged)
+ * Mode is determined by job.config.mining_mode or defaults to 'ai'
  */
 
 const { orchestrate: orchestrateFile } = require('./fileOrchestrator');
@@ -26,163 +22,102 @@ try {
 }
 
 // ============================================
-// URL MINERS - All will be tried
+// MINERS
 // ============================================
 
-const urlMiners = [];
-
-/**
- * 1. HTTP Basic Miner (urlMiner.js)
- * Fast, lightweight, for simple HTML sites
- */
+// HTTP Basic Miner
+let httpBasicMiner = null;
 try {
     const urlMinerModule = require('./urlMiner');
-    
-    const httpBasicMiner = {
+    httpBasicMiner = {
         name: 'HttpBasicMiner',
         mine: async (job) => {
-            console.log(`[HttpBasicMiner] Starting for job ${job.id}`);
+            console.log(`[HttpBasicMiner] Starting...`);
             try {
                 const result = await urlMinerModule.runUrlMiningJob(job.id, job.organizer_id);
-                const emailCount = result.total_emails_raw || 0;
-                console.log(`[HttpBasicMiner] Found ${emailCount} emails`);
-                
                 return {
-                    status: emailCount > 0 ? 'SUCCESS' : 'PARTIAL',
-                    emails: [], // Already saved to DB by urlMiner
-                    contacts: [],
-                    extracted_links: [],
-                    http_code: 200,
-                    meta: {
-                        source: 'httpBasicMiner',
-                        total_emails: emailCount,
-                        saved_to_db: true
-                    }
-                };
-            } catch (err) {
-                console.log(`[HttpBasicMiner] Error: ${err.message}`);
-                return {
-                    status: 'ERROR',
+                    status: (result.total_emails_raw || 0) > 0 ? 'SUCCESS' : 'PARTIAL',
                     emails: [],
                     contacts: [],
-                    extracted_links: [],
-                    http_code: null,
-                    meta: { source: 'httpBasicMiner', error: err.message }
+                    meta: { source: 'httpBasicMiner', total_emails: result.total_emails_raw || 0 }
                 };
+            } catch (err) {
+                return { status: 'ERROR', emails: [], contacts: [], meta: { error: err.message } };
             }
         }
     };
-    
-    urlMiners.push(httpBasicMiner);
     console.log('[MiningService] ✅ HttpBasicMiner loaded');
 } catch (e) {
-    console.log('[MiningService] ⚠️ HttpBasicMiner not available:', e.message);
+    console.log('[MiningService] ⚠️ HttpBasicMiner not available');
 }
 
-/**
- * 2. Playwright Table Miner (urlMiners/playwrightTableMiner.js)
- * For single-page sites with tables/lists (e.g., TotalEnergies distributors)
- */
+// Playwright Table Miner
+let playwrightTableMiner = null;
 try {
     const tableMinerModule = require('./urlMiners/playwrightTableMiner');
-    
-    const playwrightTableMiner = {
+    playwrightTableMiner = {
         name: 'PlaywrightTableMiner',
         mine: async (job) => {
-            console.log(`[PlaywrightTableMiner] Starting for job ${job.id}`);
-            try {
-                const result = await tableMinerModule.mine(job);
-                console.log(`[PlaywrightTableMiner] Found ${result.emails?.length || 0} emails, ${result.contacts?.length || 0} contacts`);
-                return result;
-            } catch (err) {
-                console.log(`[PlaywrightTableMiner] Error: ${err.message}`);
-                return {
-                    status: 'ERROR',
-                    emails: [],
-                    contacts: [],
-                    extracted_links: [],
-                    http_code: null,
-                    meta: { source: 'playwrightTableMiner', error: err.message }
-                };
-            }
+            console.log(`[PlaywrightTableMiner] Starting...`);
+            return await tableMinerModule.mine(job);
         }
     };
-    
-    urlMiners.push(playwrightTableMiner);
     console.log('[MiningService] ✅ PlaywrightTableMiner loaded');
 } catch (e) {
     console.log('[MiningService] ⚠️ PlaywrightTableMiner not available:', e.message);
 }
 
-/**
- * 3. Playwright Detail Miner (miningWorker.js)
- * For sites with detail pages (exhibitor lists, etc.)
- */
+// Playwright Detail Miner
+let playwrightDetailMiner = null;
 try {
     const { runMiningTest } = require('./miningWorker');
-    
-    const playwrightDetailMiner = {
+    playwrightDetailMiner = {
         name: 'PlaywrightDetailMiner',
         mine: async (job) => {
-            console.log(`[PlaywrightDetailMiner] Starting for job ${job.id}`);
+            console.log(`[PlaywrightDetailMiner] Starting...`);
             try {
                 await runMiningTest(job);
-                
-                // Check results saved by miningWorker
                 const countResult = await db.query(
                     'SELECT COUNT(*) as count FROM mining_results WHERE job_id = $1',
                     [job.id]
                 );
                 const resultCount = parseInt(countResult.rows[0]?.count || 0);
-                console.log(`[PlaywrightDetailMiner] Saved ${resultCount} results to DB`);
-                
                 return {
                     status: resultCount > 0 ? 'SUCCESS' : 'PARTIAL',
                     emails: [],
                     contacts: [],
-                    extracted_links: [],
-                    http_code: 200,
-                    meta: {
-                        source: 'playwrightDetailMiner',
-                        results_saved: resultCount,
-                        saved_to_db: true
-                    }
+                    meta: { source: 'playwrightDetailMiner', results_saved: resultCount }
                 };
             } catch (err) {
                 if (err.message?.includes('BLOCK_DETECTED')) {
-                    console.log(`[PlaywrightDetailMiner] 🚫 BLOCKED`);
-                    return {
-                        status: 'BLOCKED',
-                        emails: [],
-                        contacts: [],
-                        extracted_links: [],
-                        http_code: 403,
-                        meta: { source: 'playwrightDetailMiner', error: 'BLOCK_DETECTED' }
-                    };
+                    return { status: 'BLOCKED', emails: [], contacts: [], meta: { error: 'BLOCKED' } };
                 }
-                console.log(`[PlaywrightDetailMiner] Error: ${err.message}`);
-                return {
-                    status: 'ERROR',
-                    emails: [],
-                    contacts: [],
-                    extracted_links: [],
-                    http_code: null,
-                    meta: { source: 'playwrightDetailMiner', error: err.message }
-                };
+                return { status: 'ERROR', emails: [], contacts: [], meta: { error: err.message } };
             }
         }
     };
-    
-    urlMiners.push(playwrightDetailMiner);
     console.log('[MiningService] ✅ PlaywrightDetailMiner loaded');
 } catch (e) {
-    console.log('[MiningService] ⚠️ PlaywrightDetailMiner not available:', e.message);
+    console.log('[MiningService] ⚠️ PlaywrightDetailMiner not available');
 }
 
-// ============================================
-// FILE MINER (unchanged)
-// ============================================
+// AI Miner (Claude)
+let aiMiner = null;
+try {
+    const aiMinerModule = require('./urlMiners/aiMiner');
+    aiMiner = {
+        name: 'AIMiner',
+        mine: async (job) => {
+            console.log(`[AIMiner] Starting...`);
+            return await aiMinerModule.mine(job);
+        }
+    };
+    console.log('[MiningService] ✅ AIMiner loaded');
+} catch (e) {
+    console.log('[MiningService] ⚠️ AIMiner not available:', e.message);
+}
 
+// File Miner
 let fileMiner = null;
 try {
     fileMiner = require('./fileMiner');
@@ -192,91 +127,157 @@ try {
 }
 
 // ============================================
-// FULL MINING PIPELINE
+// MINING MODES
 // ============================================
 
 /**
- * Run all URL miners and merge results
+ * Quick Mode - Only HTTP miner
  */
-async function runFullMiningPipeline(job) {
+async function runQuickMining(job) {
+    console.log(`\n[Quick Mode] Starting for job ${job.id}`);
+    
+    if (!httpBasicMiner) {
+        throw new Error('HttpBasicMiner not available');
+    }
+    
+    const result = await httpBasicMiner.mine(job);
+    await updateJobStatus(job, result, 0);
+    return result;
+}
+
+/**
+ * Full Mode - All miners + merge
+ */
+async function runFullMining(job) {
     console.log(`\n${'='.repeat(60)}`);
-    console.log(`[Pipeline] Starting FULL mining for job ${job.id}`);
-    console.log(`[Pipeline] URL: ${job.input}`);
-    console.log(`[Pipeline] Miners available: ${urlMiners.map(m => m.name).join(', ')}`);
+    console.log(`[Full Mode] Starting for job ${job.id}`);
+    console.log(`[Full Mode] URL: ${job.input}`);
     console.log(`${'='.repeat(60)}\n`);
     
+    const miners = [httpBasicMiner, playwrightTableMiner, playwrightDetailMiner].filter(m => m);
     const results = [];
     const startTime = Date.now();
     
-    // Run ALL miners
-    for (const miner of urlMiners) {
-        console.log(`\n[Pipeline] >>> Running ${miner.name}...`);
-        const minerStart = Date.now();
-        
+    for (const miner of miners) {
+        console.log(`\n[Full Mode] >>> Running ${miner.name}...`);
         try {
             const result = await miner.mine(job);
-            result.meta = result.meta || {};
-            result.meta.execution_time_ms = Date.now() - minerStart;
             results.push(result);
-            
-            console.log(`[Pipeline] <<< ${miner.name} completed in ${Date.now() - minerStart}ms`);
-            console.log(`[Pipeline]     Status: ${result.status}, Emails: ${result.emails?.length || 0}, Contacts: ${result.contacts?.length || 0}`);
+            console.log(`[Full Mode] <<< ${miner.name}: ${result.status}`);
         } catch (err) {
-            console.log(`[Pipeline] <<< ${miner.name} failed: ${err.message}`);
-            results.push({
-                status: 'ERROR',
-                emails: [],
-                contacts: [],
-                extracted_links: [],
-                http_code: null,
-                meta: { source: miner.name, error: err.message }
-            });
+            console.log(`[Full Mode] <<< ${miner.name} failed: ${err.message}`);
         }
     }
     
     // Merge results
-    console.log(`\n[Pipeline] Merging results from ${results.length} miners...`);
-    
     let finalResult;
     if (resultMerger) {
         finalResult = resultMerger.mergeResults(results);
     } else {
-        // Fallback: just combine emails
-        const allEmails = new Set();
-        for (const r of results) {
-            (r.emails || []).forEach(e => allEmails.add(e));
-        }
-        finalResult = {
-            status: allEmails.size > 0 ? 'SUCCESS' : 'PARTIAL',
-            emails: Array.from(allEmails),
-            contacts: [],
-            meta: { source: 'fallback_merger' }
-        };
+        finalResult = { status: 'PARTIAL', emails: [], contacts: [] };
     }
     
-    // Save merged contacts to DB (if not already saved by individual miners)
-    if (finalResult.contacts && finalResult.contacts.length > 0) {
-        console.log(`[Pipeline] Saving ${finalResult.contacts.length} merged contacts to DB...`);
+    // Save merged contacts
+    if (finalResult.contacts?.length > 0) {
         await saveMergedResults(job, finalResult.contacts);
     }
     
-    const totalTime = Date.now() - startTime;
-    console.log(`\n${'='.repeat(60)}`);
-    console.log(`[Pipeline] COMPLETED in ${totalTime}ms`);
-    console.log(`[Pipeline] Total unique emails: ${finalResult.emails?.length || 0}`);
-    console.log(`[Pipeline] Total contacts: ${finalResult.contacts?.length || 0}`);
-    console.log(`[Pipeline] Status: ${finalResult.status}`);
-    console.log(`${'='.repeat(60)}\n`);
+    await updateJobStatus(job, finalResult, Date.now() - startTime);
     
-    // Update job status
-    await updateJobStatus(job, finalResult, totalTime);
-    
+    console.log(`\n[Full Mode] COMPLETED - ${finalResult.contacts?.length || 0} contacts`);
     return finalResult;
 }
 
 /**
- * Save merged contacts to mining_results
+ * AI Mode - Claude AI extraction (BEST)
  */
+async function runAIMining(job) {
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`[AI Mode] 🤖 Starting for job ${job.id}`);
+    console.log(`[AI Mode] URL: ${job.input}`);
+    console.log(`${'='.repeat(60)}\n`);
+    
+    if (!aiMiner) {
+        throw new Error('AIMiner not available - check ANTHROPIC_API_KEY');
+    }
+    
+    const startTime = Date.now();
+    const result = await aiMiner.mine(job);
+    
+    // Save contacts to DB
+    if (result.contacts?.length > 0) {
+        await saveAIResults(job, result.contacts);
+    }
+    
+    await updateJobStatus(job, result, Date.now() - startTime);
+    
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`[AI Mode] ✅ COMPLETED in ${Date.now() - startTime}ms`);
+    console.log(`[AI Mode] Total contacts: ${result.contacts?.length || 0}`);
+    console.log(`[AI Mode] Total emails: ${result.emails?.length || 0}`);
+    console.log(`${'='.repeat(60)}\n`);
+    
+    return result;
+}
+
+// ============================================
+// DB HELPERS
+// ============================================
+
+async function saveAIResults(job, contacts) {
+    const client = await db.connect();
+    try {
+        await client.query('BEGIN');
+        
+        let savedCount = 0;
+        for (const contact of contacts) {
+            const email = contact.email?.toLowerCase();
+            if (!email) continue;
+            
+            // Check if exists
+            const existing = await client.query(
+                'SELECT id FROM mining_results WHERE job_id = $1 AND $2 = ANY(emails)',
+                [job.id, email]
+            );
+            
+            if (existing.rows.length === 0) {
+                await client.query(`
+                    INSERT INTO mining_results 
+                    (job_id, organizer_id, source_url, company_name, contact_name, job_title, phone, country, website, emails, raw)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                `, [
+                    job.id,
+                    job.organizer_id,
+                    job.input,
+                    contact.companyName || contact.company_name,
+                    contact.contactName || contact.contact_name,
+                    contact.jobTitle || contact.job_title,
+                    contact.phone,
+                    contact.country || contact.state || contact.city,
+                    contact.website,
+                    [email],
+                    JSON.stringify({
+                        ...contact,
+                        address: contact.address,
+                        city: contact.city,
+                        state: contact.state,
+                        extracted_by: 'aiMiner'
+                    })
+                ]);
+                savedCount++;
+            }
+        }
+        
+        await client.query('COMMIT');
+        console.log(`[AI Mode] 💾 Saved ${savedCount} contacts to DB`);
+    } catch (err) {
+        await client.query('ROLLBACK');
+        console.error('[AI Mode] Save error:', err.message);
+    } finally {
+        client.release();
+    }
+}
+
 async function saveMergedResults(job, contacts) {
     const client = await db.connect();
     try {
@@ -284,14 +285,15 @@ async function saveMergedResults(job, contacts) {
         
         let savedCount = 0;
         for (const contact of contacts) {
-            // Check if email already exists for this job
+            const email = contact.email?.toLowerCase();
+            if (!email) continue;
+            
             const existing = await client.query(
                 'SELECT id FROM mining_results WHERE job_id = $1 AND $2 = ANY(emails)',
-                [job.id, contact.email]
+                [job.id, email]
             );
             
             if (existing.rows.length > 0) {
-                // Update existing with richer data
                 await client.query(`
                     UPDATE mining_results SET
                         company_name = COALESCE(NULLIF($1, ''), company_name),
@@ -303,14 +305,13 @@ async function saveMergedResults(job, contacts) {
                 `, [
                     contact.companyName,
                     contact.contactName,
-                    contact.phones?.join(', ') || contact.phone,
+                    contact.phone,
                     contact.country,
                     contact.website,
                     job.id,
-                    contact.email
+                    email
                 ]);
             } else {
-                // Insert new
                 await client.query(`
                     INSERT INTO mining_results 
                     (job_id, organizer_id, source_url, company_name, contact_name, phone, country, website, emails, raw)
@@ -321,10 +322,10 @@ async function saveMergedResults(job, contacts) {
                     job.input,
                     contact.companyName,
                     contact.contactName,
-                    contact.phones?.join(', ') || contact.phone,
+                    contact.phone,
                     contact.country,
                     contact.website,
-                    [contact.email],
+                    [email],
                     JSON.stringify(contact)
                 ]);
                 savedCount++;
@@ -332,22 +333,18 @@ async function saveMergedResults(job, contacts) {
         }
         
         await client.query('COMMIT');
-        console.log(`[Pipeline] Saved ${savedCount} new contacts, updated others`);
+        console.log(`[Full Mode] 💾 Saved ${savedCount} contacts`);
     } catch (err) {
         await client.query('ROLLBACK');
-        console.error('[Pipeline] Save error:', err.message);
+        console.error('[Full Mode] Save error:', err.message);
     } finally {
         client.release();
     }
 }
 
-/**
- * Update job status after pipeline completes
- */
 async function updateJobStatus(job, result, executionTime) {
     try {
-        const status = result.status === 'SUCCESS' ? 'completed' : 
-                       result.wasBlocked ? 'blocked' : 'completed';
+        const status = result.status === 'BLOCKED' ? 'blocked' : 'completed';
         
         await db.query(`
             UPDATE mining_jobs SET
@@ -362,15 +359,14 @@ async function updateJobStatus(job, result, executionTime) {
             result.contacts?.length || 0,
             result.emails?.length || 0,
             JSON.stringify({
-                pipeline_version: 'v4',
+                mining_mode: result.meta?.source || 'unknown',
                 execution_time_ms: executionTime,
-                miners_used: result.meta?.miners_used || urlMiners.length,
-                enrichment_rate: result.meta?.enrichment_rate || 0
+                pipeline_version: 'v5'
             }),
             job.id
         ]);
     } catch (err) {
-        console.error('[Pipeline] Status update error:', err.message);
+        console.error('[MiningService] Status update error:', err.message);
     }
 }
 
@@ -387,24 +383,32 @@ async function processMiningJob(job) {
     console.log(`[MiningService] Processing job ${job.id}`);
     console.log(`[MiningService] Type: ${jobType}, Input: ${job.input}`);
 
-    // FILE JOBS → File Orchestrator (unchanged)
+    // FILE JOBS → File Orchestrator
     if (jobType === 'file') {
         console.log(`[MiningService] Routing to File Orchestrator`);
         return orchestrateFile(job);
     }
 
-    // URL JOBS → Full Mining Pipeline
+    // URL JOBS → Select mining mode
     if (jobType === 'url') {
-        console.log(`[MiningService] Routing to Full Mining Pipeline`);
-        return runFullMiningPipeline(job);
+        // Get mining mode from config (default to 'ai' for best quality)
+        const mode = job.config?.mining_mode || 'ai';
+        console.log(`[MiningService] Mining Mode: ${mode}`);
+        
+        switch (mode) {
+            case 'quick':
+                return runQuickMining(job);
+            case 'full':
+                return runFullMining(job);
+            case 'ai':
+            default:
+                return runAIMining(job);
+        }
     }
 
     throw new Error(`Unknown job type: ${job.type}`);
 }
 
-/**
- * Normalize job type
- */
 function normalizeJobType(type) {
     const fileTypes = ['file', 'pdf', 'excel', 'word', 'csv', 'other'];
     if (fileTypes.includes(type)) return 'file';
@@ -415,5 +419,7 @@ function normalizeJobType(type) {
 module.exports = {
     processMiningJob,
     normalizeJobType,
-    runFullMiningPipeline,
+    runQuickMining,
+    runFullMining,
+    runAIMining,
 };
