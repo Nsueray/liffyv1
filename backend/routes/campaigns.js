@@ -31,7 +31,6 @@ function authRequired(req, res, next) {
 router.post('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    // GÜNCELLEME: list_id ve sender_id eklendi
     const { name, template_id, list_id, sender_id } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
@@ -42,7 +41,6 @@ router.post('/', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'Template is required' });
     }
 
-    // Template Kontrolü
     const templateCheck = await db.query(
       `SELECT id FROM email_templates WHERE id = $1 AND organizer_id = $2`,
       [template_id, organizerId]
@@ -52,7 +50,6 @@ router.post('/', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'Template not found or access denied' });
     }
 
-    // List Kontrolü (Eğer seçildiyse)
     if (list_id) {
       const listCheck = await db.query(
         `SELECT id FROM lists WHERE id = $1 AND organizer_id = $2`,
@@ -63,7 +60,6 @@ router.post('/', authRequired, async (req, res) => {
       }
     }
 
-    // Sender Kontrolü (Eğer seçildiyse)
     if (sender_id) {
       const senderCheck = await db.query(
         `SELECT id FROM sender_identities WHERE id = $1 AND organizer_id = $2`,
@@ -74,7 +70,6 @@ router.post('/', authRequired, async (req, res) => {
       }
     }
 
-    // GÜNCELLEME: list_id ve sender_id insert ediliyor
     const result = await db.query(
       `INSERT INTO campaigns (organizer_id, template_id, list_id, sender_id, name, status)
        VALUES ($1, $2, $3, $4, $5, 'draft')
@@ -95,9 +90,16 @@ router.get('/', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
 
     const result = await db.query(
-      `SELECT c.*, t.subject as template_subject, t.name as template_name
+      `SELECT c.*, 
+              t.subject as template_subject, 
+              t.name as template_name,
+              l.name as list_name,
+              s.from_email as sender_email,
+              s.from_name as sender_name
        FROM campaigns c
        LEFT JOIN email_templates t ON c.template_id = t.id
+       LEFT JOIN lists l ON c.list_id = l.id
+       LEFT JOIN sender_identities s ON c.sender_id = s.id
        WHERE c.organizer_id = $1
        ORDER BY c.created_at DESC`,
       [organizerId]
@@ -116,9 +118,18 @@ router.get('/:id', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
 
     const result = await db.query(
-      `SELECT c.*, t.subject as template_subject, t.name as template_name, t.body_html, t.body_text
+      `SELECT c.*, 
+              t.subject as template_subject, 
+              t.name as template_name, 
+              t.body_html, 
+              t.body_text,
+              l.name as list_name,
+              s.from_email as sender_email,
+              s.from_name as sender_name
        FROM campaigns c
        LEFT JOIN email_templates t ON c.template_id = t.id
+       LEFT JOIN lists l ON c.list_id = l.id
+       LEFT JOIN sender_identities s ON c.sender_id = s.id
        WHERE c.id = $1 AND c.organizer_id = $2`,
       [campaignId, organizerId]
     );
@@ -479,6 +490,65 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
     return res.status(500).json({ error: err.message });
   } finally {
     client.release();
+  }
+});
+
+// POST /api/campaigns/:id/start - NEW ENDPOINT
+router.post('/:id/start', authRequired, async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const organizerId = req.auth.organizer_id;
+
+    const campRes = await db.query(
+      `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
+    if (campRes.rows.length === 0) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    const campaign = campRes.rows[0];
+
+    // Allow start from 'ready' status
+    if (campaign.status !== 'ready') {
+      return res.status(400).json({
+        error: `Cannot start campaign: status is '${campaign.status}', expected 'ready'`
+      });
+    }
+
+    // Check if there are recipients
+    const recipientCount = await db.query(
+      `SELECT COUNT(*) as count FROM campaign_recipients WHERE campaign_id = $1`,
+      [campaignId]
+    );
+
+    if (parseInt(recipientCount.rows[0].count) === 0) {
+      return res.status(400).json({
+        error: "Cannot start campaign: no recipients found. Please resolve the campaign first."
+      });
+    }
+
+    const updateRes = await db.query(
+      `UPDATE campaigns 
+       SET status = 'sending', started_at = NOW()
+       WHERE id = $1 AND organizer_id = $2 AND status = 'ready'
+       RETURNING *`,
+      [campaignId, organizerId]
+    );
+
+    if (updateRes.rows.length === 0) {
+      return res.status(400).json({ error: "Failed to start campaign" });
+    }
+
+    return res.json({
+      success: true,
+      campaign: updateRes.rows[0]
+    });
+
+  } catch (err) {
+    console.error("Campaign start error:", err);
+    return res.status(500).json({ error: err.message });
   }
 });
 
