@@ -2,7 +2,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
-const { sendEmail } = require('../mailer'); // Mailer'ın dinamik API Key desteklediğinden emin olmalıyız
+const { sendEmail } = require('../mailer');
+const { getUnsubscribeUrl } = require('./webhooks');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -33,8 +34,9 @@ function authRequired(req, res, next) {
  * Helper: Basit Şablon Değişkeni Değiştirici
  * {{name}} -> Alıcı İsmi
  * {{company}} -> Alıcı Şirketi
+ * {{unsubscribe_url}} -> Unsubscribe link
  */
-function processTemplate(text, recipient) {
+function processTemplate(text, recipient, extras = {}) {
   if (!text) return "";
   
   // Recipient verilerini hazırla
@@ -61,6 +63,15 @@ function processTemplate(text, recipient) {
   // {{company}} değişimi
   processed = processed.replace(/{{company}}/gi, company);
   processed = processed.replace(/{{company_name}}/gi, company);
+
+  // {{unsubscribe_url}} değişimi
+  if (extras.unsubscribe_url) {
+    processed = processed.replace(/{{unsubscribe_url}}/gi, extras.unsubscribe_url);
+    processed = processed.replace(/{{unsubscribe_link}}/gi, extras.unsubscribe_url);
+  }
+
+  // {{email}} değişimi
+  processed = processed.replace(/{{email}}/gi, recipient.email || "");
 
   return processed;
 }
@@ -175,10 +186,13 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
 
     for (const r of recipients) {
       try {
+        // Generate unsubscribe URL for this recipient
+        const unsubscribe_url = getUnsubscribeUrl(r.email, organizer_id);
+
         // A. Kişiselleştirme (Variable Replacement)
         const personalizedSubject = processTemplate(campaign.subject, r);
-        const personalizedHtml = processTemplate(campaign.body_html, r);
-        const personalizedText = processTemplate(campaign.body_text || "", r);
+        const personalizedHtml = processTemplate(campaign.body_html, r, { unsubscribe_url });
+        const personalizedText = processTemplate(campaign.body_text || "", r, { unsubscribe_url });
 
         // B. Gönderim (Mailer'a Dinamik Key Gönderiyoruz)
         const mailResp = await sendEmail({
