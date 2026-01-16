@@ -18,34 +18,20 @@ function normalizeEmail(email) {
 }
 
 /**
- * Pick the best (most informative) value from multiple options
+ * Pick the best (most informative) string value from multiple options
  */
-function pickBest(values) {
+function pickBestString(values) {
     if (!values || values.length === 0) return null;
     
     // Filter out nulls/undefined/empty
-    const valid = values.filter(v => v !== null && v !== undefined && v !== '');
+    const valid = values.filter(v => v !== null && v !== undefined && v !== '' && typeof v === 'string');
     if (valid.length === 0) return null;
     
-    // For strings, pick the longest (usually most detailed)
-    if (typeof valid[0] === 'string') {
-        return valid.reduce((best, current) => {
-            if (!best) return current;
-            return current.length > best.length ? current : best;
-        }, null);
-    }
-    
-    // For arrays, merge and dedupe
-    if (Array.isArray(valid[0])) {
-        const merged = [];
-        for (const arr of valid) {
-            merged.push(...arr);
-        }
-        return [...new Set(merged)];
-    }
-    
-    // For other types, take first non-null
-    return valid[0];
+    // Pick the longest (usually most detailed)
+    return valid.reduce((best, current) => {
+        if (!best) return current;
+        return current.length > best.length ? current : best;
+    }, null);
 }
 
 /**
@@ -65,7 +51,10 @@ function mergeResults(minerResults) {
         
         // Add raw emails
         if (Array.isArray(result.emails)) {
-            result.emails.forEach(e => allEmails.add(normalizeEmail(e)));
+            result.emails.forEach(e => {
+                const normalized = normalizeEmail(e);
+                if (normalized) allEmails.add(normalized);
+            });
         }
         
         // Process structured contacts
@@ -99,8 +88,14 @@ function mergeResults(minerResults) {
                     // Accumulate all values
                     if (contact.companyName) existing.companyNames.push(contact.companyName);
                     if (contact.company) existing.companyNames.push(contact.company);
-                    if (contact.phones) existing.phones.push(...contact.phones);
-                    if (contact.phone) existing.phones.push(contact.phone);
+                    
+                    // Handle phones - can be array or string
+                    if (Array.isArray(contact.phones)) {
+                        existing.phones.push(...contact.phones);
+                    } else if (contact.phone) {
+                        existing.phones.push(contact.phone);
+                    }
+                    
                     if (contact.address) existing.addresses.push(contact.address);
                     if (contact.website) existing.websites.push(contact.website);
                     if (contact.country) existing.countries.push(contact.country);
@@ -135,16 +130,19 @@ function mergeResults(minerResults) {
     const mergedContacts = [];
     
     for (const [email, data] of emailMap) {
+        // Dedupe phones
+        const uniquePhones = [...new Set(data.phones.filter(p => p))].slice(0, 3);
+        
         const contact = {
             email: email,
-            companyName: pickBest(data.companyNames),
-            phone: pickBest([...new Set(data.phones)].slice(0, 3))?.join(', ') || null,
-            phones: [...new Set(data.phones)].slice(0, 3),
-            address: pickBest(data.addresses),
-            website: pickBest(data.websites),
-            country: pickBest(data.countries),
-            contactName: pickBest(data.contactNames),
-            jobTitle: pickBest(data.jobTitles),
+            companyName: pickBestString(data.companyNames),
+            phone: uniquePhones.length > 0 ? uniquePhones.join(', ') : null,
+            phones: uniquePhones,
+            address: pickBestString(data.addresses),
+            website: pickBestString(data.websites),
+            country: pickBestString(data.countries),
+            contactName: pickBestString(data.contactNames),
+            jobTitle: pickBestString(data.jobTitles),
             sources: [...new Set(data.sources)],
             raw: data.raw[0] || null
         };
@@ -163,6 +161,10 @@ function mergeResults(minerResults) {
     // Check if any miner was blocked
     const wasBlocked = minerResults.some(r => r?.status === 'BLOCKED');
     
+    // Calculate enrichment rate
+    const enrichedCount = mergedContacts.filter(c => c.companyName || c.phone || c.website).length;
+    const enrichmentRate = mergedContacts.length > 0 ? enrichedCount / mergedContacts.length : 0;
+    
     return {
         status: status,
         wasBlocked: wasBlocked,
@@ -173,7 +175,8 @@ function mergeResults(minerResults) {
             miners_used: minerResults.filter(r => r).length,
             total_emails: allEmails.size,
             total_contacts: mergedContacts.length,
-            enrichment_rate: mergedContacts.filter(c => c.companyName || c.phone).length / mergedContacts.length || 0
+            enriched_contacts: enrichedCount,
+            enrichment_rate: Math.round(enrichmentRate * 100) / 100
         }
     };
 }
@@ -192,7 +195,7 @@ function toDbResults(job, contacts) {
         company_name: contact.companyName,
         contact_name: contact.contactName,
         job_title: contact.jobTitle,
-        phone: contact.phones?.join(', ') || contact.phone,
+        phone: contact.phone,
         country: contact.country,
         website: contact.website,
         emails: [contact.email],
@@ -206,6 +209,6 @@ function toDbResults(job, contacts) {
 module.exports = {
     mergeResults,
     toDbResults,
-    pickBest,
+    pickBestString,
     normalizeEmail
 };
