@@ -103,7 +103,6 @@ router.get('/', authRequired, async (req, res) => {
       leads: dataResult.rows.map(row => ({
         ...row,
         tags: row.tags || [],
-        // Extract phone/website from meta if available
         phone: row.meta?.phone || null,
         website: row.meta?.website || null
       }))
@@ -115,69 +114,89 @@ router.get('/', authRequired, async (req, res) => {
 });
 
 /**
- * Import mining results to leads (prospects table)
+ * Import leads to prospects table
  * POST /api/leads/import
- * Body: { result_ids: [uuid, uuid, ...] }
+ * 
+ * Accepts TWO formats:
+ * 1. { leads: [{ email, name, company, ... }] } - Frontend format
+ * 2. { result_ids: [uuid, ...] } - Mining result IDs
  */
 router.post('/import', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    const { result_ids } = req.body;
+    const { leads, result_ids } = req.body;
 
-    if (!Array.isArray(result_ids) || result_ids.length === 0) {
-      return res.status(400).json({ error: 'result_ids array is required' });
+    // Determine which format was sent
+    let leadsToImport = [];
+
+    if (Array.isArray(leads) && leads.length > 0) {
+      // Frontend format - leads array with full data
+      console.log(`Importing ${leads.length} leads directly for organizer ${organizerId}`);
+      leadsToImport = leads;
+    } else if (Array.isArray(result_ids) && result_ids.length > 0) {
+      // Mining results format - fetch from DB
+      console.log(`Importing ${result_ids.length} mining results for organizer ${organizerId}`);
+      
+      const resultsQuery = await db.query(`
+        SELECT mr.* 
+        FROM mining_results mr
+        JOIN mining_jobs mj ON mr.job_id = mj.id
+        WHERE mr.id = ANY($1) AND mj.organizer_id = $2
+      `, [result_ids, organizerId]);
+
+      if (resultsQuery.rows.length === 0) {
+        return res.status(404).json({ error: 'No valid mining results found' });
+      }
+
+      // Convert mining_results format to leads format
+      leadsToImport = resultsQuery.rows.map(r => ({
+        email: Array.isArray(r.emails) && r.emails.length > 0 ? r.emails[0] : null,
+        name: r.contact_name,
+        company: r.company_name,
+        country: r.country,
+        source_type: 'mining',
+        source_ref: r.job_id,
+        verification_status: r.verification_status,
+        meta: {
+          phone: r.phone,
+          website: r.website,
+          job_title: r.job_title,
+          city: r.city,
+          address: r.address,
+          source_url: r.source_url,
+          mining_result_id: r.id
+        }
+      }));
+    } else {
+      return res.status(400).json({ error: 'Either leads array or result_ids array is required' });
     }
 
-    console.log(`Importing ${result_ids.length} mining results to leads for organizer ${organizerId}`);
-
-    // Get mining results that belong to this organizer
-    const resultsQuery = await db.query(`
-      SELECT mr.* 
-      FROM mining_results mr
-      JOIN mining_jobs mj ON mr.job_id = mj.id
-      WHERE mr.id = ANY($1) AND mj.organizer_id = $2
-    `, [result_ids, organizerId]);
-
-    if (resultsQuery.rows.length === 0) {
-      return res.status(404).json({ error: 'No valid mining results found' });
-    }
-
-    const results = resultsQuery.rows;
     let imported = 0;
     let updated = 0;
     const errors = [];
 
-    for (const result of results) {
+    for (const lead of leadsToImport) {
       try {
-        // Get first email from emails array
-        const email = Array.isArray(result.emails) && result.emails.length > 0
-          ? result.emails[0].toLowerCase().trim()
-          : null;
+        const email = lead.email ? lead.email.toLowerCase().trim() : null;
 
         if (!email) {
-          errors.push({ id: result.id, error: 'No email found' });
+          errors.push({ email: lead.email, error: 'No valid email' });
           continue;
         }
 
-        // Build meta object for extra fields (phone, website, etc.)
-        const meta = {
-          phone: result.phone || null,
-          website: result.website || null,
-          job_title: result.job_title || null,
-          city: result.city || null,
-          address: result.address || null,
-          source_url: result.source_url || null,
-          mining_job_id: result.job_id
-        };
+        // Build meta object
+        const meta = lead.meta || {};
+        if (lead.phone) meta.phone = lead.phone;
+        if (lead.website) meta.website = lead.website;
 
-        // Check if email already exists in prospects
+        // Check if email already exists
         const existingCheck = await db.query(
           'SELECT id, meta FROM prospects WHERE LOWER(email) = LOWER($1) AND organizer_id = $2',
           [email, organizerId]
         );
 
         if (existingCheck.rows.length > 0) {
-          // Update existing record - merge meta
+          // Update existing - merge meta
           const existingMeta = existingCheck.rows[0].meta || {};
           const mergedMeta = { ...existingMeta, ...meta };
           
@@ -190,16 +209,16 @@ router.post('/import', authRequired, async (req, res) => {
               verification_status = COALESCE(NULLIF($5, ''), verification_status)
             WHERE id = $6
           `, [
-            result.contact_name,
-            result.company_name,
-            result.country,
+            lead.name,
+            lead.company,
+            lead.country,
             JSON.stringify(mergedMeta),
-            result.verification_status,
+            lead.verification_status,
             existingCheck.rows[0].id
           ]);
           updated++;
         } else {
-          // Insert new record
+          // Insert new
           await db.query(`
             INSERT INTO prospects (
               organizer_id, email, name, company, country,
@@ -208,26 +227,28 @@ router.post('/import', authRequired, async (req, res) => {
           `, [
             organizerId,
             email,
-            result.contact_name || null,
-            result.company_name || null,
-            result.country || null,
-            'mining',
-            result.job_id,
-            result.verification_status || 'unverified',
+            lead.name || null,
+            lead.company || null,
+            lead.country || null,
+            lead.source_type || 'import',
+            lead.source_ref || null,
+            lead.verification_status || 'unverified',
             JSON.stringify(meta)
           ]);
           imported++;
         }
 
-        // Mark mining result as imported
-        await db.query(
-          'UPDATE mining_results SET status = $1, updated_at = NOW() WHERE id = $2',
-          ['imported', result.id]
-        );
+        // If we have mining_result_id, mark it as imported
+        if (meta.mining_result_id) {
+          await db.query(
+            'UPDATE mining_results SET status = $1, updated_at = NOW() WHERE id = $2',
+            ['imported', meta.mining_result_id]
+          );
+        }
 
       } catch (insertErr) {
-        console.error(`Error importing result ${result.id}:`, insertErr.message);
-        errors.push({ id: result.id, error: insertErr.message });
+        console.error(`Error importing lead ${lead.email}:`, insertErr.message);
+        errors.push({ email: lead.email, error: insertErr.message });
       }
     }
 
@@ -237,7 +258,7 @@ router.post('/import', authRequired, async (req, res) => {
       success: true,
       imported,
       updated,
-      total: results.length,
+      total: leadsToImport.length,
       errors: errors.length > 0 ? errors : undefined
     });
 
@@ -247,7 +268,7 @@ router.post('/import', authRequired, async (req, res) => {
   }
 });
 
-// POST /api/leads/:id/tags - Update tags for single lead
+// POST /api/leads/:id/tags
 router.post('/:id/tags', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -285,7 +306,7 @@ router.post('/:id/tags', authRequired, async (req, res) => {
   }
 });
 
-// POST /api/leads/bulk-tags - Bulk update tags
+// POST /api/leads/bulk-tags
 router.post('/bulk-tags', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
