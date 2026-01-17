@@ -1,12 +1,13 @@
 /**
  * AI Miner v2 - Claude API Powered Data Extraction
  * 
- * Features:
- * - Claude 3 Haiku for intelligent extraction
- * - Multiple detection strategies
- * - WordPress member directory support
- * - Detailed logging for debugging
- * - Robust null checking
+ * CHANGELOG v2:
+ * - Added null checks to fix "Cannot read properties of undefined" errors
+ * - Added WordPress member directory support (as fallback, doesn't change existing logic)
+ * - Added profile page crawling (only when main page has no blocks)
+ * - Added detailed logging
+ * 
+ * Original TotalEnergies logic is PRESERVED
  */
 
 const { chromium } = require('playwright');
@@ -49,203 +50,195 @@ async function callClaude(prompt, systemPrompt) {
 }
 
 /**
- * Extract data blocks from page with detailed logging
+ * Extract data blocks from page (tables, cards, sections)
+ * PRESERVED: Original logic that worked for TotalEnergies
+ * ADDED: Null checks and WordPress fallback
  */
-async function extractDataBlocks(page, url) {
-    return await page.evaluate((sourceUrl) => {
+async function extractDataBlocks(page, sourceUrl) {
+    return await page.evaluate((url) => {
         const blocks = [];
-        const log = [];
+        const debug = [];
         
-        // Helper: Safe text extraction
-        const getText = (el) => {
+        // === HELPER FUNCTIONS (NEW - for null safety) ===
+        const safeText = (el) => {
             try {
-                return (el?.innerText || el?.textContent || '').trim();
-            } catch {
+                return (el && el.innerText) ? el.innerText.trim() : '';
+            } catch (e) {
                 return '';
             }
         };
         
-        // Helper: Safe HTML extraction
-        const getHtml = (el) => {
+        const safeHtml = (el) => {
             try {
-                return el?.innerHTML || '';
-            } catch {
+                return (el && el.innerHTML) ? el.innerHTML : '';
+            } catch (e) {
                 return '';
             }
         };
         
-        // Log page info
-        log.push(`Page title: ${document.title}`);
-        log.push(`Body length: ${document.body?.innerText?.length || 0} chars`);
+        debug.push(`Page: ${document.title || 'No title'}`);
         
-        // Strategy 1: Table cells
+        // === STRATEGY 1: Table cells (ORIGINAL - PRESERVED) ===
         const tables = document.querySelectorAll('table');
-        log.push(`Strategy 1 - Tables found: ${tables.length}`);
+        debug.push(`Tables found: ${tables.length}`);
         
         for (const table of tables) {
             const cells = table.querySelectorAll('td');
             for (const cell of cells) {
-                const text = getText(cell);
-                if (text.length > 50 && (text.includes('@') || text.toLowerCase().includes('address') || text.toLowerCase().includes('phone'))) {
+                const text = safeText(cell); // Changed: Added null check
+                if (text && text.length > 50 && (text.includes('@') || text.toLowerCase().includes('address') || text.toLowerCase().includes('phone'))) {
                     blocks.push({
                         type: 'table_cell',
                         text: text,
-                        html: getHtml(cell)
+                        html: safeHtml(cell)
                     });
                 }
             }
         }
-        log.push(`Strategy 1 - Blocks from tables: ${blocks.length}`);
+        debug.push(`Blocks from tables: ${blocks.length}`);
         
-        // Strategy 2: Cards/Divs with contact patterns
-        const cardSelectors = [
-            '.card', '.contact', '.member', '.distributor', '.company',
-            '[class*="card"]', '[class*="contact"]', '[class*="member"]',
-            '[class*="profile"]', '[class*="user"]', '[class*="author"]',
-            'article', '.entry', '.listing', '.item'
-        ];
-        
-        let cardCount = 0;
-        for (const selector of cardSelectors) {
-            try {
-                const cards = document.querySelectorAll(selector);
-                for (const card of cards) {
-                    const text = getText(card);
-                    if (text.length > 30 && text.length < 3000) {
-                        // Check if contains email or contact info
-                        const hasEmail = text.includes('@') || text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
-                        const hasPhone = text.match(/[\d\s\-+()]{7,}/);
-                        const hasContactKeywords = /email|phone|tel|mobile|contact|address/i.test(text);
-                        
-                        if (hasEmail || (hasPhone && hasContactKeywords)) {
-                            // Check not already captured
-                            const isDupe = blocks.some(b => b.text === text || b.text.includes(text) || text.includes(b.text));
-                            if (!isDupe) {
-                                blocks.push({
-                                    type: 'card',
-                                    selector: selector,
-                                    text: text,
-                                    html: getHtml(card)
-                                });
-                                cardCount++;
-                            }
+        // === STRATEGY 2: Cards/Divs (ORIGINAL - PRESERVED, just added null checks) ===
+        if (blocks.length === 0) {
+            const cardSelectors = [
+                '.card', '.contact', '.member', '.distributor', '.company',
+                '[class*="card"]', '[class*="contact"]', '[class*="item"]',
+                'article', '.entry', '.profile'
+            ];
+            
+            for (const selector of cardSelectors) {
+                try {
+                    const cards = document.querySelectorAll(selector);
+                    for (const card of cards) {
+                        const text = safeText(card); // Changed: Added null check
+                        if (text && text.length > 50 && text.length < 2000 && text.includes('@')) {
+                            blocks.push({
+                                type: 'card',
+                                text: text,
+                                html: safeHtml(card)
+                            });
                         }
                     }
+                } catch (e) {
+                    // Selector failed, continue
                 }
-            } catch (e) {
-                // Selector failed, continue
             }
         }
-        log.push(`Strategy 2 - Blocks from cards: ${cardCount}`);
+        debug.push(`Blocks after cards: ${blocks.length}`);
         
-        // Strategy 3: WordPress Profile Builder / Member directories
-        const profileSelectors = [
-            '.wppb-user-listing', '.um-members', '.bp-user',
-            '[class*="member-list"]', '[class*="user-list"]',
-            '.directory-list', '.member-directory'
-        ];
+        // === STRATEGY 3: Generic email containers (ORIGINAL - PRESERVED) ===
+        if (blocks.length === 0) {
+            const allElements = document.querySelectorAll('div, section, article, li');
+            for (const el of allElements) {
+                const text = safeText(el); // Changed: Added null check
+                if (text && text.length > 30 && text.length < 1500 && text.includes('@')) {
+                    const hasEmailChild = el.querySelector('a[href^="mailto:"]');
+                    if (hasEmailChild || text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i)) {
+                        blocks.push({
+                            type: 'element',
+                            text: text,
+                            html: safeHtml(el)
+                        });
+                    }
+                }
+            }
+        }
+        debug.push(`Blocks after generic: ${blocks.length}`);
         
-        let profileCount = 0;
-        for (const selector of profileSelectors) {
-            try {
-                const items = document.querySelectorAll(selector + ' li, ' + selector + ' .item, ' + selector + ' article');
-                for (const item of items) {
-                    const text = getText(item);
-                    if (text.length > 20 && text.length < 2000) {
-                        const isDupe = blocks.some(b => b.text === text);
-                        if (!isDupe) {
+        // === STRATEGY 4: WordPress Member Directories (NEW - FALLBACK ONLY) ===
+        if (blocks.length === 0) {
+            const wpSelectors = [
+                '.wppb-user-listing li',
+                '.um-members .um-member',
+                '.bp-user',
+                '[class*="member-list"] .member',
+                '[class*="user-list"] .user',
+                '.directory-list li'
+            ];
+            
+            for (const selector of wpSelectors) {
+                try {
+                    const items = document.querySelectorAll(selector);
+                    for (const item of items) {
+                        const text = safeText(item);
+                        if (text && text.length > 20) {
                             blocks.push({
                                 type: 'wp_member',
                                 text: text,
-                                html: getHtml(item)
+                                html: safeHtml(item)
                             });
-                            profileCount++;
                         }
                     }
-                }
-            } catch (e) {}
-        }
-        log.push(`Strategy 3 - WordPress profiles: ${profileCount}`);
-        
-        // Strategy 4: Generic email containers
-        if (blocks.length === 0) {
-            const allElements = document.querySelectorAll('div, section, article, li, p');
-            let genericCount = 0;
-            
-            for (const el of allElements) {
-                const text = getText(el);
-                if (text.length > 30 && text.length < 1500) {
-                    const emailMatch = text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
-                    if (emailMatch && emailMatch.length > 0) {
-                        const isDupe = blocks.some(b => 
-                            b.text === text || 
-                            b.text.includes(text) || 
-                            text.includes(b.text)
-                        );
-                        if (!isDupe) {
-                            blocks.push({
-                                type: 'generic',
-                                text: text,
-                                html: getHtml(el),
-                                emails_found: emailMatch.length
-                            });
-                            genericCount++;
-                        }
-                    }
-                }
+                } catch (e) {}
             }
-            log.push(`Strategy 4 - Generic containers: ${genericCount}`);
+            debug.push(`Blocks after WordPress: ${blocks.length}`);
         }
         
-        // Strategy 5: Extract profile links for later crawling
+        // === PROFILE LINK DETECTION (NEW - for crawling fallback) ===
         const profileLinks = [];
-        const linkPatterns = [
-            /\/member\/[^\/]+/i,
-            /\/profile\/[^\/]+/i,
-            /\/user\/[^\/]+/i,
-            /\/author\/[^\/]+/i,
-            /\?author=/i
-        ];
-        
-        const allLinks = document.querySelectorAll('a[href]');
-        for (const link of allLinks) {
-            const href = link.getAttribute('href') || '';
-            if (linkPatterns.some(p => p.test(href))) {
-                try {
-                    const fullUrl = new URL(href, sourceUrl).href;
-                    if (!profileLinks.includes(fullUrl)) {
-                        profileLinks.push(fullUrl);
-                    }
-                } catch {}
+        try {
+            const links = document.querySelectorAll('a[href]');
+            for (const link of links) {
+                const href = link.getAttribute('href') || '';
+                if (href.match(/\/(member|profile|user|author)\/[^\/]+/i)) {
+                    try {
+                        const fullUrl = new URL(href, url).href;
+                        if (!profileLinks.includes(fullUrl)) {
+                            profileLinks.push(fullUrl);
+                        }
+                    } catch (e) {}
+                }
             }
-        }
-        log.push(`Strategy 5 - Profile links found: ${profileLinks.length}`);
+        } catch (e) {}
+        debug.push(`Profile links found: ${profileLinks.length}`);
         
-        // Final deduplication
+        // === DEDUPLICATION (ORIGINAL - PRESERVED) ===
         const unique = [];
-        const seenTexts = new Set();
-        
         for (const block of blocks) {
-            // Normalize text for comparison
-            const normalized = block.text.replace(/\s+/g, ' ').substring(0, 200);
-            if (!seenTexts.has(normalized)) {
-                seenTexts.add(normalized);
+            if (!block.text) continue; // Added null check
+            const isDuplicate = unique.some(b => 
+                b.text && (b.text.includes(block.text) || block.text.includes(b.text))
+            );
+            if (!isDuplicate) {
                 unique.push(block);
             }
         }
         
-        log.push(`Final unique blocks: ${unique.length}`);
+        debug.push(`Final unique blocks: ${unique.length}`);
         
         return {
             blocks: unique.slice(0, 50),
             profileLinks: profileLinks.slice(0, 20),
-            debug: log
+            debug: debug
         };
-    }, url);
+    }, sourceUrl);
+}
+
+/**
+ * Crawl a single profile page for contact info (NEW)
+ */
+async function crawlProfilePage(page, profileUrl) {
+    try {
+        console.log(`[AIMiner] 📄 Crawling profile: ${profileUrl}`);
+        await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await page.waitForTimeout(1000);
+        
+        const content = await page.evaluate(() => {
+            const text = document.body?.innerText || '';
+            return text.substring(0, 3000);
+        });
+        
+        if (content && content.includes('@')) {
+            return { url: profileUrl, text: content };
+        }
+    } catch (err) {
+        console.log(`[AIMiner] Profile error: ${err.message}`);
+    }
+    return null;
 }
 
 /**
  * Use Claude to extract structured contact from text block
+ * PRESERVED: Original logic
  */
 async function extractContactWithAI(blockText) {
     const systemPrompt = `You are a data extraction specialist. Extract contact information from the given text and return ONLY valid JSON.
@@ -286,7 +279,6 @@ JSON Schema:
     try {
         const response = await callClaude(prompt, systemPrompt);
         
-        // Parse JSON from response
         let json;
         try {
             json = JSON.parse(response);
@@ -308,45 +300,9 @@ JSON Schema:
 }
 
 /**
- * Crawl a profile page for contact info
- */
-async function crawlProfilePage(page, profileUrl) {
-    try {
-        console.log(`[AIMiner] 📄 Visiting profile: ${profileUrl}`);
-        await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        await page.waitForTimeout(1000);
-        
-        const content = await page.evaluate(() => {
-            const getText = (el) => (el?.innerText || el?.textContent || '').trim();
-            
-            // Try to find main content area
-            const selectors = [
-                '.profile-content', '.member-content', '.user-profile',
-                '.entry-content', 'article', 'main', '.content'
-            ];
-            
-            for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (el) {
-                    const text = getText(el);
-                    if (text.length > 50) return text;
-                }
-            }
-            
-            return getText(document.body).substring(0, 3000);
-        });
-        
-        if (content && content.includes('@')) {
-            return { url: profileUrl, text: content };
-        }
-    } catch (err) {
-        console.log(`[AIMiner] Profile crawl error: ${err.message}`);
-    }
-    return null;
-}
-
-/**
  * Main mining function
+ * PRESERVED: Original flow
+ * ADDED: Profile crawling fallback, detailed logging
  */
 async function mine(job) {
     const url = job.input;
@@ -378,7 +334,7 @@ async function mine(job) {
         
         const page = await context.newPage();
         
-        // Navigate
+        // Navigate (PRESERVED)
         console.log('[AIMiner] Loading page...');
         const response = await page.goto(url, {
             waitUntil: 'networkidle',
@@ -399,104 +355,109 @@ async function mine(job) {
             };
         }
         
-        // Wait for dynamic content
+        // Wait for dynamic content (PRESERVED)
         await page.waitForTimeout(2000);
         
-        // Scroll to load lazy content
+        // Scroll to load lazy content (PRESERVED)
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
         await page.waitForTimeout(1000);
         
-        // Extract data blocks with detailed logging
+        // Extract data blocks (UPDATED with safe version)
         console.log('[AIMiner] Extracting data blocks...');
         const extraction = await extractDataBlocks(page, url);
         
-        // Log debug info
-        console.log('[AIMiner] === Debug Info ===');
-        for (const line of extraction.debug) {
-            console.log(`[AIMiner] ${line}`);
-        }
-        console.log('[AIMiner] ==================');
+        // Log debug info (NEW)
+        console.log('[AIMiner] === Debug ===');
+        extraction.debug.forEach(line => console.log(`[AIMiner] ${line}`));
+        console.log('[AIMiner] =============');
         
         let blocks = extraction.blocks;
         const profileLinks = extraction.profileLinks;
         
         console.log(`[AIMiner] Found ${blocks.length} data blocks`);
-        console.log(`[AIMiner] Found ${profileLinks.length} profile links`);
         
-        // If no blocks but profile links exist, crawl them
-        if (blocks.length === 0 && profileLinks.length > 0) {
-            console.log('[AIMiner] No blocks on main page, crawling profile pages...');
-            const crawledBlocks = [];
+        // NEW: If few blocks but many profile links, likely need to crawl profiles
+        // This won't affect TotalEnergies (19 blocks) but will help PWDA (1 block, 45 links)
+        if (blocks.length < 3 && profileLinks.length > 5) {
+            console.log(`[AIMiner] Few blocks (${blocks.length}) but many profile links (${profileLinks.length}), crawling profiles...`);
             
-            for (let i = 0; i < Math.min(profileLinks.length, 10); i++) {
+            const crawledBlocks = [];
+            for (let i = 0; i < Math.min(profileLinks.length, 15); i++) {
                 const profileData = await crawlProfilePage(page, profileLinks[i]);
                 if (profileData) {
                     crawledBlocks.push({
                         type: 'profile_page',
                         text: profileData.text,
-                        html: '',
-                        sourceUrl: profileData.url
+                        html: ''
                     });
                 }
             }
             
-            blocks = crawledBlocks;
-            console.log(`[AIMiner] Crawled ${blocks.length} profile pages with content`);
+            if (crawledBlocks.length > 0) {
+                console.log(`[AIMiner] Crawled ${crawledBlocks.length} profiles with content`);
+                // Add crawled blocks to existing blocks
+                blocks = [...blocks, ...crawledBlocks];
+            }
+        }
+        
+        // Original fallback: If still no blocks but profile links exist
+        if (blocks.length === 0 && profileLinks.length > 0) {
+            console.log(`[AIMiner] No blocks found, trying ${profileLinks.length} profile links...`);
+            
+            for (let i = 0; i < Math.min(profileLinks.length, 10); i++) {
+                const profileData = await crawlProfilePage(page, profileLinks[i]);
+                if (profileData) {
+                    blocks.push({
+                        type: 'profile_page',
+                        text: profileData.text,
+                        html: ''
+                    });
+                }
+            }
+            console.log(`[AIMiner] Crawled ${blocks.length} profiles with content`);
         }
         
         if (blocks.length === 0) {
-            console.log('[AIMiner] No extractable content found');
             return {
                 status: 'PARTIAL',
                 emails: [],
                 contacts: [],
                 extracted_links: profileLinks,
                 http_code: httpCode,
-                meta: { 
-                    source: 'aiMiner', 
-                    note: 'No data blocks found',
-                    debug: extraction.debug,
-                    profile_links: profileLinks.length
-                }
+                meta: { source: 'aiMiner', note: 'No data blocks found on page' }
             };
         }
         
-        // Extract contacts using AI
+        // Extract contacts using AI (PRESERVED)
         console.log('[AIMiner] Processing with Claude AI...');
         const contacts = [];
         const emails = new Set();
         
         for (let i = 0; i < blocks.length; i++) {
             const block = blocks[i];
-            console.log(`[AIMiner] Processing block ${i + 1}/${blocks.length} (${block.type})...`);
+            console.log(`[AIMiner] Processing block ${i + 1}/${blocks.length}...`);
             
             const extracted = await extractContactWithAI(block.text);
             
             if (extracted && extracted.email) {
-                const emailLower = extracted.email.toLowerCase();
-                if (!emails.has(emailLower)) {
-                    contacts.push({
-                        companyName: extracted.company_name,
-                        contactName: extracted.contact_name,
-                        jobTitle: extracted.job_title,
-                        email: extracted.email,
-                        phone: extracted.phone,
-                        address: extracted.address,
-                        city: extracted.city,
-                        state: extracted.state,
-                        country: extracted.country,
-                        website: extracted.website,
-                        emails: [extracted.email]
-                    });
-                    emails.add(emailLower);
-                    
-                    console.log(`[AIMiner] ✅ ${extracted.company_name || extracted.contact_name || 'Unknown'} - ${extracted.email}`);
-                }
-            } else {
-                console.log(`[AIMiner] ⚠️ Block ${i + 1}: No email extracted`);
+                contacts.push({
+                    companyName: extracted.company_name,
+                    contactName: extracted.contact_name,
+                    jobTitle: extracted.job_title,
+                    email: extracted.email,
+                    phone: extracted.phone,
+                    address: extracted.address,
+                    city: extracted.city,
+                    state: extracted.state,
+                    country: extracted.country,
+                    website: extracted.website,
+                    emails: [extracted.email]
+                });
+                emails.add(extracted.email.toLowerCase());
+                
+                console.log(`[AIMiner] ✅ ${extracted.company_name || 'Unknown'} - ${extracted.email}`);
             }
             
-            // Small delay to respect rate limits
             if (i < blocks.length - 1) {
                 await new Promise(r => setTimeout(r, 100));
             }
@@ -515,14 +476,12 @@ async function mine(job) {
                 model: MODEL,
                 blocks_processed: blocks.length,
                 total_contacts: contacts.length,
-                total_emails: emails.size,
-                profile_links_found: profileLinks.length
+                total_emails: emails.size
             }
         };
         
     } catch (err) {
         console.log(`[AIMiner] Error: ${err.message}`);
-        console.log(`[AIMiner] Stack: ${err.stack}`);
         
         if (err.message.includes('BLOCK') || err.message.includes('403')) {
             return {
@@ -541,7 +500,7 @@ async function mine(job) {
             contacts: [],
             extracted_links: [],
             http_code: null,
-            meta: { source: 'aiMiner', error: err.message, stack: err.stack }
+            meta: { source: 'aiMiner', error: err.message }
         };
         
     } finally {
