@@ -191,6 +191,9 @@ async function extractDataBlocks(page, sourceUrl) {
         } catch (e) {}
         debug.push(`Profile links found: ${profileLinks.length}`);
         
+        // Return more profile links (increased from 20 to 40)
+        const maxProfileLinks = 40;
+        
         // === DEDUPLICATION (ORIGINAL - PRESERVED) ===
         const unique = [];
         for (const block of blocks) {
@@ -207,7 +210,7 @@ async function extractDataBlocks(page, sourceUrl) {
         
         return {
             blocks: unique.slice(0, 50),
-            profileLinks: profileLinks.slice(0, 20),
+            profileLinks: profileLinks.slice(0, maxProfileLinks),
             debug: debug
         };
     }, sourceUrl);
@@ -382,7 +385,9 @@ async function mine(job) {
             console.log(`[AIMiner] Few blocks (${blocks.length}) but many profile links (${profileLinks.length}), crawling profiles...`);
             
             const crawledBlocks = [];
-            for (let i = 0; i < Math.min(profileLinks.length, 15); i++) {
+            const maxCrawl = 30; // Increased from 15
+            
+            for (let i = 0; i < Math.min(profileLinks.length, maxCrawl); i++) {
                 const profileData = await crawlProfilePage(page, profileLinks[i]);
                 if (profileData) {
                     crawledBlocks.push({
@@ -404,7 +409,7 @@ async function mine(job) {
         if (blocks.length === 0 && profileLinks.length > 0) {
             console.log(`[AIMiner] No blocks found, trying ${profileLinks.length} profile links...`);
             
-            for (let i = 0; i < Math.min(profileLinks.length, 10); i++) {
+            for (let i = 0; i < Math.min(profileLinks.length, 30); i++) {
                 const profileData = await crawlProfilePage(page, profileLinks[i]);
                 if (profileData) {
                     blocks.push({
