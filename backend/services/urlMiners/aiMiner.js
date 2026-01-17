@@ -1,10 +1,12 @@
 /**
- * AI Miner - Claude API Powered Data Extraction
+ * AI Miner v2 - Claude API Powered Data Extraction
  * 
- * Uses Claude 3 Haiku for intelligent contact extraction
- * Handles: tables, cards, lists, any messy HTML
- * 
- * Returns perfectly structured JSON every time
+ * Features:
+ * - Claude 3 Haiku for intelligent extraction
+ * - Multiple detection strategies
+ * - WordPress member directory support
+ * - Detailed logging for debugging
+ * - Robust null checking
  */
 
 const { chromium } = require('playwright');
@@ -47,84 +49,199 @@ async function callClaude(prompt, systemPrompt) {
 }
 
 /**
- * Extract data blocks from page (tables, cards, sections)
+ * Extract data blocks from page with detailed logging
  */
-async function extractDataBlocks(page) {
-    return await page.evaluate(() => {
+async function extractDataBlocks(page, url) {
+    return await page.evaluate((sourceUrl) => {
         const blocks = [];
+        const log = [];
         
-        // Strategy 1: Table cells (most common for distributor lists)
+        // Helper: Safe text extraction
+        const getText = (el) => {
+            try {
+                return (el?.innerText || el?.textContent || '').trim();
+            } catch {
+                return '';
+            }
+        };
+        
+        // Helper: Safe HTML extraction
+        const getHtml = (el) => {
+            try {
+                return el?.innerHTML || '';
+            } catch {
+                return '';
+            }
+        };
+        
+        // Log page info
+        log.push(`Page title: ${document.title}`);
+        log.push(`Body length: ${document.body?.innerText?.length || 0} chars`);
+        
+        // Strategy 1: Table cells
         const tables = document.querySelectorAll('table');
+        log.push(`Strategy 1 - Tables found: ${tables.length}`);
+        
         for (const table of tables) {
             const cells = table.querySelectorAll('td');
             for (const cell of cells) {
-                const text = cell.innerText.trim();
-                // Only if it looks like contact info
+                const text = getText(cell);
                 if (text.length > 50 && (text.includes('@') || text.toLowerCase().includes('address') || text.toLowerCase().includes('phone'))) {
                     blocks.push({
                         type: 'table_cell',
                         text: text,
-                        html: cell.innerHTML
+                        html: getHtml(cell)
                     });
                 }
             }
         }
+        log.push(`Strategy 1 - Blocks from tables: ${blocks.length}`);
         
         // Strategy 2: Cards/Divs with contact patterns
-        if (blocks.length === 0) {
-            const cardSelectors = [
-                '.card', '.contact', '.member', '.distributor', '.company',
-                '[class*="card"]', '[class*="contact"]', '[class*="item"]',
-                'article', '.entry', '.profile'
-            ];
-            
-            for (const selector of cardSelectors) {
+        const cardSelectors = [
+            '.card', '.contact', '.member', '.distributor', '.company',
+            '[class*="card"]', '[class*="contact"]', '[class*="member"]',
+            '[class*="profile"]', '[class*="user"]', '[class*="author"]',
+            'article', '.entry', '.listing', '.item'
+        ];
+        
+        let cardCount = 0;
+        for (const selector of cardSelectors) {
+            try {
                 const cards = document.querySelectorAll(selector);
                 for (const card of cards) {
-                    const text = card.innerText.trim();
-                    if (text.length > 50 && text.length < 2000 && text.includes('@')) {
-                        blocks.push({
-                            type: 'card',
-                            text: text,
-                            html: card.innerHTML
-                        });
+                    const text = getText(card);
+                    if (text.length > 30 && text.length < 3000) {
+                        // Check if contains email or contact info
+                        const hasEmail = text.includes('@') || text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+                        const hasPhone = text.match(/[\d\s\-+()]{7,}/);
+                        const hasContactKeywords = /email|phone|tel|mobile|contact|address/i.test(text);
+                        
+                        if (hasEmail || (hasPhone && hasContactKeywords)) {
+                            // Check not already captured
+                            const isDupe = blocks.some(b => b.text === text || b.text.includes(text) || text.includes(b.text));
+                            if (!isDupe) {
+                                blocks.push({
+                                    type: 'card',
+                                    selector: selector,
+                                    text: text,
+                                    html: getHtml(card)
+                                });
+                                cardCount++;
+                            }
+                        }
                     }
                 }
+            } catch (e) {
+                // Selector failed, continue
             }
         }
+        log.push(`Strategy 2 - Blocks from cards: ${cardCount}`);
         
-        // Strategy 3: Any element containing email
+        // Strategy 3: WordPress Profile Builder / Member directories
+        const profileSelectors = [
+            '.wppb-user-listing', '.um-members', '.bp-user',
+            '[class*="member-list"]', '[class*="user-list"]',
+            '.directory-list', '.member-directory'
+        ];
+        
+        let profileCount = 0;
+        for (const selector of profileSelectors) {
+            try {
+                const items = document.querySelectorAll(selector + ' li, ' + selector + ' .item, ' + selector + ' article');
+                for (const item of items) {
+                    const text = getText(item);
+                    if (text.length > 20 && text.length < 2000) {
+                        const isDupe = blocks.some(b => b.text === text);
+                        if (!isDupe) {
+                            blocks.push({
+                                type: 'wp_member',
+                                text: text,
+                                html: getHtml(item)
+                            });
+                            profileCount++;
+                        }
+                    }
+                }
+            } catch (e) {}
+        }
+        log.push(`Strategy 3 - WordPress profiles: ${profileCount}`);
+        
+        // Strategy 4: Generic email containers
         if (blocks.length === 0) {
-            const allElements = document.querySelectorAll('div, section, article, li');
+            const allElements = document.querySelectorAll('div, section, article, li, p');
+            let genericCount = 0;
+            
             for (const el of allElements) {
-                const text = el.innerText.trim();
-                if (text.length > 30 && text.length < 1500 && text.includes('@')) {
-                    // Check it's not a parent of already found blocks
-                    const hasEmailChild = el.querySelector('a[href^="mailto:"]');
-                    if (hasEmailChild || text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i)) {
-                        blocks.push({
-                            type: 'element',
-                            text: text,
-                            html: el.innerHTML
-                        });
+                const text = getText(el);
+                if (text.length > 30 && text.length < 1500) {
+                    const emailMatch = text.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi);
+                    if (emailMatch && emailMatch.length > 0) {
+                        const isDupe = blocks.some(b => 
+                            b.text === text || 
+                            b.text.includes(text) || 
+                            text.includes(b.text)
+                        );
+                        if (!isDupe) {
+                            blocks.push({
+                                type: 'generic',
+                                text: text,
+                                html: getHtml(el),
+                                emails_found: emailMatch.length
+                            });
+                            genericCount++;
+                        }
                     }
                 }
             }
+            log.push(`Strategy 4 - Generic containers: ${genericCount}`);
         }
         
-        // Deduplicate (remove blocks that are subsets of others)
+        // Strategy 5: Extract profile links for later crawling
+        const profileLinks = [];
+        const linkPatterns = [
+            /\/member\/[^\/]+/i,
+            /\/profile\/[^\/]+/i,
+            /\/user\/[^\/]+/i,
+            /\/author\/[^\/]+/i,
+            /\?author=/i
+        ];
+        
+        const allLinks = document.querySelectorAll('a[href]');
+        for (const link of allLinks) {
+            const href = link.getAttribute('href') || '';
+            if (linkPatterns.some(p => p.test(href))) {
+                try {
+                    const fullUrl = new URL(href, sourceUrl).href;
+                    if (!profileLinks.includes(fullUrl)) {
+                        profileLinks.push(fullUrl);
+                    }
+                } catch {}
+            }
+        }
+        log.push(`Strategy 5 - Profile links found: ${profileLinks.length}`);
+        
+        // Final deduplication
         const unique = [];
+        const seenTexts = new Set();
+        
         for (const block of blocks) {
-            const isDuplicate = unique.some(b => 
-                b.text.includes(block.text) || block.text.includes(b.text)
-            );
-            if (!isDuplicate) {
+            // Normalize text for comparison
+            const normalized = block.text.replace(/\s+/g, ' ').substring(0, 200);
+            if (!seenTexts.has(normalized)) {
+                seenTexts.add(normalized);
                 unique.push(block);
             }
         }
         
-        return unique.slice(0, 50); // Max 50 blocks per page
-    });
+        log.push(`Final unique blocks: ${unique.length}`);
+        
+        return {
+            blocks: unique.slice(0, 50),
+            profileLinks: profileLinks.slice(0, 20),
+            debug: log
+        };
+    }, url);
 }
 
 /**
@@ -172,10 +289,8 @@ JSON Schema:
         // Parse JSON from response
         let json;
         try {
-            // Try direct parse
             json = JSON.parse(response);
         } catch {
-            // Try to extract JSON from response
             const jsonMatch = response.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
                 json = JSON.parse(jsonMatch[0]);
@@ -193,13 +308,50 @@ JSON Schema:
 }
 
 /**
+ * Crawl a profile page for contact info
+ */
+async function crawlProfilePage(page, profileUrl) {
+    try {
+        console.log(`[AIMiner] 📄 Visiting profile: ${profileUrl}`);
+        await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await page.waitForTimeout(1000);
+        
+        const content = await page.evaluate(() => {
+            const getText = (el) => (el?.innerText || el?.textContent || '').trim();
+            
+            // Try to find main content area
+            const selectors = [
+                '.profile-content', '.member-content', '.user-profile',
+                '.entry-content', 'article', 'main', '.content'
+            ];
+            
+            for (const sel of selectors) {
+                const el = document.querySelector(sel);
+                if (el) {
+                    const text = getText(el);
+                    if (text.length > 50) return text;
+                }
+            }
+            
+            return getText(document.body).substring(0, 3000);
+        });
+        
+        if (content && content.includes('@')) {
+            return { url: profileUrl, text: content };
+        }
+    } catch (err) {
+        console.log(`[AIMiner] Profile crawl error: ${err.message}`);
+    }
+    return null;
+}
+
+/**
  * Main mining function
  */
 async function mine(job) {
     const url = job.input;
     console.log(`[AIMiner] Starting for: ${url}`);
     
-    // Check API key
     if (!process.env.ANTHROPIC_API_KEY) {
         console.log('[AIMiner] ERROR: ANTHROPIC_API_KEY not set');
         return {
@@ -233,14 +385,17 @@ async function mine(job) {
             timeout: 30000
         });
         
-        if (response && [403, 401, 429].includes(response.status())) {
+        const httpCode = response?.status() || 200;
+        console.log(`[AIMiner] HTTP Status: ${httpCode}`);
+        
+        if ([403, 401, 429].includes(httpCode)) {
             return {
                 status: 'BLOCKED',
                 emails: [],
                 contacts: [],
                 extracted_links: [],
-                http_code: response.status(),
-                meta: { source: 'aiMiner', error: `HTTP ${response.status()}` }
+                http_code: httpCode,
+                meta: { source: 'aiMiner', error: `HTTP ${httpCode}` }
             };
         }
         
@@ -251,19 +406,58 @@ async function mine(job) {
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
         await page.waitForTimeout(1000);
         
-        // Extract data blocks
+        // Extract data blocks with detailed logging
         console.log('[AIMiner] Extracting data blocks...');
-        const blocks = await extractDataBlocks(page);
+        const extraction = await extractDataBlocks(page, url);
+        
+        // Log debug info
+        console.log('[AIMiner] === Debug Info ===');
+        for (const line of extraction.debug) {
+            console.log(`[AIMiner] ${line}`);
+        }
+        console.log('[AIMiner] ==================');
+        
+        let blocks = extraction.blocks;
+        const profileLinks = extraction.profileLinks;
+        
         console.log(`[AIMiner] Found ${blocks.length} data blocks`);
+        console.log(`[AIMiner] Found ${profileLinks.length} profile links`);
+        
+        // If no blocks but profile links exist, crawl them
+        if (blocks.length === 0 && profileLinks.length > 0) {
+            console.log('[AIMiner] No blocks on main page, crawling profile pages...');
+            const crawledBlocks = [];
+            
+            for (let i = 0; i < Math.min(profileLinks.length, 10); i++) {
+                const profileData = await crawlProfilePage(page, profileLinks[i]);
+                if (profileData) {
+                    crawledBlocks.push({
+                        type: 'profile_page',
+                        text: profileData.text,
+                        html: '',
+                        sourceUrl: profileData.url
+                    });
+                }
+            }
+            
+            blocks = crawledBlocks;
+            console.log(`[AIMiner] Crawled ${blocks.length} profile pages with content`);
+        }
         
         if (blocks.length === 0) {
+            console.log('[AIMiner] No extractable content found');
             return {
                 status: 'PARTIAL',
                 emails: [],
                 contacts: [],
-                extracted_links: [],
-                http_code: response?.status() || 200,
-                meta: { source: 'aiMiner', note: 'No data blocks found on page' }
+                extracted_links: profileLinks,
+                http_code: httpCode,
+                meta: { 
+                    source: 'aiMiner', 
+                    note: 'No data blocks found',
+                    debug: extraction.debug,
+                    profile_links: profileLinks.length
+                }
             };
         }
         
@@ -274,27 +468,32 @@ async function mine(job) {
         
         for (let i = 0; i < blocks.length; i++) {
             const block = blocks[i];
-            console.log(`[AIMiner] Processing block ${i + 1}/${blocks.length}...`);
+            console.log(`[AIMiner] Processing block ${i + 1}/${blocks.length} (${block.type})...`);
             
             const extracted = await extractContactWithAI(block.text);
             
             if (extracted && extracted.email) {
-                contacts.push({
-                    companyName: extracted.company_name,
-                    contactName: extracted.contact_name,
-                    jobTitle: extracted.job_title,
-                    email: extracted.email,
-                    phone: extracted.phone,
-                    address: extracted.address,
-                    city: extracted.city,
-                    state: extracted.state,
-                    country: extracted.country,
-                    website: extracted.website,
-                    emails: [extracted.email]
-                });
-                emails.add(extracted.email.toLowerCase());
-                
-                console.log(`[AIMiner] ✅ ${extracted.company_name || 'Unknown'} - ${extracted.email}`);
+                const emailLower = extracted.email.toLowerCase();
+                if (!emails.has(emailLower)) {
+                    contacts.push({
+                        companyName: extracted.company_name,
+                        contactName: extracted.contact_name,
+                        jobTitle: extracted.job_title,
+                        email: extracted.email,
+                        phone: extracted.phone,
+                        address: extracted.address,
+                        city: extracted.city,
+                        state: extracted.state,
+                        country: extracted.country,
+                        website: extracted.website,
+                        emails: [extracted.email]
+                    });
+                    emails.add(emailLower);
+                    
+                    console.log(`[AIMiner] ✅ ${extracted.company_name || extracted.contact_name || 'Unknown'} - ${extracted.email}`);
+                }
+            } else {
+                console.log(`[AIMiner] ⚠️ Block ${i + 1}: No email extracted`);
             }
             
             // Small delay to respect rate limits
@@ -309,19 +508,21 @@ async function mine(job) {
             status: contacts.length > 0 ? 'SUCCESS' : 'PARTIAL',
             emails: Array.from(emails),
             contacts: contacts,
-            extracted_links: [],
-            http_code: response?.status() || 200,
+            extracted_links: profileLinks,
+            http_code: httpCode,
             meta: {
                 source: 'aiMiner',
                 model: MODEL,
                 blocks_processed: blocks.length,
                 total_contacts: contacts.length,
-                total_emails: emails.size
+                total_emails: emails.size,
+                profile_links_found: profileLinks.length
             }
         };
         
     } catch (err) {
         console.log(`[AIMiner] Error: ${err.message}`);
+        console.log(`[AIMiner] Stack: ${err.stack}`);
         
         if (err.message.includes('BLOCK') || err.message.includes('403')) {
             return {
@@ -340,7 +541,7 @@ async function mine(job) {
             contacts: [],
             extracted_links: [],
             http_code: null,
-            meta: { source: 'aiMiner', error: err.message }
+            meta: { source: 'aiMiner', error: err.message, stack: err.stack }
         };
         
     } finally {
