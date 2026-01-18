@@ -13,8 +13,8 @@
 const SUPERMINER_ENABLED = process.env.SUPERMINER_ENABLED === 'true';
 
 // Version info
-const VERSION = '3.1.1';
-const BUILD_DATE = '2025-01-week2';
+const VERSION = '3.1.2';
+const BUILD_DATE = '2025-01-week3';
 
 // Check required env variables
 function checkRequirements() {
@@ -235,6 +235,30 @@ function getAdapters() {
     return adapters;
 }
 
+// Lazy load services modules
+let services = null;
+function getServices() {
+    if (!services) {
+        services = require('./services');
+    }
+    return services;
+}
+
+// Get cost tracker
+let costTracker = null;
+function getCostTracker() {
+    if (!SUPERMINER_ENABLED) {
+        return null;
+    }
+    
+    if (!costTracker) {
+        const { getCostTracker: getCT } = require('./services/costTracker');
+        costTracker = getCT();
+    }
+    
+    return costTracker;
+}
+
 /**
  * Create miner adapter (wrapper for existing miners)
  * @param {string} name - Miner name
@@ -283,6 +307,8 @@ module.exports = {
     getUnifiedContactClass,
     getPipeline,
     getAdapters,
+    getServices,
+    getCostTracker,
     
     // Helpers
     shouldUseSuperminer,
