@@ -13,8 +13,8 @@
 const SUPERMINER_ENABLED = process.env.SUPERMINER_ENABLED === 'true';
 
 // Version info
-const VERSION = '3.1.0';
-const BUILD_DATE = '2025-01';
+const VERSION = '3.1.1';
+const BUILD_DATE = '2025-01-week2';
 
 // Check required env variables
 function checkRequirements() {
@@ -217,6 +217,56 @@ function convertToUnifiedContacts(result, source) {
         .filter(c => c.isValid());
 }
 
+// Lazy load pipeline modules
+let pipeline = null;
+function getPipeline() {
+    if (!pipeline) {
+        pipeline = require('./pipeline');
+    }
+    return pipeline;
+}
+
+// Lazy load adapter modules
+let adapters = null;
+function getAdapters() {
+    if (!adapters) {
+        adapters = require('./adapters');
+    }
+    return adapters;
+}
+
+/**
+ * Create miner adapter (wrapper for existing miners)
+ * @param {string} name - Miner name
+ * @param {Function} minerFn - Original mine function
+ * @returns {Object} Adapter instance
+ */
+function createMinerAdapter(name, minerFn) {
+    const { createMinerAdapter: create } = getAdapters();
+    return create(name, minerFn);
+}
+
+/**
+ * Validate contacts using ValidatorV2
+ * @param {Array} contacts - Contacts to validate
+ * @returns {Object} Validation result
+ */
+function validateContacts(contacts) {
+    const { validateContacts: validate } = getPipeline();
+    return validate(contacts);
+}
+
+/**
+ * Filter hallucinations from AI results
+ * @param {Array} contacts - Contacts to filter
+ * @param {Object} options - Filter options
+ * @returns {Object} Filter result
+ */
+function filterHallucinations(contacts, options = {}) {
+    const { filterHallucinations: filter } = getPipeline();
+    return filter(contacts, options);
+}
+
 module.exports = {
     // Config
     SUPERMINER_ENABLED,
@@ -231,9 +281,16 @@ module.exports = {
     getEventBus,
     getIntermediateStorage,
     getUnifiedContactClass,
+    getPipeline,
+    getAdapters,
     
     // Helpers
     shouldUseSuperminer,
     convertToUnifiedContacts,
-    checkRequirements
+    checkRequirements,
+    
+    // Week 2: Pipeline & Adapters
+    createMinerAdapter,
+    validateContacts,
+    filterHallucinations
 };
