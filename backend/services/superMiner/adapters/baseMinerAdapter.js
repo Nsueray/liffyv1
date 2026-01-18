@@ -13,8 +13,8 @@
  */
 
 const { UnifiedContact, CONFIDENCE, VALID_SOURCES } = require('../types/UnifiedContact');
-const { validateContacts } = require('./validatorV2');
-const { filterHallucinations, createEvidence, EVIDENCE_TYPES } = require('./hallucinationFilter');
+const { validateContacts } = require('../pipeline/validatorV2');
+const { filterHallucinations, createEvidence, EVIDENCE_TYPES } = require('../pipeline/hallucinationFilter');
 
 // ============================================
 // MINER CAPABILITIES
