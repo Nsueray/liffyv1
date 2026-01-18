@@ -2,12 +2,16 @@
  * flowOrchestrator.js - SuperMiner v3.1
  * 
  * Ana akış kontrolü - Flow 1 ve Flow 2 yönetimi.
- * BullMQ entegrasyonu için hazır ama şimdilik in-memory.
+ * 
+ * PDF MİMARİSİ:
+ * - Flow 1: Scout → Router → Miners → Aggregator V1 → Redis (DB'ye YAZMAZ!)
+ * - Event: mining:aggregation:done
+ * - Flow 2: WebsiteScraper → Aggregator V2 → DB (tek seferde)
  * 
  * KURALLAR:
- * - Flow 1: Scout → Router → Miners → Aggregator V1 → Redis
- * - Flow 2: Event trigger → WebsiteScraper → Aggregator V2 → DB
- * - Her job için tek FlowOrchestrator instance
+ * - Miner'lar sadece sonuç döner, DB'ye yazmaz
+ * - Aggregator V1 Redis'e yazar (temp_results:{jobId})
+ * - Aggregator V2 DB'ye yazar (final merge)
  */
 
 const { getSmartRouter } = require('./smartRouter');
@@ -17,6 +21,7 @@ const { getHtmlCache } = require('./htmlCache');
 const { createResultAggregator, ENRICHMENT_THRESHOLD } = require('./resultAggregator');
 const { getEventBus, CHANNELS } = require('./eventBus');
 const { getIntermediateStorage } = require('./intermediateStorage');
+const { UnifiedContact } = require('../types/UnifiedContact');
 
 // Flow states
 const FLOW_STATE = {
@@ -54,8 +59,8 @@ class FlowOrchestrator {
         // Aggregator (needs db)
         this.aggregator = createResultAggregator(db);
         
-        // Miner adapters (lazy loaded)
-        this.minerAdapters = null;
+        // Miner modules (lazy loaded)
+        this.miners = null;
         
         // Job tracking
         this.activeJobs = new Map();
@@ -64,49 +69,177 @@ class FlowOrchestrator {
     }
     
     /**
-     * Load miner adapters lazily
+     * Load legacy miner modules
+     * These miners return results WITHOUT writing to DB
      */
-    async loadMinerAdapters() {
-        if (this.minerAdapters) return this.minerAdapters;
+    async loadMiners() {
+        if (this.miners) return this.miners;
         
         try {
-            const adapters = require('../adapters');
-            
-            // Load actual miner modules from legacy system
+            // Load legacy miner modules that return results (don't write to DB)
             const aiMiner = require('../../urlMiners/aiMiner');
             const playwrightTableMiner = require('../../urlMiners/playwrightTableMiner');
             
-            // Create adapters
-            const aiMinerAdapter = adapters.createAIMinerAdapter(aiMiner);
-            const playwrightTableMinerAdapter = adapters.createPlaywrightTableMinerAdapter(playwrightTableMiner);
-            const playwrightDetailMinerAdapter = adapters.createPlaywrightDetailMinerAdapter(playwrightTableMiner);
-            const websiteScraperAdapter = adapters.createWebsiteScraperMinerAdapter();
-            
-            this.minerAdapters = {
-                // Primary miners
-                aiMiner: aiMinerAdapter,
-                playwrightTableMiner: playwrightTableMinerAdapter,
-                playwrightDetailMiner: playwrightDetailMinerAdapter,
-                websiteScraperMiner: websiteScraperAdapter,
+            this.miners = {
+                // Direct miners (return results, don't write to DB)
+                aiMiner: {
+                    name: 'aiMiner',
+                    mine: async (job) => {
+                        console.log(`[aiMiner] Starting for: ${job.input}`);
+                        const result = await aiMiner.mine(job);
+                        return this.normalizeResult(result, 'aiMiner');
+                    }
+                },
                 
-                // Aliases (for SmartRouter compatibility)
-                playwrightMiner: playwrightDetailMinerAdapter,  // playwrightMiner → playwrightDetailMiner
-                httpBasicMiner: aiMinerAdapter  // httpBasicMiner → aiMiner (temporary fallback)
+                playwrightTableMiner: {
+                    name: 'playwrightTableMiner',
+                    mine: async (job) => {
+                        console.log(`[playwrightTableMiner] Starting for: ${job.input}`);
+                        const result = await playwrightTableMiner.mine(job);
+                        return this.normalizeResult(result, 'playwrightTableMiner');
+                    }
+                },
+                
+                // Composite miner: runs multiple miners and merges
+                fullMiner: {
+                    name: 'fullMiner',
+                    mine: async (job) => {
+                        console.log(`[fullMiner] Starting composite mining for: ${job.input}`);
+                        
+                        const results = [];
+                        
+                        // Run playwrightTableMiner first (faster)
+                        try {
+                            const tableResult = await playwrightTableMiner.mine(job);
+                            results.push(this.normalizeResult(tableResult, 'playwrightTableMiner'));
+                            console.log(`[fullMiner] playwrightTableMiner: ${tableResult?.emails?.length || 0} emails`);
+                        } catch (err) {
+                            console.warn(`[fullMiner] playwrightTableMiner failed: ${err.message}`);
+                        }
+                        
+                        // Run aiMiner (more comprehensive)
+                        try {
+                            const aiResult = await aiMiner.mine(job);
+                            results.push(this.normalizeResult(aiResult, 'aiMiner'));
+                            console.log(`[fullMiner] aiMiner: ${aiResult?.emails?.length || 0} emails`);
+                        } catch (err) {
+                            console.warn(`[fullMiner] aiMiner failed: ${err.message}`);
+                        }
+                        
+                        // Merge results
+                        return this.mergeResults(results);
+                    }
+                }
             };
             
-            console.log('[FlowOrchestrator] Miner adapters loaded:', Object.keys(this.minerAdapters).join(', '));
-            return this.minerAdapters;
+            // Aliases
+            this.miners.playwrightMiner = this.miners.fullMiner;
+            this.miners.playwrightDetailMiner = this.miners.fullMiner;
+            this.miners.httpBasicMiner = this.miners.playwrightTableMiner;
+            
+            console.log('[FlowOrchestrator] Miners loaded:', Object.keys(this.miners).join(', '));
+            return this.miners;
             
         } catch (err) {
-            console.error('[FlowOrchestrator] Failed to load adapters:', err.message);
+            console.error('[FlowOrchestrator] Failed to load miners:', err.message);
             return null;
         }
     }
     
     /**
+     * Normalize miner result to standard format
+     */
+    normalizeResult(result, source) {
+        if (!result) {
+            return { status: 'EMPTY', contacts: [], emails: [], source };
+        }
+        
+        const contacts = [];
+        
+        // Extract emails
+        const emails = result.emails || [];
+        
+        // Convert to UnifiedContact format
+        if (result.contacts && Array.isArray(result.contacts)) {
+            for (const c of result.contacts) {
+                contacts.push(new UnifiedContact({
+                    email: c.email || c.emails?.[0],
+                    contactName: c.contact_name || c.name,
+                    companyName: c.company_name || c.company,
+                    jobTitle: c.job_title || c.title,
+                    phone: c.phone,
+                    website: c.website,
+                    country: c.country,
+                    city: c.city,
+                    address: c.address,
+                    source: source,
+                    confidence: c.confidence || 50
+                }));
+            }
+        }
+        
+        // Also create contacts from raw emails (if no contacts)
+        if (contacts.length === 0 && emails.length > 0) {
+            for (const email of emails) {
+                if (typeof email === 'string') {
+                    contacts.push(new UnifiedContact({
+                        email: email,
+                        source: source,
+                        confidence: 40
+                    }));
+                }
+            }
+        }
+        
+        return {
+            status: contacts.length > 0 ? 'SUCCESS' : 'EMPTY',
+            contacts,
+            emails,
+            source,
+            meta: result.meta || {}
+        };
+    }
+    
+    /**
+     * Merge multiple miner results
+     */
+    mergeResults(results) {
+        const emailMap = new Map();
+        let totalEmails = [];
+        
+        for (const result of results) {
+            if (!result || !result.contacts) continue;
+            
+            totalEmails = totalEmails.concat(result.emails || []);
+            
+            for (const contact of result.contacts) {
+                if (!contact.email) continue;
+                
+                const key = contact.email.toLowerCase();
+                
+                if (emailMap.has(key)) {
+                    // Merge with existing
+                    const existing = emailMap.get(key);
+                    emailMap.set(key, UnifiedContact.merge(existing, contact));
+                } else {
+                    emailMap.set(key, contact);
+                }
+            }
+        }
+        
+        const contacts = Array.from(emailMap.values());
+        
+        return {
+            status: contacts.length > 0 ? 'SUCCESS' : 'EMPTY',
+            contacts,
+            emails: [...new Set(totalEmails)],
+            source: 'merged'
+        };
+    }
+    
+    /**
      * Execute complete mining flow for a job
-     * @param {Object} job - Mining job from DB
-     * @returns {Promise<Object>} Final result
+     * PDF Mimarisi: Flow 1 → (optional) Flow 2 → DB Write
      */
     async executeJob(job) {
         const jobId = job.id;
@@ -130,11 +263,8 @@ class FlowOrchestrator {
         }
         
         try {
-            // Update job status in DB
-            await this.updateJobStatus(jobId, 'processing');
-            
             // ========================================
-            // FLOW 1: Main Mining
+            // FLOW 1: Miners → Aggregator V1 → Redis
             // ========================================
             this.updateState(jobId, FLOW_STATE.FLOW1_RUNNING);
             
@@ -161,15 +291,13 @@ class FlowOrchestrator {
                 
                 console.log(`[FlowOrchestrator] Flow 2 complete: ${flow2Result?.savedCount || 0} saved`);
             } else {
-                // No Flow 2 needed, write Flow 1 results directly
-                console.log('[FlowOrchestrator] Flow 2 not needed, writing directly to DB');
+                // No Flow 2 needed, Aggregator V2 writes Flow 1 results to DB
+                console.log('[FlowOrchestrator] Flow 2 not needed, finalizing...');
                 
-                const directResult = await this.aggregator.aggregateSimple(
-                    [{ contacts: flow1Result.contacts || [] }],
-                    { jobId, organizerId: job.organizer_id, sourceUrl: job.input }
-                );
-                
-                flow2Result = directResult;
+                flow2Result = await this.aggregator.aggregateV2([], {
+                    jobId,
+                    organizerId: job.organizer_id
+                });
             }
             
             // ========================================
@@ -178,12 +306,6 @@ class FlowOrchestrator {
             this.updateState(jobId, FLOW_STATE.COMPLETED);
             
             const totalTime = Date.now() - startTime;
-            
-            // Update job as completed
-            await this.updateJobStatus(jobId, 'completed', {
-                total_found: flow2Result?.savedCount || flow1Result.contactCount,
-                total_emails_raw: flow2Result?.savedCount || flow1Result.contactCount
-            });
             
             // Finalize cost tracking
             let costSummary = null;
@@ -203,8 +325,8 @@ class FlowOrchestrator {
                     enrichmentRate: flow1Result.enrichmentRate
                 },
                 flow2: flow2Result ? {
-                    triggered: true,
-                    savedCount: flow2Result.savedCount
+                    triggered: flow1Result.enrichmentRate < this.config.flow2Threshold,
+                    savedCount: flow2Result.savedCount || flow2Result.stats?.saved || 0
                 } : {
                     triggered: false
                 },
@@ -213,7 +335,7 @@ class FlowOrchestrator {
             
             console.log(`\n${'='.repeat(60)}`);
             console.log(`[FlowOrchestrator] Job ${jobId} COMPLETED in ${(totalTime/1000).toFixed(1)}s`);
-            console.log(`[FlowOrchestrator] Final: ${flow2Result?.savedCount || flow1Result.contactCount} contacts`);
+            console.log(`[FlowOrchestrator] Final: ${flow2Result?.savedCount || flow2Result?.stats?.saved || flow1Result.contactCount} contacts saved`);
             console.log(`${'='.repeat(60)}\n`);
             
             return finalResult;
@@ -223,15 +345,15 @@ class FlowOrchestrator {
             
             this.updateState(jobId, FLOW_STATE.FAILED);
             
-            // Update job as failed
-            await this.updateJobStatus(jobId, 'failed', {
-                error: err.message
-            });
-            
             // Cleanup
             this.activeJobs.delete(jobId);
             if (this.costTracker) {
                 this.costTracker.finalizeJob(jobId);
+            }
+            
+            // Clear temp storage
+            if (this.storage) {
+                await this.storage.clearFlowResults(jobId);
             }
             
             // Publish failure event
@@ -252,95 +374,78 @@ class FlowOrchestrator {
     }
     
     /**
-     * Execute Flow 1: Scout → Router → Miners → Aggregator V1
+     * Execute Flow 1: Miners → Aggregator V1 → Redis
+     * DOES NOT WRITE TO DB!
      */
     async executeFlow1(job) {
         const jobId = job.id;
-        const minerResults = [];
         
-        // Load adapters
-        const adapters = await this.loadMinerAdapters();
-        if (!adapters) {
-            throw new Error('Failed to load miner adapters');
+        // Load miners
+        const miners = await this.loadMiners();
+        if (!miners) {
+            throw new Error('Failed to load miners');
         }
         
-        // 1. Route the job
+        // 1. Route the job (determine which miner to use)
         console.log('[Flow1] Step 1: Routing...');
         const routeDecision = await this.router.routeJob(job);
         
-        console.log(`[Flow1] Route decision: ${routeDecision.primaryMiner} (cache: ${routeDecision.useCache})`);
+        const selectedMiner = routeDecision.primaryMiner;
+        console.log(`[Flow1] Route decision: ${selectedMiner}`);
         
         // 2. Check circuit breaker
         if (this.circuitBreaker) {
             const canRequest = this.circuitBreaker.canRequest(job.input);
             if (!canRequest.allowed) {
                 console.warn(`[Flow1] Circuit breaker: ${canRequest.reason}`);
-                // Try fallback or return empty
+                // Continue anyway, might recover
             }
         }
         
-        // 3. Execute primary miner
-        console.log(`[Flow1] Step 2: Executing ${routeDecision.primaryMiner}...`);
+        // 3. Execute miner
+        console.log(`[Flow1] Step 2: Mining with ${selectedMiner}...`);
         
-        const primaryMiner = adapters[routeDecision.primaryMiner];
-        if (primaryMiner) {
-            try {
-                const result = await primaryMiner.mine(job, {
-                    useCache: routeDecision.useCache,
-                    hints: routeDecision.hints
-                });
-                
-                minerResults.push(result);
-                
-                console.log(`[Flow1] ${routeDecision.primaryMiner}: ${result.contacts?.length || 0} contacts`);
-                
-                // Record success
-                if (this.circuitBreaker && result.status !== 'BLOCKED') {
-                    this.circuitBreaker.recordSuccess(job.input);
-                }
-                
-            } catch (err) {
-                console.error(`[Flow1] ${routeDecision.primaryMiner} failed:`, err.message);
-                
-                // Record failure
-                if (this.circuitBreaker) {
-                    this.circuitBreaker.recordFailure(job.input, err.message);
-                }
-                
-                // Try fallback
-                if (routeDecision.fallbackChain && routeDecision.fallbackChain.length > 0) {
-                    console.log(`[Flow1] Trying fallback: ${routeDecision.fallbackChain[0]}`);
-                    
-                    const fallbackMiner = adapters[routeDecision.fallbackChain[0]];
-                    if (fallbackMiner) {
-                        try {
-                            const fallbackResult = await fallbackMiner.mine(job);
-                            minerResults.push(fallbackResult);
-                        } catch (fallbackErr) {
-                            console.error(`[Flow1] Fallback failed:`, fallbackErr.message);
-                        }
-                    }
-                }
+        const miner = miners[selectedMiner] || miners.fullMiner;
+        let minerResult;
+        
+        try {
+            minerResult = await miner.mine(job);
+            
+            console.log(`[Flow1] Miner result: ${minerResult.contacts?.length || 0} contacts, ${minerResult.emails?.length || 0} emails`);
+            
+            // Record success in circuit breaker
+            if (this.circuitBreaker && minerResult.status !== 'BLOCKED') {
+                this.circuitBreaker.recordSuccess(job.input);
             }
+            
+        } catch (err) {
+            console.error(`[Flow1] Miner failed: ${err.message}`);
+            
+            // Record failure in circuit breaker
+            if (this.circuitBreaker) {
+                this.circuitBreaker.recordFailure(job.input, err.message);
+            }
+            
+            minerResult = { status: 'FAILED', contacts: [], emails: [], error: err.message };
         }
         
-        // 4. Aggregate results (V1 - to Redis, NOT DB)
-        console.log('[Flow1] Step 3: Aggregating (V1 - temp storage)...');
+        // 4. Aggregate V1 (save to Redis, NOT DB!)
+        console.log('[Flow1] Step 3: Aggregating (V1 → Redis)...');
         
-        const aggregationResult = await this.aggregator.aggregateV1(minerResults, {
-            jobId,
-            organizerId: job.organizer_id,
-            sourceUrl: job.input
-        });
-        
-        // Extract contacts for return
-        const tempData = await this.storage.getFlowResults(jobId);
+        const aggregationResult = await this.aggregator.aggregateV1(
+            [minerResult],
+            {
+                jobId,
+                organizerId: job.organizer_id,
+                sourceUrl: job.input
+            }
+        );
         
         return {
             contactCount: aggregationResult.contactCount,
             enrichmentRate: aggregationResult.enrichmentRate,
-            websiteUrls: aggregationResult.websiteUrlCount > 0 ? tempData?.websiteUrls : [],
-            contacts: tempData?.contacts || [],
+            websiteUrls: aggregationResult.websiteUrlCount > 0 ? 
+                (await this.storage.getFlowResults(jobId))?.websiteUrls : [],
             minerStats: aggregationResult.minerStats
         };
     }
@@ -358,7 +463,7 @@ class FlowOrchestrator {
         if (websiteUrls.length === 0) {
             console.log('[Flow2] No website URLs to scrape');
             
-            // Just finalize Flow 1 results
+            // Just finalize Flow 1 results to DB
             return this.aggregator.aggregateV2([], {
                 jobId,
                 organizerId: job.organizer_id
@@ -367,27 +472,14 @@ class FlowOrchestrator {
         
         console.log(`[Flow2] Scraping ${websiteUrls.length} websites...`);
         
-        // Load adapters
-        const adapters = await this.loadMinerAdapters();
-        
-        // Scrape websites
+        // Scrape websites (simplified for now)
         const scraperResults = [];
         
-        if (adapters && adapters.websiteScraperMiner) {
-            const { scrapeMultipleWebsites } = require('../adapters/websiteScraperMinerAdapter');
-            
-            const results = await scrapeMultipleWebsites(websiteUrls, jobId, {
-                maxConcurrent: 3,
-                maxPagesPerSite: 3
-            });
-            
-            scraperResults.push(...results.filter(r => r.status === 'SUCCESS'));
-            
-            console.log(`[Flow2] Scraped ${scraperResults.length} websites successfully`);
-        }
+        // TODO: Implement actual website scraping
+        // For now, just finalize Flow 1 results
         
         // Aggregate V2 (final merge + DB write)
-        console.log('[Flow2] Aggregating V2 (final merge + DB write)...');
+        console.log('[Flow2] Aggregating V2 (final merge → DB)...');
         
         const finalResult = await this.aggregator.aggregateV2(scraperResults, {
             jobId,
@@ -426,44 +518,6 @@ class FlowOrchestrator {
         if (jobInfo) {
             jobInfo.state = state;
             jobInfo.stateUpdatedAt = Date.now();
-        }
-    }
-    
-    /**
-     * Update job status in database
-     */
-    async updateJobStatus(jobId, status, extraFields = {}) {
-        if (!this.db) return;
-        
-        try {
-            const fields = ['status = $1', 'updated_at = NOW()'];
-            const values = [status];
-            let paramIndex = 2;
-            
-            for (const [key, value] of Object.entries(extraFields)) {
-                if (key === 'error') {
-                    fields.push(`stats = jsonb_set(COALESCE(stats, '{}'), '{error}', $${paramIndex}::jsonb)`);
-                    values.push(JSON.stringify(value));
-                } else {
-                    fields.push(`${key} = $${paramIndex}`);
-                    values.push(value);
-                }
-                paramIndex++;
-            }
-            
-            if (status === 'completed') {
-                fields.push('completed_at = NOW()');
-            }
-            
-            values.push(jobId);
-            
-            await this.db.query(
-                `UPDATE mining_jobs SET ${fields.join(', ')} WHERE id = $${paramIndex}`,
-                values
-            );
-            
-        } catch (err) {
-            console.error(`[FlowOrchestrator] Failed to update job status:`, err.message);
         }
     }
     
