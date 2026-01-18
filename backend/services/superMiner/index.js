@@ -13,8 +13,8 @@
 const SUPERMINER_ENABLED = process.env.SUPERMINER_ENABLED === 'true';
 
 // Version info
-const VERSION = '3.1.2';
-const BUILD_DATE = '2025-01-week3';
+const VERSION = '3.1.3';
+const BUILD_DATE = '2025-01-week4';
 
 // Check required env variables
 function checkRequirements() {
@@ -259,6 +259,51 @@ function getCostTracker() {
     return costTracker;
 }
 
+// Get HTML cache
+let htmlCache = null;
+function getHtmlCache() {
+    if (!SUPERMINER_ENABLED) {
+        return null;
+    }
+    
+    if (!htmlCache) {
+        const { getHtmlCache: getHC } = require('./services/htmlCache');
+        htmlCache = getHC();
+    }
+    
+    return htmlCache;
+}
+
+// Get page analyzer (Scout)
+let pageAnalyzer = null;
+function getPageAnalyzer() {
+    if (!SUPERMINER_ENABLED) {
+        return null;
+    }
+    
+    if (!pageAnalyzer) {
+        const { getPageAnalyzer: getPA } = require('./services/pageAnalyzer');
+        pageAnalyzer = getPA();
+    }
+    
+    return pageAnalyzer;
+}
+
+// Get smart router
+let smartRouter = null;
+function getSmartRouter() {
+    if (!SUPERMINER_ENABLED) {
+        return null;
+    }
+    
+    if (!smartRouter) {
+        const { getSmartRouter: getSR } = require('./services/smartRouter');
+        smartRouter = getSR();
+    }
+    
+    return smartRouter;
+}
+
 /**
  * Create miner adapter (wrapper for existing miners)
  * @param {string} name - Miner name
@@ -309,6 +354,9 @@ module.exports = {
     getAdapters,
     getServices,
     getCostTracker,
+    getHtmlCache,
+    getPageAnalyzer,
+    getSmartRouter,
     
     // Helpers
     shouldUseSuperminer,
