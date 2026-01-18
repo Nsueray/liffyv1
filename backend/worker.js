@@ -3,6 +3,59 @@ const { sendEmail } = require("./mailer");
 const { processMiningJob } = require("./services/miningService");
 const { runScheduler } = require("./services/campaignScheduler");
 
+// ============================================
+// SUPERMINER INTEGRATION (v3.1)
+// ============================================
+let superMiner = null;
+let superMinerInitialized = false;
+
+async function initSuperMiner() {
+  try {
+    superMiner = require("./services/superMiner");
+    
+    if (!superMiner.SUPERMINER_ENABLED) {
+      console.log("[Worker] SuperMiner DISABLED - using legacy system");
+      return false;
+    }
+    
+    console.log(`[Worker] SuperMiner v${superMiner.VERSION} - Initializing...`);
+    
+    const result = await superMiner.initializeSuperMiner(db);
+    
+    if (result.success) {
+      superMinerInitialized = true;
+      console.log(`[Worker] ✅ SuperMiner initialized (mode: ${result.mode})`);
+      return true;
+    } else {
+      console.error("[Worker] ❌ SuperMiner init failed:", result.error);
+      return false;
+    }
+  } catch (err) {
+    console.error("[Worker] ❌ SuperMiner load error:", err.message);
+    return false;
+  }
+}
+
+function shouldUseSuperMiner(job) {
+  // Feature flag check
+  if (!superMiner || !superMiner.SUPERMINER_ENABLED || !superMinerInitialized) {
+    return false;
+  }
+  
+  // Only for URL mining jobs
+  if (job.type !== 'url') {
+    return false;
+  }
+  
+  // Check job config for explicit preference
+  if (job.config?.use_superminer === false) {
+    return false;
+  }
+  
+  return true;
+}
+// ============================================
+
 const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 30000;
 const CAMPAIGN_SCHEDULER_INTERVAL_MS = 10000;
@@ -19,7 +72,17 @@ setInterval(() => {
 /* ======================
    SIGNAL HANDLING
 ====================== */
-process.on("SIGTERM", () => console.log("⚠️ SIGTERM received – ignored"));
+process.on("SIGTERM", async () => {
+  console.log("⚠️ SIGTERM received – shutting down gracefully");
+  if (superMiner && superMinerInitialized) {
+    try {
+      await superMiner.shutdown();
+      console.log("[Worker] SuperMiner shutdown complete");
+    } catch (err) {
+      console.error("[Worker] SuperMiner shutdown error:", err.message);
+    }
+  }
+});
 process.on("SIGINT", () => console.log("⚠️ SIGINT received – ignored"));
 
 /* ======================
@@ -234,7 +297,10 @@ function processTemplate(text, recipient) {
    WORKER LOOP (Mining Jobs)
 ====================== */
 async function startWorker() {
-  console.log("🧪 Liffy Worker V12.2 (With Email Sender)");
+  console.log("🧪 Liffy Worker V12.3 (With SuperMiner Support)");
+
+  // Initialize SuperMiner (if enabled)
+  await initSuperMiner();
 
   // Start campaign scheduler in parallel
   startCampaignScheduler().catch((err) => {
@@ -285,6 +351,10 @@ async function processNextJob() {
     console.log(`📂 TYPE: ${job.type}`);
     console.log(`🎯 STRATEGY: ${job.strategy || "auto"}`);
     console.log(`🌐 TARGET: ${job.input}`);
+    
+    // Check if SuperMiner should be used
+    const useSuperMiner = shouldUseSuperMiner(job);
+    console.log(`🔧 ENGINE: ${useSuperMiner ? 'SuperMiner v3.1' : 'Legacy'}`);
     console.log("==============================");
 
     await client.query(
@@ -299,7 +369,24 @@ async function processNextJob() {
     let result;
 
     try {
-      result = await processMiningJob(job);
+      // ============================================
+      // SUPERMINER OR LEGACY DECISION POINT
+      // ============================================
+      if (useSuperMiner) {
+        console.log("[Worker] 🚀 Using SuperMiner...");
+        result = await superMiner.runMiningJob(job, db);
+        
+        // SuperMiner handles its own DB updates, so we just log
+        console.log(`[Worker] SuperMiner result: ${result.status}`);
+        if (result.status === 'COMPLETED') {
+          console.log(`[Worker] ✅ SuperMiner completed: ${result.flow1?.contactCount || 0} contacts`);
+        }
+      } else {
+        // Legacy path
+        result = await processMiningJob(job);
+      }
+      // ============================================
+      
     } catch (err) {
       if (
         err.message &&
