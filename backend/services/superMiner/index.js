@@ -13,8 +13,8 @@
 const SUPERMINER_ENABLED = process.env.SUPERMINER_ENABLED === 'true';
 
 // Version info
-const VERSION = '3.1.3';
-const BUILD_DATE = '2025-01-week4';
+const VERSION = '3.1.4';
+const BUILD_DATE = '2025-01-week5';
 
 // Check required env variables
 function checkRequirements() {
@@ -304,6 +304,31 @@ function getSmartRouter() {
     return smartRouter;
 }
 
+// Get circuit breaker
+let circuitBreaker = null;
+function getCircuitBreaker() {
+    if (!SUPERMINER_ENABLED) {
+        return null;
+    }
+    
+    if (!circuitBreaker) {
+        const { getCircuitBreaker: getCB } = require('./services/circuitBreaker');
+        circuitBreaker = getCB();
+    }
+    
+    return circuitBreaker;
+}
+
+// Create result aggregator (needs db connection)
+function createResultAggregator(db) {
+    if (!SUPERMINER_ENABLED) {
+        return null;
+    }
+    
+    const { createResultAggregator: create } = require('./services/resultAggregator');
+    return create(db);
+}
+
 /**
  * Create miner adapter (wrapper for existing miners)
  * @param {string} name - Miner name
@@ -357,14 +382,18 @@ module.exports = {
     getHtmlCache,
     getPageAnalyzer,
     getSmartRouter,
+    getCircuitBreaker,
+    
+    // Factories
+    createMinerAdapter,
+    createResultAggregator,
     
     // Helpers
     shouldUseSuperminer,
     convertToUnifiedContacts,
     checkRequirements,
     
-    // Week 2: Pipeline & Adapters
-    createMinerAdapter,
+    // Week 2: Pipeline
     validateContacts,
     filterHallucinations
 };

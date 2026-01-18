@@ -10,6 +10,8 @@ const { CostTracker, getCostTracker, COST_LIMITS, OPERATION_COSTS } = require('.
 const { HtmlCache, getHtmlCache, CACHE_TTL, BLOCK_INDICATORS } = require('./htmlCache');
 const { PageAnalyzer, getPageAnalyzer, PAGE_TYPES, PAGINATION_TYPES } = require('./pageAnalyzer');
 const { SmartRouter, getSmartRouter, ROUTER_CONFIG } = require('./smartRouter');
+const { CircuitBreaker, getCircuitBreaker, CIRCUIT_STATE } = require('./circuitBreaker');
+const { ResultAggregator, createResultAggregator, ENRICHMENT_THRESHOLD } = require('./resultAggregator');
 
 module.exports = {
     // EventBus
@@ -48,5 +50,15 @@ module.exports = {
     // SmartRouter
     SmartRouter,
     getSmartRouter,
-    ROUTER_CONFIG
+    ROUTER_CONFIG,
+    
+    // CircuitBreaker
+    CircuitBreaker,
+    getCircuitBreaker,
+    CIRCUIT_STATE,
+    
+    // ResultAggregator
+    ResultAggregator,
+    createResultAggregator,
+    ENRICHMENT_THRESHOLD
 };
