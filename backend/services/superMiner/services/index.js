@@ -12,6 +12,9 @@ const { PageAnalyzer, getPageAnalyzer, PAGE_TYPES, PAGINATION_TYPES } = require(
 const { SmartRouter, getSmartRouter, ROUTER_CONFIG } = require('./smartRouter');
 const { CircuitBreaker, getCircuitBreaker, CIRCUIT_STATE } = require('./circuitBreaker');
 const { ResultAggregator, createResultAggregator, ENRICHMENT_THRESHOLD } = require('./resultAggregator');
+const { FlowOrchestrator, createFlowOrchestrator, FLOW_STATE } = require('./flowOrchestrator');
+const { OrchestratorListener, createOrchestratorListener, LISTENER_STATE } = require('./orchestratorListener');
+const superMinerEntry = require('./superMinerEntry');
 
 module.exports = {
     // EventBus
@@ -60,5 +63,18 @@ module.exports = {
     // ResultAggregator
     ResultAggregator,
     createResultAggregator,
-    ENRICHMENT_THRESHOLD
+    ENRICHMENT_THRESHOLD,
+    
+    // FlowOrchestrator
+    FlowOrchestrator,
+    createFlowOrchestrator,
+    FLOW_STATE,
+    
+    // OrchestratorListener
+    OrchestratorListener,
+    createOrchestratorListener,
+    LISTENER_STATE,
+    
+    // SuperMinerEntry (main entry point)
+    superMinerEntry
 };

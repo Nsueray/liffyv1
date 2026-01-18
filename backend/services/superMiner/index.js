@@ -13,8 +13,8 @@
 const SUPERMINER_ENABLED = process.env.SUPERMINER_ENABLED === 'true';
 
 // Version info
-const VERSION = '3.1.4';
-const BUILD_DATE = '2025-01-week5';
+const VERSION = '3.1.5';
+const BUILD_DATE = '2025-01-week6';
 
 // Check required env variables
 function checkRequirements() {
@@ -329,6 +329,36 @@ function createResultAggregator(db) {
     return create(db);
 }
 
+// Get SuperMiner Entry (main entry point)
+function getEntry() {
+    if (!SUPERMINER_ENABLED) {
+        return null;
+    }
+    
+    return require('./services/superMinerEntry');
+}
+
+// Initialize SuperMiner (convenience wrapper)
+async function initializeSuperMiner(db, config = {}) {
+    const entry = getEntry();
+    if (entry) {
+        return entry.initialize(db, config);
+    }
+    return { success: true, mode: 'legacy' };
+}
+
+// Run mining job (convenience wrapper)
+async function runMiningJob(job, db) {
+    const entry = getEntry();
+    if (entry) {
+        return entry.runMiningJob(job, db);
+    }
+    
+    // Fallback to legacy
+    const miningService = require('../miningService');
+    return miningService.runMining(job.id, job.organizer_id, job.config?.mining_mode || 'full');
+}
+
 /**
  * Create miner adapter (wrapper for existing miners)
  * @param {string} name - Miner name
@@ -383,10 +413,15 @@ module.exports = {
     getPageAnalyzer,
     getSmartRouter,
     getCircuitBreaker,
+    getEntry,
     
     // Factories
     createMinerAdapter,
     createResultAggregator,
+    
+    // Week 6: Main Entry Points
+    initializeSuperMiner,
+    runMiningJob,
     
     // Helpers
     shouldUseSuperminer,
