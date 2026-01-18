@@ -72,17 +72,29 @@ class FlowOrchestrator {
         try {
             const adapters = require('../adapters');
             
-            // Load actual miner modules
+            // Load actual miner modules from legacy system
             const aiMiner = require('../../urlMiners/aiMiner');
             const playwrightTableMiner = require('../../urlMiners/playwrightTableMiner');
             
+            // Create adapters
+            const aiMinerAdapter = adapters.createAIMinerAdapter(aiMiner);
+            const playwrightTableMinerAdapter = adapters.createPlaywrightTableMinerAdapter(playwrightTableMiner);
+            const playwrightDetailMinerAdapter = adapters.createPlaywrightDetailMinerAdapter(playwrightTableMiner);
+            const websiteScraperAdapter = adapters.createWebsiteScraperMinerAdapter();
+            
             this.minerAdapters = {
-                aiMiner: adapters.createAIMinerAdapter(aiMiner),
-                playwrightTableMiner: adapters.createPlaywrightTableMinerAdapter(playwrightTableMiner),
-                websiteScraperMiner: adapters.createWebsiteScraperMinerAdapter()
+                // Primary miners
+                aiMiner: aiMinerAdapter,
+                playwrightTableMiner: playwrightTableMinerAdapter,
+                playwrightDetailMiner: playwrightDetailMinerAdapter,
+                websiteScraperMiner: websiteScraperAdapter,
+                
+                // Aliases (for SmartRouter compatibility)
+                playwrightMiner: playwrightDetailMinerAdapter,  // playwrightMiner → playwrightDetailMiner
+                httpBasicMiner: aiMinerAdapter  // httpBasicMiner → aiMiner (temporary fallback)
             };
             
-            console.log('[FlowOrchestrator] Miner adapters loaded');
+            console.log('[FlowOrchestrator] Miner adapters loaded:', Object.keys(this.minerAdapters).join(', '));
             return this.minerAdapters;
             
         } catch (err) {
