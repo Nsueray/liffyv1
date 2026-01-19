@@ -157,7 +157,8 @@ class OrchestratorListener {
         const threshold = 0.2; // 20%
         if (enrichmentRate >= threshold) {
             console.log(`[OrchestratorListener] Enrichment OK (>= ${threshold * 100}%), no Flow 2 needed`);
-            await this.finalizeWithoutFlow2(jobId);
+            // FlowOrchestrator already handles finalization, don't duplicate
+            console.log(`[OrchestratorListener] FlowOrchestrator handles finalization, skipping`);
             return;
         }
         

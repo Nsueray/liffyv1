@@ -162,6 +162,11 @@ class FlowOrchestrator {
         // Convert to UnifiedContact format
         if (result.contacts && Array.isArray(result.contacts)) {
             for (const c of result.contacts) {
+                // Debug: log incoming contact data
+                if (c.company_name || c.company) {
+                    console.log(`[normalizeResult] Contact: ${c.company_name || c.company} - ${c.email}`);
+                }
+                
                 contacts.push(new UnifiedContact({
                     email: c.email || c.emails?.[0],
                     contactName: c.contact_name || c.name,
