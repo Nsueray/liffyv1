@@ -1,5 +1,5 @@
 /**
- * flowOrchestrator.js - SuperMiner v3.1
+ * flowOrchestrator.js - SuperMiner v3.1.6
  * 
  * Ana akış kontrolü - Flow 1 ve Flow 2 yönetimi.
  * 
@@ -12,6 +12,10 @@
  * - Miner'lar sadece sonuç döner, DB'ye yazmaz
  * - Aggregator V1 Redis'e yazar (temp_results:{jobId})
  * - Aggregator V2 DB'ye yazar (final merge)
+ * 
+ * v3.1.6 CHANGELOG:
+ * - FIX: normalizeResult() now handles both camelCase and snake_case field names
+ * - aiMiner returns companyName (camelCase), we now check both formats
  */
 
 const { getSmartRouter } = require('./smartRouter');
@@ -65,7 +69,7 @@ class FlowOrchestrator {
         // Job tracking
         this.activeJobs = new Map();
         
-        console.log('[FlowOrchestrator] ✅ Initialized');
+        console.log('[FlowOrchestrator] ✅ Initialized (v3.1.6)');
     }
     
     /**
@@ -153,6 +157,11 @@ class FlowOrchestrator {
     
     /**
      * Normalize miner result to standard format
+     * 
+     * v3.1.6 FIX: Handle both camelCase and snake_case field names
+     * - aiMiner returns: companyName, contactName, jobTitle (camelCase)
+     * - Some miners return: company_name, contact_name, job_title (snake_case)
+     * - We now check both formats to ensure data is not lost
      */
     normalizeResult(result, source) {
         if (!result) {
@@ -167,21 +176,28 @@ class FlowOrchestrator {
         // Convert to UnifiedContact format
         if (result.contacts && Array.isArray(result.contacts)) {
             for (const c of result.contacts) {
-                // Debug: log incoming contact data
-                if (c.company_name || c.company) {
-                    console.log(`[normalizeResult] Contact: ${c.company_name || c.company} - ${c.email}`);
+                // v3.1.6: Extract fields with fallback for both naming conventions
+                const companyName = c.company_name || c.companyName || c.company || null;
+                const contactName = c.contact_name || c.contactName || c.name || null;
+                const jobTitle = c.job_title || c.jobTitle || c.title || null;
+                const email = c.email || c.emails?.[0] || null;
+                
+                // Debug: log incoming contact data with resolved values
+                if (companyName || email) {
+                    console.log(`[normalizeResult] ✅ ${companyName || 'Unknown'} - ${email || 'no email'} (source: ${source})`);
                 }
                 
                 contacts.push(new UnifiedContact({
-                    email: c.email || c.emails?.[0],
-                    contactName: c.contact_name || c.name,
-                    companyName: c.company_name || c.company,
-                    jobTitle: c.job_title || c.title,
-                    phone: c.phone,
-                    website: c.website,
-                    country: c.country,
-                    city: c.city,
-                    address: c.address,
+                    email: email,
+                    contactName: contactName,
+                    companyName: companyName,
+                    jobTitle: jobTitle,
+                    phone: c.phone || null,
+                    website: c.website || null,
+                    country: c.country || null,
+                    city: c.city || null,
+                    state: c.state || null,
+                    address: c.address || null,
                     source: source,
                     confidence: c.confidence || 50
                 }));
