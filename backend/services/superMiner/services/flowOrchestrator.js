@@ -117,9 +117,14 @@ class FlowOrchestrator {
                             console.warn(`[fullMiner] playwrightTableMiner failed: ${err.message}`);
                         }
                         
-                        // Run aiMiner (more comprehensive)
+                        // Run aiMiner with timeout (60 seconds max)
                         try {
-                            const aiResult = await aiMiner.mine(job);
+                            const aiPromise = aiMiner.mine(job);
+                            const timeoutPromise = new Promise((_, reject) => 
+                                setTimeout(() => reject(new Error('AI Miner timeout (60s)')), 60000)
+                            );
+                            
+                            const aiResult = await Promise.race([aiPromise, timeoutPromise]);
                             results.push(this.normalizeResult(aiResult, 'aiMiner'));
                             console.log(`[fullMiner] aiMiner: ${aiResult?.emails?.length || 0} emails`);
                         } catch (err) {
