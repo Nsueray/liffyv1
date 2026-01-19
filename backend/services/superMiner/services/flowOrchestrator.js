@@ -296,7 +296,8 @@ class FlowOrchestrator {
                 
                 flow2Result = await this.aggregator.aggregateV2([], {
                     jobId,
-                    organizerId: job.organizer_id
+                    organizerId: job.organizer_id,
+                    sourceUrl: job.input
                 });
             }
             
@@ -466,7 +467,8 @@ class FlowOrchestrator {
             // Just finalize Flow 1 results to DB
             return this.aggregator.aggregateV2([], {
                 jobId,
-                organizerId: job.organizer_id
+                organizerId: job.organizer_id,
+                sourceUrl: job.input
             });
         }
         
@@ -483,7 +485,8 @@ class FlowOrchestrator {
         
         const finalResult = await this.aggregator.aggregateV2(scraperResults, {
             jobId,
-            organizerId: job.organizer_id
+            organizerId: job.organizer_id,
+            sourceUrl: job.input
         });
         
         return finalResult;

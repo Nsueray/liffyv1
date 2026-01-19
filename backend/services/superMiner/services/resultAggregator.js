@@ -157,8 +157,14 @@ class ResultAggregator {
         
         console.log(`[Aggregator V2] After filter: ${filterResult.passed.length} passed`);
         
+        // Add sourceUrl to each contact (required by DB)
+        const contactsWithSource = filterResult.passed.map(contact => ({
+            ...contact,
+            sourceUrl: contact.sourceUrl || jobContext.sourceUrl || flow1Data.sourceUrl || 'unknown'
+        }));
+        
         // Write to DB (single transaction)
-        const dbResult = await this.writeToDatabase(jobId, organizerId, filterResult.passed);
+        const dbResult = await this.writeToDatabase(jobId, organizerId, contactsWithSource);
         
         // Clear temp storage
         await this.storage.clearFlowResults(jobId);
