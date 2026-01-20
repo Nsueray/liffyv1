@@ -2,6 +2,9 @@ const express = require('express');
 const db = require('../db');
 const jwt = require('jsonwebtoken');
 const { validateJobId, validateResultId } = require('../utils/validation');
+const { UnifiedContact } = require('../services/superMiner/types/UnifiedContact');
+const { validateContacts } = require('../services/validators/resultValidator');
+const { deduplicate } = require('../services/validators/deduplicator');
 
 const router = express.Router();
 
@@ -109,7 +112,6 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
   try {
     await client.query('BEGIN');
 
-    // 1) Get job to ensure it exists and get organizer_id
     let jobRes;
     if (req.is_manual_miner) {
       jobRes = await client.query(
@@ -134,15 +136,71 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
     const job = jobRes.rows[0];
     const organizerId = job.organizer_id;
 
-    // 2) Insert results into mining_results
+    // ===== CENTRAL EDIT PIPELINE =====
+
+    // Step 1: Convert raw miner results to plain objects for validator
+    const plainContacts = results.map(r => ({
+      email: r.email || (r.emails && r.emails[0]),
+      name: r.contactName || r.contact_name || r.name,
+      company: r.companyName || r.company_name || r.company,
+      phone: r.phone,
+      website: r.website,
+      country: r.country,
+      city: r.city,
+      title: r.jobTitle || r.job_title || r.title,
+      address: r.address,
+      _raw: r
+    }));
+
+    // Step 2: Validate contacts (plain objects)
+    const validationResult = validateContacts(plainContacts);
+
+    // Step 3: Prepare plain objects for deduplicator (no _raw, no _unified)
+    const contactsForDedup = validationResult.valid.map(v => ({
+      email: v.email,
+      name: v.name,
+      company: v.company,
+      phone: v.phone,
+      website: v.website,
+      country: v.country,
+      city: v.city,
+      title: v.title,
+      address: v.address,
+      _raw: v._raw
+    }));
+
+    // Step 4: Deduplicate (plain objects)
+    const dedupeResult = deduplicate(contactsForDedup);
+
+    // Step 5: Convert final plain objects to UnifiedContact (ONCE)
+    const finalContacts = dedupeResult.contacts.map(c => {
+      const raw = c._raw || {};
+      const source = raw.source || (req.is_manual_miner ? 'manual' : 'import');
+      
+      return UnifiedContact.fromLegacy({
+        email: c.email,
+        contactName: c.name,
+        companyName: c.company,
+        phone: c.phone,
+        website: c.website,
+        country: c.country,
+        city: c.city,
+        jobTitle: c.title,
+        address: c.address,
+        emails: raw.emails,
+        sourceUrl: raw.sourceUrl || raw.source_url || raw.url,
+        confidence: raw.confidence || raw.confidence_score,
+        evidence: raw.evidence,
+        raw: raw
+      }, source);
+    });
+
+    // Step 6: Convert to DB format and insert
     let totalEmails = 0;
 
-    for (const r of results) {
-      const emails = Array.isArray(r.emails)
-        ? r.emails.filter((e) => typeof e === 'string')
-        : [];
-
-      totalEmails += emails.length;
+    for (const uc of finalContacts) {
+      const dbRow = uc.toDBFormat(jobId, organizerId);
+      totalEmails += dbRow.emails.length;
 
       await client.query(
         `
@@ -155,31 +213,39 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
           job_title,
           phone,
           country,
+          city,
+          address,
           website,
           emails,
+          confidence_score,
           raw
         )
         VALUES (
-          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
         )
         `,
         [
-          jobId,
-          organizerId,
-          r.url || '',
-          r.companyName || null,
-          r.contactName || null,
-          r.jobTitle || null,
-          r.phone || null,
-          r.country || null,
-          r.website || null,
-          emails,
-          r, // raw: full meta object
+          dbRow.job_id,
+          dbRow.organizer_id,
+          dbRow.source_url || '',
+          dbRow.company_name,
+          dbRow.contact_name,
+          dbRow.job_title,
+          dbRow.phone,
+          dbRow.country,
+          dbRow.city,
+          dbRow.address,
+          dbRow.website,
+          dbRow.emails,
+          dbRow.confidence_score,
+          dbRow.raw
         ]
       );
     }
 
-    const totalFound = results.length;
+    // ===== END CENTRAL EDIT PIPELINE =====
+
+    const totalFound = finalContacts.length;
     const statsPayload = {
       ...(summary || {}),
       total_found: totalFound,
@@ -187,7 +253,6 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
       saved_at: new Date().toISOString(),
     };
 
-    // 3) Update mining_jobs aggregate fields
     const updateRes = await client.query(
       `
       UPDATE public.mining_jobs
