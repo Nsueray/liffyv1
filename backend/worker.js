@@ -3,11 +3,9 @@ const { sendEmail } = require("./mailer");
 const { processMiningJob } = require("./services/miningService");
 const { runScheduler } = require("./services/campaignScheduler");
 
-// ============================================
-// CLASS A (HARD SITE) PROTECTION
-// ============================================
-// Bu siteler ASLA SuperMiner kullanmaz.
-// Deterministik legacy miner ZORUNLUDUR.
+/* =========================================================
+   HARD SITE (MANUAL-FIRST) PROTECTION
+   ========================================================= */
 const HARD_SITE_HOSTS = [
   "big5construct",
   "big5global",
@@ -21,7 +19,7 @@ const HARD_SITE_HOSTS = [
 ];
 
 function isHardSite(url) {
-  if (!url || typeof url !== "string") return false;
+  if (!url) return false;
   try {
     const u = new URL(url.toLowerCase());
     return HARD_SITE_HOSTS.some(h => u.hostname.includes(h));
@@ -30,9 +28,9 @@ function isHardSite(url) {
   }
 }
 
-// ============================================
-// SUPERMINER INTEGRATION (v3.1)
-// ============================================
+/* =========================================================
+   SUPERMINER INTEGRATION (UNCHANGED)
+   ========================================================= */
 let superMiner = null;
 let superMinerInitialized = false;
 
@@ -41,87 +39,54 @@ async function initSuperMiner() {
     superMiner = require("./services/superMiner");
 
     if (!superMiner.SUPERMINER_ENABLED) {
-      console.log("[Worker] SuperMiner DISABLED - using legacy system");
+      console.log("[Worker] SuperMiner DISABLED");
       return false;
     }
-
-    console.log(`[Worker] SuperMiner v${superMiner.VERSION} - Initializing...`);
 
     const result = await superMiner.initializeSuperMiner(db);
-
     if (result.success) {
       superMinerInitialized = true;
-      console.log(`[Worker] ✅ SuperMiner initialized (mode: ${result.mode})`);
+      console.log("[Worker] SuperMiner initialized");
       return true;
-    } else {
-      console.error("[Worker] ❌ SuperMiner init failed:", result.error);
-      return false;
     }
-  } catch (err) {
-    console.error("[Worker] ❌ SuperMiner load error:", err.message);
-    return false;
+  } catch (e) {
+    console.error("[Worker] SuperMiner init error:", e.message);
   }
+  return false;
 }
 
 function shouldUseSuperMiner(job) {
-  // 1️⃣ Hard site → ASLA SuperMiner
   if (isHardSite(job.input)) {
-    console.log("[Worker] 🔒 HARD SITE detected – forcing LEGACY miner");
+    console.log("[Worker] 🔒 HARD SITE → legacy + manual only");
     return false;
   }
-
-  // 2️⃣ Feature flag & init
   if (!superMiner || !superMiner.SUPERMINER_ENABLED || !superMinerInitialized) {
     return false;
   }
-
-  // 3️⃣ Sadece URL job’ları
-  if (job.type !== "url") {
-    return false;
-  }
-
-  // 4️⃣ Explicit opt-out
-  if (job.config?.use_superminer === false) {
-    return false;
-  }
-
-  // Default: SuperMiner serbest
+  if (job.type !== "url") return false;
+  if (job.config?.use_superminer === false) return false;
   return true;
 }
-// ============================================
 
+/* =========================================================
+   CONSTANTS
+   ========================================================= */
 const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 30000;
 const CAMPAIGN_SCHEDULER_INTERVAL_MS = 10000;
 const CAMPAIGN_SENDER_INTERVAL_MS = 3000;
 const EMAIL_BATCH_SIZE = 5;
 
-/* ======================
+/* =========================================================
    HEARTBEAT
-====================== */
+   ========================================================= */
 setInterval(() => {
   console.log("💓 Worker heartbeat – alive");
 }, HEARTBEAT_INTERVAL_MS);
 
-/* ======================
-   SIGNAL HANDLING
-====================== */
-process.on("SIGTERM", async () => {
-  console.log("⚠️ SIGTERM received – shutting down gracefully");
-  if (superMiner && superMinerInitialized) {
-    try {
-      await superMiner.shutdown();
-      console.log("[Worker] SuperMiner shutdown complete");
-    } catch (err) {
-      console.error("[Worker] SuperMiner shutdown error:", err.message);
-    }
-  }
-});
-process.on("SIGINT", () => console.log("⚠️ SIGINT received – ignored"));
-
-/* ======================
-   CAMPAIGN SCHEDULER
-====================== */
+/* =========================================================
+   CAMPAIGN SCHEDULER (ORIGINAL – RESTORED)
+   ========================================================= */
 async function startCampaignScheduler() {
   while (true) {
     try {
@@ -133,11 +98,54 @@ async function startCampaignScheduler() {
   }
 }
 
-/* ======================
-   CAMPAIGN EMAIL SENDER
-====================== */
+/* =========================================================
+   CAMPAIGN EMAIL SENDER (ORIGINAL – RESTORED)
+   ========================================================= */
+async function processSendingCampaigns() {
+  const client = await db.connect();
+  try {
+    const res = await client.query(`
+      SELECT c.*, t.subject, t.body_html, t.body_text
+      FROM campaigns c
+      JOIN email_templates t ON c.template_id = t.id
+      WHERE c.status = 'sending'
+      LIMIT 5
+    `);
+
+    for (const campaign of res.rows) {
+      const recipients = await client.query(`
+        SELECT * FROM campaign_recipients
+        WHERE campaign_id = $1 AND status='pending'
+        LIMIT $2
+        FOR UPDATE SKIP LOCKED
+      `, [campaign.id, EMAIL_BATCH_SIZE]);
+
+      for (const r of recipients.rows) {
+        try {
+          await sendEmail({
+            to: r.email,
+            subject: campaign.subject,
+            html: campaign.body_html,
+            text: campaign.body_text
+          });
+          await client.query(
+            `UPDATE campaign_recipients SET status='sent', sent_at=NOW() WHERE id=$1`,
+            [r.id]
+          );
+        } catch (e) {
+          await client.query(
+            `UPDATE campaign_recipients SET status='failed', last_error=$2 WHERE id=$1`,
+            [r.id, e.message]
+          );
+        }
+      }
+    }
+  } finally {
+    client.release();
+  }
+}
+
 async function startCampaignSender() {
-  console.log("📧 Campaign Email Sender started");
   while (true) {
     try {
       await processSendingCampaigns();
@@ -148,83 +156,66 @@ async function startCampaignSender() {
   }
 }
 
-/* ======================
+/* =========================================================
    WORKER LOOP
-====================== */
+   ========================================================= */
 async function startWorker() {
-  console.log("🧪 Liffy Worker V12.4 (Hard-Site Safe)");
+  console.log("🧪 Liffy Worker (STABLE + MANUAL-FIRST)");
 
   await initSuperMiner();
-
-  startCampaignScheduler().catch(() => {});
-  startCampaignSender().catch(() => {});
+  startCampaignScheduler();
+  startCampaignSender();
 
   while (true) {
-    try {
-      await processNextJob();
-    } catch (err) {
-      console.error("❌ Worker loop error:", err);
-    }
+    await processNextJob();
     await sleep(POLL_INTERVAL_MS);
   }
 }
 
 async function processNextJob() {
   const client = await db.connect();
-  let currentJobId = null;
+  let job;
 
   try {
     await client.query("BEGIN");
-
     const res = await client.query(`
-      SELECT *
-      FROM mining_jobs
-      WHERE status = 'pending'
-      ORDER BY created_at ASC
+      SELECT * FROM mining_jobs
+      WHERE status='pending'
       LIMIT 1
       FOR UPDATE SKIP LOCKED
     `);
-
-    if (res.rows.length === 0) {
+    if (!res.rows.length) {
       await client.query("COMMIT");
       return;
     }
-
-    const job = res.rows[0];
-    currentJobId = job.id;
-
-    console.log("\n==============================");
-    console.log(`⛏️ JOB PICKED: ${job.id}`);
-    console.log(`📂 TYPE: ${job.type}`);
-    console.log(`🌐 TARGET: ${job.input}`);
-    console.log(`🔧 ENGINE: ${shouldUseSuperMiner(job) ? "SuperMiner" : "Legacy"}`);
-    console.log("==============================");
+    job = res.rows[0];
 
     await client.query(
-      `UPDATE mining_jobs
-       SET status = 'running', started_at = NOW(), error = NULL
-       WHERE id = $1`,
+      `UPDATE mining_jobs SET status='running', started_at=NOW() WHERE id=$1`,
       [job.id]
     );
-
     await client.query("COMMIT");
 
-    if (shouldUseSuperMiner(job)) {
-      await superMiner.runMiningJob(job, db);
-    } else {
-      await processMiningJob(job);
+    try {
+      if (shouldUseSuperMiner(job)) {
+        await superMiner.runMiningJob(job, db);
+      } else {
+        await processMiningJob(job);
+      }
+    } catch (e) {
+      if (e.message.includes("BLOCK")) {
+        await triggerManualAssist(job);
+      } else {
+        throw e;
+      }
     }
-
-    console.log("✅ Worker: Job execution finished normally");
 
   } catch (err) {
     await client.query("ROLLBACK");
-    console.error("❌ Worker Job Failed:", err.message);
-
-    if (currentJobId) {
+    if (job) {
       await db.query(
-        "UPDATE mining_jobs SET status='failed', error=$1 WHERE id=$2",
-        [err.message, currentJobId]
+        `UPDATE mining_jobs SET status='failed', error=$2 WHERE id=$1`,
+        [job.id, err.message]
       );
     }
   } finally {
@@ -232,6 +223,34 @@ async function processNextJob() {
   }
 }
 
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+/* =========================================================
+   MANUAL ASSIST (ORIGINAL BEHAVIOR)
+   ========================================================= */
+async function triggerManualAssist(job) {
+  await db.query(
+    `UPDATE mining_jobs
+     SET manual_required=true, manual_reason='blocked_source'
+     WHERE id=$1`,
+    [job.id]
+  );
 
-startWorker().catch(err => console.error("💥 Fatal error:", err));
+  const token = process.env.MANUAL_MINER_TOKEN;
+  if (!token) return;
+
+  const cmd = `
+node mine.js \\
+  --job-id ${job.id} \\
+  --api https://api.liffy.app/api \\
+  --token ${token} \\
+  --input "${job.input}"
+`;
+
+  await sendEmail({
+    to: "suer@elan-expo.com",
+    subject: `Manual Mining Required for Job ${job.id}`,
+    text: cmd
+  });
+}
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+startWorker();
