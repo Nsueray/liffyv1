@@ -197,11 +197,27 @@ async function processNextJob() {
     await client.query("COMMIT");
 
     try {
-      if (shouldUseSuperMiner(job)) {
-        await superMiner.runMiningJob(job, db);
-      } else {
-        await processMiningJob(job);
-      }
+      let legacyResult = null;
+
+if (shouldUseSuperMiner(job)) {
+  await superMiner.runMiningJob(job, db);
+} else {
+  legacyResult = await processMiningJob(job);
+
+  // 🔴 CRITICAL: HARD SITE + ZERO RESULT = BLOCK
+  if (
+    isHardSite(job.input) &&
+    (
+      legacyResult?.contacts?.length === 0 ||
+      legacyResult?.total_found === 0 ||
+      legacyResult?.total_emails_raw === 0
+    )
+  ) {
+    console.log("🚫 HARD SITE returned 0 results – treating as BLOCK, triggering MANUAL");
+    await triggerManualAssist(job);
+    return;
+  }
+}
     } catch (e) {
       if (e.message.includes("BLOCK")) {
         await triggerManualAssist(job);
