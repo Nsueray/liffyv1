@@ -125,7 +125,7 @@ class FlowOrchestrator {
                         try {
                             const aiPromise = aiMiner.mine(job);
                             const timeoutPromise = new Promise((_, reject) => 
-                                setTimeout(() => reject(new Error('AI Miner timeout (60s)')), 60000)
+                                setTimeout(() => reject(new Error('AI Miner timeout (180s)')), 180000)
                             );
                             
                             const aiResult = await Promise.race([aiPromise, timeoutPromise]);
