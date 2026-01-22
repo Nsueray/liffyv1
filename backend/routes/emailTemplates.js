@@ -93,3 +93,67 @@ router.get('/:id', authRequired, async (req, res) => {
 });
 
 module.exports = router;
+
+// PUT /api/email-templates/:id - Update template
+router.put('/:id', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const templateId = req.params.id;
+    const { name, subject, body_html, body_text } = req.body;
+
+    if (!name || !subject || !body_html) {
+      return res.status(400).json({ error: 'Name, subject, and body_html are required' });
+    }
+
+    // Check template exists and belongs to organizer
+    const existing = await db.query(
+      'SELECT id FROM email_templates WHERE id = $1 AND organizer_id = $2',
+      [templateId, organizerId]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+
+    const result = await db.query(
+      `UPDATE email_templates 
+       SET name = $1, subject = $2, body_html = $3, body_text = $4, updated_at = NOW()
+       WHERE id = $5 AND organizer_id = $6
+       RETURNING id, name, subject, body_html, body_text, created_at, updated_at`,
+      [name.trim(), subject.trim(), body_html, body_text || null, templateId, organizerId]
+    );
+
+    res.json({ template: result.rows[0] });
+  } catch (err) {
+    console.error('PUT /api/email-templates/:id error:', err);
+    res.status(500).json({ error: 'Failed to update template' });
+  }
+});
+
+// DELETE /api/email-templates/:id - Delete template
+router.delete('/:id', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const templateId = req.params.id;
+
+    // Check template exists and belongs to organizer
+    const existing = await db.query(
+      'SELECT id FROM email_templates WHERE id = $1 AND organizer_id = $2',
+      [templateId, organizerId]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+
+    await db.query(
+      'DELETE FROM email_templates WHERE id = $1 AND organizer_id = $2',
+      [templateId, organizerId]
+    );
+
+    res.json({ success: true, deleted_id: templateId });
+  } catch (err) {
+    console.error('DELETE /api/email-templates/:id error:', err);
+    res.status(500).json({ error: 'Failed to delete template' });
+  }
+});
