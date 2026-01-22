@@ -30,79 +30,50 @@ function authRequired(req, res, next) {
   }
 }
 
-
-
 /**
- * Helper: Şablon Değişkeni Değiştirici
- * 
- * Desteklenen Placeholder'lar:
- * {{first_name}}   -> İlk isim
- * {{last_name}}    -> Soyisim  
- * {{company_name}} -> Şirket adı
- * {{email}}        -> Email adresi
- * {{country}}      -> Ülke
- * {{position}}     -> Pozisyon/Ünvan
- * {{website}}      -> Website
- * {{tag}}          -> Tag (sektör vb.)
+ * Helper: Basit Şablon Değişkeni Değiştirici
+ * {{name}} -> Alıcı İsmi
+ * {{company}} -> Alıcı Şirketi
  * {{unsubscribe_url}} -> Unsubscribe link
  */
 function processTemplate(text, recipient, extras = {}) {
   if (!text) return "";
   
   // Recipient verilerini hazırla
-  const fullName = recipient.name || "";
-  const nameParts = fullName.trim().split(/\s+/);
-  const firstName = nameParts[0] || "";
-  const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : "";
+  const name = recipient.name || "";
+  let company = "";
   
   // Meta verisi JSONB olduğu için obje olarak gelebilir
-  let meta = {};
   if (recipient.meta) {
-    try {
-      meta = typeof recipient.meta === 'string' 
-        ? JSON.parse(recipient.meta) 
-        : recipient.meta;
-    } catch (e) {
-      meta = {};
-    }
+      // Eğer meta string ise parse etmeye çalış, değilse direkt kullan
+      const metaObj = typeof recipient.meta === 'string' 
+          ? JSON.parse(recipient.meta) 
+          : recipient.meta;
+          
+      company = metaObj.company || metaObj.company_name || "";
   }
-  
-  // Değerleri hazırla (hepsi güvenli, null ise boş string)
-  const companyName = meta.company || meta.company_name || "";
-  const country = meta.country || "";
-  const position = meta.position || meta.job_title || meta.title || "";
-  const website = meta.website || "";
-  const tag = Array.isArray(meta.tags) ? (meta.tags[0] || "") : (meta.tag || "");
-  const email = recipient.email || "";
 
   // Değiştirme işlemi (Case insensitive)
   let processed = text;
   
-  // İsim placeholder'ları
-  processed = processed.replace(/{{first_name}}/gi, firstName);
-  processed = processed.replace(/{{last_name}}/gi, lastName);
-  processed = processed.replace(/{{name}}/gi, fullName); // Geriye uyumluluk
+  // {{name}} veya {{Name}} değişimi
+  processed = processed.replace(/{{name}}/gi, name);
+  processed = processed.replace(/{{first_name}}/gi, name.split(' ')[0]); // Sadece ilk isim
   
-  // Şirket
-  processed = processed.replace(/{{company_name}}/gi, companyName);
-  processed = processed.replace(/{{company}}/gi, companyName); // Geriye uyumluluk
-  
-  // Diğer alanlar
-  processed = processed.replace(/{{email}}/gi, email);
-  processed = processed.replace(/{{country}}/gi, country);
-  processed = processed.replace(/{{position}}/gi, position);
-  processed = processed.replace(/{{website}}/gi, website);
-  processed = processed.replace(/{{tag}}/gi, tag);
+  // {{company}} değişimi
+  processed = processed.replace(/{{company}}/gi, company);
+  processed = processed.replace(/{{company_name}}/gi, company);
 
-  // Unsubscribe
+  // {{unsubscribe_url}} değişimi
   if (extras.unsubscribe_url) {
     processed = processed.replace(/{{unsubscribe_url}}/gi, extras.unsubscribe_url);
     processed = processed.replace(/{{unsubscribe_link}}/gi, extras.unsubscribe_url);
   }
 
-  return processed;
-}
+  // {{email}} değişimi
+  processed = processed.replace(/{{email}}/gi, recipient.email || "");
 
+  return processed;
 }
 
 // POST /api/campaigns/:id/send-batch
