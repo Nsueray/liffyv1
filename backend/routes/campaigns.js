@@ -433,7 +433,7 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
           p.prospect_id,
           p.email,
           p.name || null,
-          p.meta || null
+          JSON.stringify({ ...((typeof p.meta === "string" ? JSON.parse(p.meta || "{}") : p.meta) || {}), company: p.company, country: p.country, position: p.sector, company_name: p.company })
         );
       });
 
