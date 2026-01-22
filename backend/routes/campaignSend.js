@@ -103,8 +103,6 @@ function processTemplate(text, recipient, extras = {}) {
   return processed;
 }
 
-}
-
 // POST /api/campaigns/:id/send-batch
 // Bu endpoint Worker veya Frontend tarafından periyodik çağrılır
 router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
