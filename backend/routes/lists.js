@@ -509,3 +509,197 @@ router.delete('/:id/members/:prospectId', authRequired, async (req, res) => {
 });
 
 module.exports = router;
+
+// ============================================
+// MANUAL & IMPORT ENDPOINTS (Added for direct list creation)
+// ============================================
+
+// POST /api/lists/:id/add-manual - Add single prospect manually
+router.post('/:id/add-manual', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const listId = req.params.id;
+    const { email, name, company, country } = req.body;
+
+    if (!email || typeof email !== 'string' || !email.includes('@')) {
+      return res.status(400).json({ error: 'Valid email is required' });
+    }
+
+    // Check list exists and belongs to organizer
+    const listCheck = await db.query(
+      'SELECT id FROM lists WHERE id = $1 AND organizer_id = $2',
+      [listId, organizerId]
+    );
+
+    if (listCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'List not found' });
+    }
+
+    const trimmedEmail = email.trim().toLowerCase();
+
+    // Check if prospect already exists
+    let prospectId;
+    const existingProspect = await db.query(
+      'SELECT id FROM prospects WHERE organizer_id = $1 AND LOWER(email) = $2',
+      [organizerId, trimmedEmail]
+    );
+
+    if (existingProspect.rows.length > 0) {
+      prospectId = existingProspect.rows[0].id;
+    } else {
+      // Create new prospect
+      const prospectResult = await db.query(
+        `INSERT INTO prospects (organizer_id, email, name, company, country, source_type, source_ref)
+         VALUES ($1, $2, $3, $4, $5, 'manual', 'Manual entry')
+         RETURNING id`,
+        [organizerId, trimmedEmail, name?.trim() || null, company?.trim() || null, country?.trim() || null]
+      );
+      prospectId = prospectResult.rows[0].id;
+    }
+
+    // Add to list (ignore if already exists)
+    await db.query(
+      `INSERT INTO list_members (list_id, prospect_id, organizer_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (list_id, prospect_id) DO NOTHING`,
+      [listId, prospectId, organizerId]
+    );
+
+    res.status(201).json({ success: true, prospect_id: prospectId });
+  } catch (err) {
+    console.error('POST /api/lists/:id/add-manual error:', err);
+    res.status(500).json({ error: err.message || 'Failed to add prospect' });
+  }
+});
+
+// POST /api/lists/:id/import-bulk - Import multiple prospects from CSV/Excel data
+router.post('/:id/import-bulk', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const listId = req.params.id;
+    const { prospects } = req.body;
+
+    if (!prospects || !Array.isArray(prospects) || prospects.length === 0) {
+      return res.status(400).json({ error: 'Prospects array is required' });
+    }
+
+    if (prospects.length > 5000) {
+      return res.status(400).json({ error: 'Maximum 5000 prospects per import' });
+    }
+
+    // Check list exists
+    const listCheck = await db.query(
+      'SELECT id FROM lists WHERE id = $1 AND organizer_id = $2',
+      [listId, organizerId]
+    );
+
+    if (listCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'List not found' });
+    }
+
+    let imported = 0;
+    let skipped = 0;
+    let errors = [];
+
+    for (const p of prospects) {
+      try {
+        if (!p.email || typeof p.email !== 'string' || !p.email.includes('@')) {
+          skipped++;
+          continue;
+        }
+
+        const trimmedEmail = p.email.trim().toLowerCase();
+
+        // Check if prospect exists
+        let prospectId;
+        const existingProspect = await db.query(
+          'SELECT id FROM prospects WHERE organizer_id = $1 AND LOWER(email) = $2',
+          [organizerId, trimmedEmail]
+        );
+
+        if (existingProspect.rows.length > 0) {
+          prospectId = existingProspect.rows[0].id;
+        } else {
+          // Create new prospect
+          const prospectResult = await db.query(
+            `INSERT INTO prospects (organizer_id, email, name, company, country, source_type, source_ref)
+             VALUES ($1, $2, $3, $4, $5, 'import', 'Bulk import')
+             RETURNING id`,
+            [
+              organizerId,
+              trimmedEmail,
+              p.name?.trim() || null,
+              p.company?.trim() || null,
+              p.country?.trim() || null
+            ]
+          );
+          prospectId = prospectResult.rows[0].id;
+        }
+
+        // Add to list
+        await db.query(
+          `INSERT INTO list_members (list_id, prospect_id, organizer_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (list_id, prospect_id) DO NOTHING`,
+          [listId, prospectId, organizerId]
+        );
+
+        imported++;
+      } catch (rowErr) {
+        errors.push({ email: p.email, error: rowErr.message });
+        skipped++;
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      imported,
+      skipped,
+      total: prospects.length,
+      errors: errors.slice(0, 10) // Return first 10 errors only
+    });
+  } catch (err) {
+    console.error('POST /api/lists/:id/import-bulk error:', err);
+    res.status(500).json({ error: err.message || 'Failed to import prospects' });
+  }
+});
+
+// POST /api/lists/create-empty - Create empty list for manual/import use
+router.post('/create-empty', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const { name } = req.body;
+
+    if (!name || typeof name !== 'string' || !name.trim()) {
+      return res.status(400).json({ error: 'List name is required' });
+    }
+
+    const trimmedName = name.trim();
+
+    const existing = await db.query(
+      'SELECT id FROM lists WHERE organizer_id = $1 AND LOWER(name) = LOWER($2)',
+      [organizerId, trimmedName]
+    );
+
+    if (existing.rows.length > 0) {
+      return res.status(409).json({ error: 'A list with this name already exists' });
+    }
+
+    const result = await db.query(
+      `INSERT INTO lists (organizer_id, name, type) VALUES ($1, $2, 'manual') RETURNING id, name, created_at`,
+      [organizerId, trimmedName]
+    );
+
+    res.status(201).json({
+      id: result.rows[0].id,
+      name: result.rows[0].name,
+      created_at: result.rows[0].created_at,
+      total_leads: 0,
+      verified_count: 0,
+      unverified_count: 0
+    });
+  } catch (err) {
+    console.error('POST /api/lists/create-empty error:', err);
+    res.status(500).json({ error: err.message || 'Failed to create list' });
+  }
+});
