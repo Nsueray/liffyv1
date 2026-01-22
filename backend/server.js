@@ -21,6 +21,7 @@ const leadsRouter = require('./routes/leads');
 const listsRouter = require('./routes/lists');
 const settingsRouter = require('./routes/settings');
 const webhooksRouter = require('./routes/webhooks');
+const statsRouter = require('./routes/stats');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -60,6 +61,7 @@ app.use('/api/lists', listsRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/campaigns', campaignsRouter);
 app.use(webhooksRouter);
+app.use(statsRouter);
 
 // 404 fallback (JSON)
 app.use((req, res) => {
