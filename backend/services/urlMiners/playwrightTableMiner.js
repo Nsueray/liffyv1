@@ -95,7 +95,7 @@ async function parseTableData(page) {
             const rows = table.querySelectorAll('tr');
             for (const row of rows) {
                 const cells = row.querySelectorAll('td, th');
-                if (cells.length >= 2) {
+                if (cells && cells.length >= 2) {
                     const cellTexts = Array.from(cells).map(c => c.innerHTML);
                     results.push({
                         type: 'table_row',
@@ -117,7 +117,7 @@ async function parseTableData(page) {
         for (const selector of cardSelectors) {
             const cards = document.querySelectorAll(selector);
             for (const card of cards) {
-                if (card.innerText.length > 20) {
+                if (card && card.innerText && card.innerText.length > 20) {
                     results.push({
                         type: 'card',
                         html: card.innerHTML,
