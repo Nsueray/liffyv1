@@ -25,7 +25,6 @@ function authRequired(req, res, next) {
 router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    // DÜZELTME: 'updated_at' silindi
     const result = await pool.query(
       `SELECT id, name, subject, body_html, body_text, created_at
        FROM email_templates
@@ -51,7 +50,6 @@ router.post('/', authRequired, async (req, res) => {
     if (!subject || !subject.trim()) return res.status(400).json({ error: 'Subject is required' });
     if (!body_html || !body_html.trim()) return res.status(400).json({ error: 'Body HTML is required' });
 
-    // DÜZELTME: 'updated_at' insert ve returning kısımlarından silindi
     const result = await pool.query(
       `INSERT INTO email_templates
        (organizer_id, name, subject, body_html, body_text, created_at)
@@ -73,7 +71,6 @@ router.get('/:id', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
     const templateId = req.params.id;
 
-    // DÜZELTME: 'updated_at' silindi
     const result = await pool.query(
       `SELECT id, name, subject, body_html, body_text, created_at
        FROM email_templates
@@ -92,8 +89,6 @@ router.get('/:id', authRequired, async (req, res) => {
   }
 });
 
-module.exports = router;
-
 // PUT /api/email-templates/:id - Update template
 router.put('/:id', authRequired, async (req, res) => {
   try {
@@ -106,7 +101,7 @@ router.put('/:id', authRequired, async (req, res) => {
     }
 
     // Check template exists and belongs to organizer
-    const existing = await db.query(
+    const existing = await pool.query(
       'SELECT id FROM email_templates WHERE id = $1 AND organizer_id = $2',
       [templateId, organizerId]
     );
@@ -115,11 +110,11 @@ router.put('/:id', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'Template not found' });
     }
 
-    const result = await db.query(
+    const result = await pool.query(
       `UPDATE email_templates 
-       SET name = $1, subject = $2, body_html = $3, body_text = $4, updated_at = NOW()
+       SET name = $1, subject = $2, body_html = $3, body_text = $4
        WHERE id = $5 AND organizer_id = $6
-       RETURNING id, name, subject, body_html, body_text, created_at, updated_at`,
+       RETURNING id, name, subject, body_html, body_text, created_at`,
       [name.trim(), subject.trim(), body_html, body_text || null, templateId, organizerId]
     );
 
@@ -137,7 +132,7 @@ router.delete('/:id', authRequired, async (req, res) => {
     const templateId = req.params.id;
 
     // Check template exists and belongs to organizer
-    const existing = await db.query(
+    const existing = await pool.query(
       'SELECT id FROM email_templates WHERE id = $1 AND organizer_id = $2',
       [templateId, organizerId]
     );
@@ -146,7 +141,7 @@ router.delete('/:id', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'Template not found' });
     }
 
-    await db.query(
+    await pool.query(
       'DELETE FROM email_templates WHERE id = $1 AND organizer_id = $2',
       [templateId, organizerId]
     );
@@ -157,3 +152,6 @@ router.delete('/:id', authRequired, async (req, res) => {
     res.status(500).json({ error: 'Failed to delete template' });
   }
 });
+
+// IMPORTANT: module.exports must be at the END of the file
+module.exports = router;
