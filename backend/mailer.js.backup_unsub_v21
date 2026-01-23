@@ -22,8 +22,6 @@ function htmlToPlainText(html) {
 
 /**
  * Sends email via SendGrid.
- * 
- * UPDATED: Now supports custom headers including List-Unsubscribe (RFC 8058)
  */
 const sendEmail = async ({
   to,
@@ -37,8 +35,7 @@ const sendEmail = async ({
   replyTo,
   reply_to,
   sendgrid_api_key,
-  sendgridApiKey,
-  headers  // NEW: Custom headers support
+  sendgridApiKey
 }) => {
   try {
     const apiKey = sendgrid_api_key || sendgridApiKey || config.SENDGRID_API_KEY;
@@ -86,45 +83,11 @@ const sendEmail = async ({
       html: finalHtml
     };
 
-    // Add reply-to if provided
     if (replyToEmail) {
       msg.replyTo = replyToEmail;
     }
 
-    // ============================================================
-    // LIST-UNSUBSCRIBE HEADERS (RFC 8058)
-    // ============================================================
-    // These headers enable one-click unsubscribe in Gmail/Outlook
-    // They are INVISIBLE in the email body but improve deliverability
-    // and provide a safe unsubscribe mechanism
-    // ============================================================
-    if (headers && typeof headers === 'object') {
-      msg.headers = {};
-      
-      // Add List-Unsubscribe header
-      if (headers['List-Unsubscribe']) {
-        msg.headers['List-Unsubscribe'] = headers['List-Unsubscribe'];
-      }
-      
-      // Add List-Unsubscribe-Post header (enables one-click)
-      if (headers['List-Unsubscribe-Post']) {
-        msg.headers['List-Unsubscribe-Post'] = headers['List-Unsubscribe-Post'];
-      }
-      
-      // Add any other custom headers
-      for (const [key, value] of Object.entries(headers)) {
-        if (key !== 'List-Unsubscribe' && key !== 'List-Unsubscribe-Post') {
-          msg.headers[key] = value;
-        }
-      }
-    }
-
     console.log(`📧 Sending email to ${to} from ${senderEmail}...`);
-    
-    // Log if List-Unsubscribe is present (for debugging)
-    if (msg.headers && msg.headers['List-Unsubscribe']) {
-      console.log(`   📋 List-Unsubscribe header included`);
-    }
 
     const response = await sgMail.send(msg);
 
