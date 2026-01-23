@@ -147,15 +147,24 @@ async function startCampaignScheduler() {
 }
 
 /* =========================================================
-   CAMPAIGN EMAIL SENDER (ORIGINAL – RESTORED)
+   CAMPAIGN EMAIL SENDER (FIXED - with sender info)
    ========================================================= */
 async function processSendingCampaigns() {
   const client = await db.connect();
   try {
+    // JOIN sender_identities to get from_email and from_name
     const res = await client.query(`
-      SELECT c.*, t.subject, t.body_html, t.body_text
+      SELECT 
+        c.*, 
+        t.subject, 
+        t.body_html, 
+        t.body_text,
+        s.email as sender_email,
+        s.name as sender_name,
+        s.sendgrid_api_key
       FROM campaigns c
       JOIN email_templates t ON c.template_id = t.id
+      LEFT JOIN sender_identities s ON c.sender_id = s.id
       WHERE c.status = 'sending'
       LIMIT 5
     `);
@@ -168,24 +177,46 @@ async function processSendingCampaigns() {
         FOR UPDATE SKIP LOCKED
       `, [campaign.id, EMAIL_BATCH_SIZE]);
 
+      console.log(`[Campaign ${campaign.id}] Processing ${recipients.rows.length} recipients`);
+
       for (const r of recipients.rows) {
         try {
-          await sendEmail({
+          const emailResult = await sendEmail({
             to: r.email,
             subject: processTemplate(campaign.subject, r),
             html: processTemplate(campaign.body_html, r),
-            text: processTemplate(campaign.body_text || "", r)
+            text: processTemplate(campaign.body_text || "", r),
+            fromEmail: campaign.sender_email,
+            fromName: campaign.sender_name,
+            sendgridApiKey: campaign.sendgrid_api_key
           });
+          
           await client.query(
             `UPDATE campaign_recipients SET status='sent', sent_at=NOW() WHERE id=$1`,
             [r.id]
           );
+          console.log(`✅ Email sent to ${r.email}`);
         } catch (e) {
           await client.query(
             `UPDATE campaign_recipients SET status='failed', last_error=$2 WHERE id=$1`,
             [r.id, e.message]
           );
+          console.error(`❌ Email failed for ${r.email}: ${e.message}`);
         }
+      }
+
+      // Check if campaign is complete
+      const remaining = await client.query(`
+        SELECT COUNT(*) as count FROM campaign_recipients 
+        WHERE campaign_id = $1 AND status = 'pending'
+      `, [campaign.id]);
+
+      if (parseInt(remaining.rows[0].count) === 0) {
+        await client.query(`
+          UPDATE campaigns SET status = 'completed', completed_at = NOW() 
+          WHERE id = $1
+        `, [campaign.id]);
+        console.log(`🎉 Campaign ${campaign.id} completed!`);
       }
     }
   } finally {
