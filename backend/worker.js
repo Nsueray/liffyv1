@@ -147,24 +147,26 @@ async function startCampaignScheduler() {
 }
 
 /* =========================================================
-   CAMPAIGN EMAIL SENDER (FIXED - with sender info)
+   CAMPAIGN EMAIL SENDER (FIXED - correct column names)
    ========================================================= */
 async function processSendingCampaigns() {
   const client = await db.connect();
   try {
-    // JOIN sender_identities to get from_email and from_name
+    // JOIN sender_identities (s) and organizers (o) for sender info + API key
     const res = await client.query(`
       SELECT 
         c.*, 
         t.subject, 
         t.body_html, 
         t.body_text,
-        s.email as sender_email,
-        s.name as sender_name,
-        s.sendgrid_api_key
+        s.from_email as sender_email,
+        s.from_name as sender_name,
+        s.reply_to as sender_reply_to,
+        o.sendgrid_api_key
       FROM campaigns c
       JOIN email_templates t ON c.template_id = t.id
       LEFT JOIN sender_identities s ON c.sender_id = s.id
+      LEFT JOIN organizers o ON c.organizer_id = o.id
       WHERE c.status = 'sending'
       LIMIT 5
     `);
@@ -181,13 +183,14 @@ async function processSendingCampaigns() {
 
       for (const r of recipients.rows) {
         try {
-          const emailResult = await sendEmail({
+          await sendEmail({
             to: r.email,
             subject: processTemplate(campaign.subject, r),
             html: processTemplate(campaign.body_html, r),
             text: processTemplate(campaign.body_text || "", r),
             fromEmail: campaign.sender_email,
             fromName: campaign.sender_name,
+            replyTo: campaign.sender_reply_to,
             sendgridApiKey: campaign.sendgrid_api_key
           });
           
