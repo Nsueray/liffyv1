@@ -212,6 +212,8 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
     let failCount = 0;
 
     for (const r of recipients) {
+        // DEBUG: Log recipient data
+        console.log("[CampaignSend] Recipient:", r.email, "Name:", r.name, "Meta:", JSON.stringify(r.meta));
       try {
         // Generate unsubscribe URL for this recipient
         const unsubscribe_url = getUnsubscribeUrl(r.email, organizer_id);
