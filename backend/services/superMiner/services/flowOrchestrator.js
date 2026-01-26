@@ -152,12 +152,20 @@ class FlowOrchestrator {
                         }
                         
                         if (step.normalizer === 'documentTextNormalizer') {
-                            const normalized = documentTextNormalizer.normalize(minerResult, job.input);
-                            minerResult.contacts = normalized.contacts || [];
-                            if (normalized.stats) {
-                                minerResult.normalizationStats = normalized.stats;
-                            }
-                        }
+    const normalized = documentTextNormalizer.normalize(minerResult, job.input);
+
+    // contacts (yeni sistem)
+    minerResult.contacts = normalized.contacts || [];
+
+    // 🔴 KRİTİK: legacy Aggregator uyumu için
+    minerResult.emails = (normalized.contacts || [])
+        .map(c => c.email)
+        .filter(Boolean);
+
+    if (normalized.stats) {
+        minerResult.normalizationStats = normalized.stats;
+    }
+}
                         
                         console.log(`[Flow1] Executed ${step.miner} (normalizer: ${step.normalizer})`);
                         
