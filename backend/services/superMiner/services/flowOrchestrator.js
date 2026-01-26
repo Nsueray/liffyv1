@@ -79,7 +79,7 @@ class FlowOrchestrator {
         }
         
         const miningMode = job.config?.mining_mode;
-        
+        console.log('[DEBUG][FLOW1] mining_mode =', miningMode);        
         // Full mode: build and run an execution plan when available.
         if (miningMode === 'full' && typeof buildExecutionPlan === 'function') {
             console.log('[Flow1] Full mode: building execution plan...');
