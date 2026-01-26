@@ -1,6 +1,7 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const db = require('../db');
+const { UnifiedContact } = require('./superMiner/types/UnifiedContact');
 
 const EMAIL_REGEX = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 const EXHIBITOR_HINT_REGEX = /(exhibitor|exhibitors|company|profile|stand)/i;
@@ -113,6 +114,7 @@ function extractDetailUrls($, rootUrl) {
  */
 async function runUrlMiningJob(jobId, organizerId) {
   const client = await db.connect();
+  let shouldUpdateJobStatus = true;
 
   try {
     // Load job
@@ -129,13 +131,17 @@ async function runUrlMiningJob(jobId, organizerId) {
       throw new Error(`Mining job type must be 'url', got '${job.type}'`);
     }
 
-    // Mark job as running
-    await client.query(
-      `UPDATE mining_jobs
-       SET status = 'running', started_at = NOW(), error = NULL
-       WHERE id = $1`,
-      [jobId]
-    );
+    shouldUpdateJobStatus = job.status !== 'running';
+
+    // Mark job as running (only if not already managed by upstream orchestrator)
+    if (shouldUpdateJobStatus) {
+      await client.query(
+        `UPDATE mining_jobs
+         SET status = 'running', started_at = NOW(), error = NULL
+         WHERE id = $1`,
+        [jobId]
+      );
+    }
 
     const rootUrl = job.input;
     let rootHtml;
@@ -218,6 +224,76 @@ async function runUrlMiningJob(jobId, organizerId) {
       company_guess: companyGuess,
       extra_companies: extraCompanies.slice(0, 100)
     };
+
+    // Unification step: write URL mining results into mining_results (single source of truth).
+    const unifiedContacts = allEmails.map((email) => UnifiedContact.fromLegacy({
+      email,
+      companyName: companyGuess || null,
+      website: rootUrl,
+      sourceUrl: rootUrl,
+      raw: {
+        source: 'httpBasicMiner',
+        company_guess: companyGuess || null,
+        extra_companies: extraCompanies.slice(0, 100),
+        source_url: rootUrl
+      }
+    }, 'httpBasicMiner'));
+
+    let miningResultsSaved = 0;
+    for (const contact of unifiedContacts) {
+      const dbRow = contact.toDBFormat(jobId, organizerId);
+      const primaryEmail = dbRow.emails?.[0];
+      if (!primaryEmail) continue;
+
+      const existing = await client.query(
+        'SELECT id FROM mining_results WHERE job_id = $1 AND $2 = ANY(emails)',
+        [jobId, primaryEmail.toLowerCase()]
+      );
+      if (existing.rows.length > 0) {
+        continue;
+      }
+
+      await client.query(
+        `
+        INSERT INTO mining_results (
+          job_id,
+          organizer_id,
+          source_url,
+          company_name,
+          contact_name,
+          job_title,
+          phone,
+          country,
+          city,
+          address,
+          website,
+          emails,
+          confidence_score,
+          raw
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14
+        )
+        `,
+        [
+          dbRow.job_id,
+          dbRow.organizer_id,
+          dbRow.source_url || '',
+          dbRow.company_name,
+          dbRow.contact_name,
+          dbRow.job_title,
+          dbRow.phone,
+          dbRow.country,
+          dbRow.city,
+          dbRow.address,
+          dbRow.website,
+          dbRow.emails,
+          dbRow.confidence_score,
+          dbRow.raw
+        ]
+      );
+      miningResultsSaved += 1;
+    }
 
     // Insert prospects
     let prospectsCreated = 0;
@@ -302,43 +378,48 @@ async function runUrlMiningJob(jobId, organizerId) {
       );
     }
 
-    await client.query(
-      `UPDATE mining_jobs
-       SET status = 'completed',
-           total_found = $2,
-           total_prospects_created = $3,
-           total_emails_raw = $4,
-           stats = $5,
-           completed_at = NOW()
-       WHERE id = $1`,
-      [
-        jobId,
-        allEmails.length,
-        prospectsCreated,
-        allEmails.length,
-        stats
-      ]
-    );
+    if (shouldUpdateJobStatus) {
+      await client.query(
+        `UPDATE mining_jobs
+         SET status = 'completed',
+             total_found = $2,
+             total_prospects_created = $3,
+             total_emails_raw = $4,
+             stats = $5,
+             completed_at = NOW()
+         WHERE id = $1`,
+        [
+          jobId,
+          allEmails.length,
+          prospectsCreated,
+          allEmails.length,
+          stats
+        ]
+      );
+    }
 
     return {
       success: true,
       job_id: jobId,
       total_emails_raw: allEmails.length,
       total_prospects_created: prospectsCreated,
+      total_results_saved: miningResultsSaved,
       list_id: listId,
       stats
     };
 
   } catch (err) {
     console.error("runUrlMiningJob error:", err.message);
-    await db.query(
-      `UPDATE mining_jobs
-       SET status = 'failed',
-           error = $2,
-           completed_at = NOW()
-       WHERE id = $1`,
-      [jobId, err.message]
-    );
+    if (shouldUpdateJobStatus) {
+      await db.query(
+        `UPDATE mining_jobs
+         SET status = 'failed',
+             error = $2,
+             completed_at = NOW()
+         WHERE id = $1`,
+        [jobId, err.message]
+      );
+    }
 
     return {
       success: false,
