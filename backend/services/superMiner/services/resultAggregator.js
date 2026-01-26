@@ -249,7 +249,7 @@ class ResultAggregator {
      * Merge multiple miner results into unique contacts
      */
     mergeResults(minerResults) {
-        const emailMap = new Map(); // email -> UnifiedContact
+        const contactMap = new Map(); // signature -> UnifiedContact
         
         for (const result of minerResults) {
             if (!result || !result.contacts) continue;
@@ -260,52 +260,52 @@ class ResultAggregator {
                     ? contact 
                     : new UnifiedContact(contact);
                 
-                if (!unified.email) continue;
+                // Support email-less profiles when strong signals exist (name + profile URL).
+                const signature = createSignature(unified);
+                if (!signature) continue;
                 
-                const signature = unified.email.toLowerCase();
-                
-                if (emailMap.has(signature)) {
+                if (contactMap.has(signature)) {
                     // Merge with existing
-                    const existing = emailMap.get(signature);
+                    const existing = contactMap.get(signature);
                     const merged = UnifiedContact.merge(existing, unified);
-                    emailMap.set(signature, merged);
+                    contactMap.set(signature, merged);
                 } else {
-                    emailMap.set(signature, unified);
+                    contactMap.set(signature, unified);
                 }
             }
         }
         
-        return Array.from(emailMap.values());
+        return Array.from(contactMap.values());
     }
     
     /**
      * Merge two contact sets with deduplication
      */
     mergeTwoSets(set1, set2) {
-        const emailMap = new Map();
+        const contactMap = new Map();
         
         // Add set1 (primary)
         for (const contact of set1) {
-            if (!contact.email) continue;
-            const sig = contact.email.toLowerCase();
-            emailMap.set(sig, contact);
+            const sig = createSignature(contact);
+            if (!sig) continue;
+            contactMap.set(sig, contact);
         }
         
         // Merge set2
         for (const contact of set2) {
-            if (!contact.email) continue;
-            const sig = contact.email.toLowerCase();
+            const sig = createSignature(contact);
+            if (!sig) continue;
             
-            if (emailMap.has(sig)) {
-                const existing = emailMap.get(sig);
+            if (contactMap.has(sig)) {
+                const existing = contactMap.get(sig);
                 const merged = UnifiedContact.merge(existing, contact);
-                emailMap.set(sig, merged);
+                contactMap.set(sig, merged);
             } else {
-                emailMap.set(sig, contact);
+                contactMap.set(sig, contact);
             }
         }
         
-        return Array.from(emailMap.values());
+        return Array.from(contactMap.values());
     }
     
     // ============================================
@@ -420,42 +420,85 @@ class ResultAggregator {
             
             for (const contact of contacts) {
                 const email = contact.email?.toLowerCase();
-                if (!email) continue;
+                const hasEmail = Boolean(email);
+                if (!hasEmail && !contact.sourceUrl) {
+                    continue;
+                }
                 
                 // Check if exists
-                const existing = await client.query(
-                    'SELECT id FROM mining_results WHERE job_id = $1 AND $2 = ANY(emails)',
-                    [jobId, email]
-                );
+                const existing = hasEmail
+                    ? await client.query(
+                        'SELECT id FROM mining_results WHERE job_id = $1 AND $2 = ANY(emails)',
+                        [jobId, email]
+                    )
+                    : await client.query(
+                        'SELECT id, emails FROM mining_results WHERE job_id = $1 AND source_url = $2 LIMIT 1',
+                        [jobId, contact.sourceUrl]
+                    );
                 
                 if (existing.rows.length > 0) {
+                    if (!hasEmail) {
+                        const existingEmails = existing.rows[0]?.emails || [];
+                        if (existingEmails.length > 0) {
+                            // Email-less contacts must never overwrite email-based records.
+                            continue;
+                        }
+                    }
                     // Update existing
-                    await client.query(`
-                        UPDATE mining_results SET
-                            company_name = COALESCE(NULLIF($1, ''), company_name),
-                            contact_name = COALESCE(NULLIF($2, ''), contact_name),
-                            job_title = COALESCE(NULLIF($3, ''), job_title),
-                            phone = COALESCE(NULLIF($4, ''), phone),
-                            country = COALESCE(NULLIF($5, ''), country),
-                            city = COALESCE(NULLIF($6, ''), city),
-                            website = COALESCE(NULLIF($7, ''), website),
-                            address = COALESCE(NULLIF($8, ''), address),
-                            confidence_score = GREATEST(confidence_score, $9),
-                            updated_at = NOW()
-                        WHERE job_id = $10 AND $11 = ANY(emails)
-                    `, [
-                        contact.companyName,
-                        contact.contactName,
-                        contact.jobTitle,
-                        contact.phone,
-                        contact.country,
-                        contact.city,
-                        contact.website,
-                        contact.address,
-                        contact.confidence || 50,
-                        jobId,
-                        email
-                    ]);
+                    if (hasEmail) {
+                        await client.query(`
+                            UPDATE mining_results SET
+                                company_name = COALESCE(NULLIF($1, ''), company_name),
+                                contact_name = COALESCE(NULLIF($2, ''), contact_name),
+                                job_title = COALESCE(NULLIF($3, ''), job_title),
+                                phone = COALESCE(NULLIF($4, ''), phone),
+                                country = COALESCE(NULLIF($5, ''), country),
+                                city = COALESCE(NULLIF($6, ''), city),
+                                website = COALESCE(NULLIF($7, ''), website),
+                                address = COALESCE(NULLIF($8, ''), address),
+                                confidence_score = GREATEST(confidence_score, $9),
+                                updated_at = NOW()
+                            WHERE job_id = $10 AND $11 = ANY(emails)
+                        `, [
+                            contact.companyName,
+                            contact.contactName,
+                            contact.jobTitle,
+                            contact.phone,
+                            contact.country,
+                            contact.city,
+                            contact.website,
+                            contact.address,
+                            contact.confidence || 50,
+                            jobId,
+                            email
+                        ]);
+                    } else {
+                        await client.query(`
+                            UPDATE mining_results SET
+                                company_name = COALESCE(NULLIF($1, ''), company_name),
+                                contact_name = COALESCE(NULLIF($2, ''), contact_name),
+                                job_title = COALESCE(NULLIF($3, ''), job_title),
+                                phone = COALESCE(NULLIF($4, ''), phone),
+                                country = COALESCE(NULLIF($5, ''), country),
+                                city = COALESCE(NULLIF($6, ''), city),
+                                website = COALESCE(NULLIF($7, ''), website),
+                                address = COALESCE(NULLIF($8, ''), address),
+                                confidence_score = GREATEST(confidence_score, $9),
+                                updated_at = NOW()
+                            WHERE id = $10
+                        `, [
+                            contact.companyName,
+                            contact.contactName,
+                            contact.jobTitle,
+                            contact.phone,
+                            contact.country,
+                            contact.city,
+                            contact.website,
+                            contact.address,
+                            contact.confidence || 50,
+                            existing.rows[0].id
+                        ]);
+                    }
                 } else {
                     // Insert new
                     await client.query(`
@@ -476,7 +519,7 @@ class ResultAggregator {
                         contact.city,
                         contact.website,
                         contact.address,
-                        [email, ...(contact.additionalEmails || [])],
+                        hasEmail ? [email, ...(contact.additionalEmails || [])] : [],
                         contact.confidence || 50,
                         JSON.stringify({
                             source: contact.source,
@@ -488,7 +531,9 @@ class ResultAggregator {
                     savedCount++;
                 }
                 
-                emailCount++;
+                if (hasEmail) {
+                    emailCount++;
+                }
             }
             
             // Update job stats
