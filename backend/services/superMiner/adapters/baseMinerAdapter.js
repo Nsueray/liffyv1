@@ -55,6 +55,13 @@ const MINER_CAPABILITIES = {
         supportsDetailPages: true,
         costPerRequest: 0,
         defaultConfidence: CONFIDENCE.PLAYWRIGHT_DEFAULT
+    },
+    documentMiner: {
+        useCache: true,
+        supportsPagination: false,
+        supportsDetailPages: false,
+        costPerRequest: 0,
+        defaultConfidence: 70
     }
 };
 

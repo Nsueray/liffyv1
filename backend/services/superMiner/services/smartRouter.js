@@ -24,6 +24,7 @@ const ROUTER_CONFIG = {
         playwrightMiner: 3,
         aiMiner: 4,
         websiteScraperMiner: 5
+        documentMiner: 6
     },
     
     // Fallback chains
