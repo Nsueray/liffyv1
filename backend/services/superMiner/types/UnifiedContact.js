@@ -5,7 +5,7 @@
  * Her miner bu formata dönüştürür, Aggregator bu formatı kullanır.
  * 
  * KURALLAR:
- * - Tüm field'lar optional (email hariç)
+ * - Tüm field'lar optional (email dahil)
  * - confidence her zaman 0-100 arası
  * - source hangi miner'dan geldiğini belirtir
  * - evidence AI için zorunlu (hallucination önleme)
@@ -18,7 +18,8 @@ const CONFIDENCE = {
     AI_DEFAULT: 70,
     REGEX_DEFAULT: 50,
     PLAYWRIGHT_DEFAULT: 60,
-    HTTP_DEFAULT: 40
+    HTTP_DEFAULT: 40,
+    EMAILLESS_DEFAULT: 25
 };
 
 // Geçerli source değerleri
@@ -102,6 +103,7 @@ class UnifiedContact {
     constructor(data = {}) {
         // === REQUIRED ===
         this.email = data.email?.toLowerCase()?.trim() || null;
+        this.hasEmail = Boolean(this.email);
         
         // === IDENTITY ===
         this.contactName = data.contactName || data.contact_name || data.name || null;
@@ -123,7 +125,7 @@ class UnifiedContact {
         // === METADATA ===
         this.source = data.source || 'unknown';
         this.sourceUrl = data.sourceUrl || data.source_url || null;
-        this.confidence = this._normalizeConfidence(data.confidence);
+        this.confidence = this._normalizeConfidence(data.confidence, this.hasEmail);
         this.emailType = detectEmailType(this.email);
         
         // === AI SPECIFIC (v4 roadmap için hazırlık) ===
@@ -139,9 +141,9 @@ class UnifiedContact {
     /**
      * Normalize confidence to 0-100
      */
-    _normalizeConfidence(value) {
+    _normalizeConfidence(value, hasEmail) {
         if (value === null || value === undefined) {
-            return CONFIDENCE.REGEX_DEFAULT;
+            return hasEmail ? CONFIDENCE.REGEX_DEFAULT : CONFIDENCE.EMAILLESS_DEFAULT;
         }
         
         const num = Number(value);
@@ -151,10 +153,12 @@ class UnifiedContact {
     }
     
     /**
-     * Check if contact is valid (has email)
+     * Check if contact is valid (email or strong profile signals)
      */
     isValid() {
-        return this.email && this.email.includes('@');
+        if (this.email && this.email.includes('@')) return true;
+        // Email-less contacts are allowed when profile signals exist (name + profile URL).
+        return Boolean(this.contactName && this.sourceUrl);
     }
     
     /**
@@ -189,6 +193,7 @@ class UnifiedContact {
     toObject() {
         return {
             email: this.email,
+            has_email: this.hasEmail,
             contact_name: this.contactName,
             job_title: this.jobTitle,
             company_name: this.companyName,
@@ -228,6 +233,7 @@ class UnifiedContact {
             confidence_score: this.confidence,
             raw: JSON.stringify({
                 source: this.source,
+                has_email: this.hasEmail,
                 email_type: this.emailType,
                 evidence: this.evidence,
                 extracted_at: this.extractedAt,
@@ -267,10 +273,16 @@ class UnifiedContact {
         if (!contact1) return contact2;
         if (!contact2) return contact1;
         
-        // Pick higher confidence as base
-        const [base, other] = contact1.confidence >= contact2.confidence 
-            ? [contact1, contact2] 
-            : [contact2, contact1];
+        // Email-based contacts always win over email-less to avoid overwrites.
+        const contact1HasEmail = Boolean(contact1.email);
+        const contact2HasEmail = Boolean(contact2.email);
+        const [base, other] = contact1HasEmail && !contact2HasEmail
+            ? [contact1, contact2]
+            : contact2HasEmail && !contact1HasEmail
+                ? [contact2, contact1]
+                : contact1.confidence >= contact2.confidence
+                    ? [contact1, contact2]
+                    : [contact2, contact1];
         
         return new UnifiedContact({
             // Use base email
@@ -320,8 +332,15 @@ function pickBest(a, b) {
  * Create signature for deduplication
  */
 function createSignature(contact) {
-    if (!contact || !contact.email) return null;
-    return contact.email.toLowerCase().trim();
+    if (!contact) return null;
+    if (contact.email) return contact.email.toLowerCase().trim();
+    if (contact.sourceUrl && contact.contactName) {
+        return `profile:${contact.contactName.toLowerCase().trim()}|${contact.sourceUrl.toLowerCase().trim()}`;
+    }
+    if (contact.sourceUrl) {
+        return `profile:${contact.sourceUrl.toLowerCase().trim()}`;
+    }
+    return null;
 }
 
 module.exports = {
