@@ -83,6 +83,7 @@ class FlowOrchestrator {
             // Load legacy miner modules that return results (don't write to DB)
             const aiMiner = require('../../urlMiners/aiMiner');
             const playwrightTableMiner = require('../../urlMiners/playwrightTableMiner');
+            const documentMiner = require('../../urlMiners/documentMiner');
             
             this.miners = {
                 // Direct miners (return results, don't write to DB)
@@ -103,6 +104,24 @@ class FlowOrchestrator {
                         return this.normalizeResult(result, 'playwrightTableMiner');
                     }
                 },
+
+                // Document Miner: for flipbook platforms (FlipHTML5, Issuu, etc.)
+                documentMiner: {
+                    name: 'documentMiner',
+                    mine: async (job) => {
+                        console.log(`[documentMiner] Starting for: ${job.input}`);
+                        const result = await documentMiner.mine(job.input);
+                        return {
+                            contacts: [],
+                            rawText: result.extractedText,
+                            textBlocks: result.textBlocks,
+                            extractionMethod: result.extractionMethod,
+                            pageCount: result.pageCount,
+                            source: 'documentMiner'
+                        };
+                    }
+                },
+
                 
                 // Composite miner: runs multiple miners and merges
                 fullMiner: {
