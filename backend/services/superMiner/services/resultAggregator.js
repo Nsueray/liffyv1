@@ -1,5 +1,5 @@
 /**
- * resultAggregator.js - SuperMiner v3.1
+ * resultAggregator.js - SuperMiner v3.2
  * 
  * Flow 1 ve Flow 2 sonuçlarını birleştirir.
  * 
@@ -8,6 +8,15 @@
  * - V2: Flow 2 sonunda çağrılır, temp + yeni sonuçları birleştirir
  * - Final merge sonrası TEK SEFERDE DB'ye yazılır
  * - Deterministic merge (tie-breaker: higher confidence wins)
+ * 
+ * CONTACT TYPES:
+ * - Email-based: contacts with valid email (priority)
+ * - Profile-only: contacts with contactName + sourceUrl but no email (low confidence)
+ * 
+ * DEDUP RULES:
+ * - Email-based: dedup by email.toLowerCase()
+ * - Profile-only: dedup by (contactName + sourceUrl) signature
+ * - Profile-only NEVER overwrites email-based contacts
  */
 
 const { getIntermediateStorage } = require('./intermediateStorage');
@@ -18,6 +27,9 @@ const { filterHallucinations } = require('../pipeline/hallucinationFilter');
 
 // Enrichment rate threshold for triggering Flow 2
 const ENRICHMENT_THRESHOLD = 0.2; // 20%
+
+// Profile-only contact confidence cap
+const PROFILE_ONLY_CONFIDENCE = 25;
 
 class ResultAggregator {
     constructor(db) {
@@ -45,7 +57,13 @@ class ResultAggregator {
         // Merge all miner results
         const mergedContacts = this.mergeResults(minerResults);
         
+        // Count email-based vs profile-only
+        const emailBased = mergedContacts.filter(c => c.email);
+        const profileOnly = mergedContacts.filter(c => !c.email);
+        
         console.log(`[Aggregator V1] Merged: ${mergedContacts.length} unique contacts`);
+        console.log(`[Aggregator V1] → Email-based: ${emailBased.length}`);
+        console.log(`[Aggregator V1] → Profile-only: ${profileOnly.length}`);
         
         // Calculate enrichment rate
         const enrichmentRate = this.calculateEnrichmentRate(mergedContacts);
@@ -85,6 +103,8 @@ class ResultAggregator {
                 jobId,
                 enrichmentRate,
                 contactCount: mergedContacts.length,
+                emailBasedCount: emailBased.length,
+                profileOnlyCount: profileOnly.length,
                 websiteUrls: websiteUrls.slice(0, 50), // Limit for payload size
                 deepCrawlAttempted: false
             });
@@ -96,6 +116,8 @@ class ResultAggregator {
             status: 'FLOW1_COMPLETE',
             jobId,
             contactCount: mergedContacts.length,
+            emailBasedCount: emailBased.length,
+            profileOnlyCount: profileOnly.length,
             enrichmentRate,
             websiteUrlCount: websiteUrls.length,
             needsDeepCrawl: enrichmentRate < ENRICHMENT_THRESHOLD,
@@ -142,7 +164,13 @@ class ResultAggregator {
         // Final merge: Flow 1 + Scraper
         const finalContacts = this.mergeTwoSets(flow1Contacts, scraperContacts);
         
+        // Count email-based vs profile-only
+        const emailBased = finalContacts.filter(c => c.email);
+        const profileOnly = finalContacts.filter(c => !c.email);
+        
         console.log(`[Aggregator V2] Final merged: ${finalContacts.length} contacts`);
+        console.log(`[Aggregator V2] → Email-based: ${emailBased.length}`);
+        console.log(`[Aggregator V2] → Profile-only: ${profileOnly.length}`);
         
         // Validate final contacts
         const validationResult = validateContacts(finalContacts);
@@ -179,7 +207,9 @@ class ResultAggregator {
                     flow1Contacts: flow1Data.contacts?.length || 0,
                     scraperContacts: scraperContacts.length,
                     finalContacts: filterResult.passed.length,
-                    savedToDB: dbResult.savedCount
+                    savedToDB: dbResult.savedCount,
+                    emailBased: dbResult.emailCount,
+                    profileOnly: dbResult.profileOnlyCount
                 }
             });
         }
@@ -197,7 +227,9 @@ class ResultAggregator {
                 merged: finalContacts.length,
                 validated: validationResult.valid.length,
                 filtered: filterResult.passed.length,
-                saved: dbResult.savedCount
+                saved: dbResult.savedCount,
+                emailBased: dbResult.emailCount,
+                profileOnly: dbResult.profileOnlyCount
             }
         };
     }
@@ -214,6 +246,14 @@ class ResultAggregator {
         // Merge results
         const mergedContacts = this.mergeResults(minerResults);
         
+        // Count types
+        const emailBased = mergedContacts.filter(c => c.email);
+        const profileOnly = mergedContacts.filter(c => !c.email);
+        
+        console.log(`[Aggregator Simple] Merged: ${mergedContacts.length} contacts`);
+        console.log(`[Aggregator Simple] → Email-based: ${emailBased.length}`);
+        console.log(`[Aggregator Simple] → Profile-only: ${profileOnly.length}`);
+        
         // Validate
         const validationResult = validateContacts(mergedContacts);
         
@@ -223,8 +263,14 @@ class ResultAggregator {
             minConfidence: 25
         });
         
+        // Add sourceUrl
+        const contactsWithSource = filterResult.passed.map(contact => ({
+            ...contact,
+            sourceUrl: contact.sourceUrl || sourceUrl || 'unknown'
+        }));
+        
         // Write to DB
-        const dbResult = await this.writeToDatabase(jobId, organizerId, filterResult.passed);
+        const dbResult = await this.writeToDatabase(jobId, organizerId, contactsWithSource);
         
         console.log(`[Aggregator Simple] ✅ Completed: ${dbResult.savedCount} saved`);
         
@@ -236,7 +282,9 @@ class ResultAggregator {
                 merged: mergedContacts.length,
                 validated: validationResult.valid.length,
                 filtered: filterResult.passed.length,
-                saved: dbResult.savedCount
+                saved: dbResult.savedCount,
+                emailBased: dbResult.emailCount,
+                profileOnly: dbResult.profileOnlyCount
             }
         };
     }
@@ -247,9 +295,15 @@ class ResultAggregator {
     
     /**
      * Merge multiple miner results into unique contacts
+     * 
+     * DEDUP RULES:
+     * - Email-based contacts: dedup by email.toLowerCase()
+     * - Profile-only contacts: dedup by (contactName + sourceUrl) signature
+     * - Profile-only NEVER overwrites email-based contacts
      */
     mergeResults(minerResults) {
-        const contactMap = new Map(); // signature -> UnifiedContact
+        const emailMap = new Map();       // email -> UnifiedContact
+        const profileMap = new Map();     // signature -> UnifiedContact (profile-only)
         
         for (const result of minerResults) {
             if (!result || !result.contacts) continue;
@@ -260,52 +314,111 @@ class ResultAggregator {
                     ? contact 
                     : new UnifiedContact(contact);
                 
-                // Support email-less profiles when strong signals exist (name + profile URL).
-                const signature = createSignature(unified);
-                if (!signature) continue;
-                
-                if (contactMap.has(signature)) {
-                    // Merge with existing
-                    const existing = contactMap.get(signature);
-                    const merged = UnifiedContact.merge(existing, unified);
-                    contactMap.set(signature, merged);
-                } else {
-                    contactMap.set(signature, unified);
+                if (unified.email) {
+                    // Email-based contact - dedup by email
+                    const emailKey = unified.email.toLowerCase();
+                    
+                    if (emailMap.has(emailKey)) {
+                        // Merge with existing (higher confidence wins)
+                        const existing = emailMap.get(emailKey);
+                        const merged = UnifiedContact.merge(existing, unified);
+                        emailMap.set(emailKey, merged);
+                    } else {
+                        emailMap.set(emailKey, unified);
+                    }
+                } else if (unified.contactName && unified.sourceUrl) {
+                    // Profile-only contact - valid if has name and source
+                    const profileKey = this.createProfileSignature(unified.contactName, unified.sourceUrl);
+                    
+                    // Cap confidence for profile-only contacts
+                    unified.confidence = Math.min(unified.confidence || PROFILE_ONLY_CONFIDENCE, PROFILE_ONLY_CONFIDENCE);
+                    
+                    if (profileMap.has(profileKey)) {
+                        // Merge with existing profile-only
+                        const existing = profileMap.get(profileKey);
+                        const merged = UnifiedContact.merge(existing, unified);
+                        merged.confidence = PROFILE_ONLY_CONFIDENCE; // Keep capped
+                        profileMap.set(profileKey, merged);
+                    } else {
+                        profileMap.set(profileKey, unified);
+                    }
                 }
+                // Contacts without email AND without (contactName + sourceUrl) are skipped
             }
         }
         
-        return Array.from(contactMap.values());
+        // Combine: email-based first, then profile-only
+        const allContacts = [
+            ...Array.from(emailMap.values()),
+            ...Array.from(profileMap.values())
+        ];
+        
+        return allContacts;
     }
     
     /**
      * Merge two contact sets with deduplication
+     * Email-based contacts have priority over profile-only
      */
     mergeTwoSets(set1, set2) {
-        const contactMap = new Map();
+        const emailMap = new Map();
+        const profileMap = new Map();
         
-        // Add set1 (primary)
-        for (const contact of set1) {
-            const sig = createSignature(contact);
-            if (!sig) continue;
-            contactMap.set(sig, contact);
-        }
-        
-        // Merge set2
-        for (const contact of set2) {
-            const sig = createSignature(contact);
-            if (!sig) continue;
-            
-            if (contactMap.has(sig)) {
-                const existing = contactMap.get(sig);
-                const merged = UnifiedContact.merge(existing, contact);
-                contactMap.set(sig, merged);
-            } else {
-                contactMap.set(sig, contact);
+        // Helper to process a contact
+        const processContact = (contact) => {
+            if (contact.email) {
+                const emailKey = contact.email.toLowerCase();
+                
+                if (emailMap.has(emailKey)) {
+                    const existing = emailMap.get(emailKey);
+                    const merged = UnifiedContact.merge(existing, contact);
+                    emailMap.set(emailKey, merged);
+                } else {
+                    emailMap.set(emailKey, contact);
+                }
+            } else if (contact.contactName && contact.sourceUrl) {
+                const profileKey = this.createProfileSignature(contact.contactName, contact.sourceUrl);
+                
+                // Cap confidence
+                contact.confidence = Math.min(contact.confidence || PROFILE_ONLY_CONFIDENCE, PROFILE_ONLY_CONFIDENCE);
+                
+                if (profileMap.has(profileKey)) {
+                    const existing = profileMap.get(profileKey);
+                    const merged = UnifiedContact.merge(existing, contact);
+                    merged.confidence = PROFILE_ONLY_CONFIDENCE;
+                    profileMap.set(profileKey, merged);
+                } else {
+                    profileMap.set(profileKey, contact);
+                }
             }
+        };
+        
+        // Process set1 first (primary)
+        for (const contact of set1) {
+            processContact(contact);
         }
         
-        return Array.from(contactMap.values());
+        // Process set2 (secondary)
+        for (const contact of set2) {
+            processContact(contact);
+        }
+        
+        // Combine: email-based first, then profile-only
+        const allContacts = [
+            ...Array.from(emailMap.values()),
+            ...Array.from(profileMap.values())
+        ];
+        
+        return allContacts;
+    }
+    
+    /**
+     * Create signature for profile-only contact deduplication
+     */
+    createProfileSignature(contactName, sourceUrl) {
+        const normalizedName = (contactName || '').toLowerCase().trim().replace(/\s+/g, ' ');
+        const normalizedUrl = (sourceUrl || '').toLowerCase().trim();
+        return `profile:${normalizedName}:${normalizedUrl}`;
     }
     
     // ============================================
@@ -404,48 +517,114 @@ class ResultAggregator {
     
     /**
      * Write contacts to database in single transaction
+     * 
+     * METRICS:
+     * - savedCount: total rows saved (new inserts)
+     * - emailCount: contacts with email
+     * - profileOnlyCount: contacts without email (profile-only)
      */
     async writeToDatabase(jobId, organizerId, contacts) {
         if (!this.db) {
             console.error('[Aggregator] No database connection');
-            return { savedCount: 0, emailCount: 0, error: 'No DB' };
+            return { savedCount: 0, emailCount: 0, profileOnlyCount: 0, error: 'No DB' };
         }
         
         const client = await this.db.connect();
         let savedCount = 0;
         let emailCount = 0;
+        let profileOnlyCount = 0;
+        let updatedCount = 0;
         
         try {
             await client.query('BEGIN');
             
             for (const contact of contacts) {
-                const email = contact.email?.toLowerCase();
-                const hasEmail = Boolean(email);
-                if (!hasEmail && !contact.sourceUrl) {
-                    continue;
-                }
+                const email = contact.email?.toLowerCase() || null;
+                const isProfileOnly = !email;
                 
-                // Check if exists
-                const existing = hasEmail
-                    ? await client.query(
+                if (isProfileOnly) {
+                    // Profile-only contact - needs contactName and sourceUrl
+                    if (!contact.contactName || !contact.sourceUrl) {
+                        continue; // Skip invalid profile-only contacts
+                    }
+                    
+                    // Check if profile-only already exists
+                    const existing = await client.query(
+                        `SELECT id FROM mining_results 
+                         WHERE job_id = $1 
+                         AND contact_name = $2 
+                         AND source_url = $3 
+                         AND (emails IS NULL OR emails = '{}')`,
+                        [jobId, contact.contactName, contact.sourceUrl]
+                    );
+                    
+                    if (existing.rows.length > 0) {
+                        // Update existing profile-only
+                        await client.query(`
+                            UPDATE mining_results SET
+                                company_name = COALESCE(NULLIF($1, ''), company_name),
+                                job_title = COALESCE(NULLIF($2, ''), job_title),
+                                phone = COALESCE(NULLIF($3, ''), phone),
+                                country = COALESCE(NULLIF($4, ''), country),
+                                city = COALESCE(NULLIF($5, ''), city),
+                                website = COALESCE(NULLIF($6, ''), website),
+                                address = COALESCE(NULLIF($7, ''), address),
+                                confidence_score = LEAST(confidence_score, $8),
+                                updated_at = NOW()
+                            WHERE id = $9
+                        `, [
+                            contact.companyName,
+                            contact.jobTitle,
+                            contact.phone,
+                            contact.country,
+                            contact.city,
+                            contact.website,
+                            contact.address,
+                            contact.confidence || PROFILE_ONLY_CONFIDENCE,
+                            existing.rows[0].id
+                        ]);
+                        updatedCount++;
+                    } else {
+                        // Insert new profile-only
+                        await client.query(`
+                            INSERT INTO mining_results 
+                            (job_id, organizer_id, source_url, company_name, contact_name, 
+                             job_title, phone, country, city, website, address, emails, 
+                             confidence_score, raw)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                        `, [
+                            jobId,
+                            organizerId,
+                            contact.sourceUrl,
+                            contact.companyName,
+                            contact.contactName,
+                            contact.jobTitle,
+                            contact.phone,
+                            contact.country,
+                            contact.city,
+                            contact.website,
+                            contact.address,
+                            [], // Empty emails array for profile-only
+                            contact.confidence || PROFILE_ONLY_CONFIDENCE,
+                            JSON.stringify({
+                                source: contact.source,
+                                evidence: contact.evidence,
+                                extractedAt: contact.extractedAt,
+                                isProfileOnly: true
+                            })
+                        ]);
+                        savedCount++;
+                        profileOnlyCount++;
+                    }
+                } else {
+                    // Email-based contact
+                    const existing = await client.query(
                         'SELECT id FROM mining_results WHERE job_id = $1 AND $2 = ANY(emails)',
                         [jobId, email]
-                    )
-                    : await client.query(
-                        'SELECT id, emails FROM mining_results WHERE job_id = $1 AND source_url = $2 LIMIT 1',
-                        [jobId, contact.sourceUrl]
                     );
-                
-                if (existing.rows.length > 0) {
-                    if (!hasEmail) {
-                        const existingEmails = existing.rows[0]?.emails || [];
-                        if (existingEmails.length > 0) {
-                            // Email-less contacts must never overwrite email-based records.
-                            continue;
-                        }
-                    }
-                    // Update existing
-                    if (hasEmail) {
+                    
+                    if (existing.rows.length > 0) {
+                        // Update existing email-based contact
                         await client.query(`
                             UPDATE mining_results SET
                                 company_name = COALESCE(NULLIF($1, ''), company_name),
@@ -472,21 +651,28 @@ class ResultAggregator {
                             jobId,
                             email
                         ]);
+                        updatedCount++;
                     } else {
+                        // Insert new email-based contact
+                        const emailsArray = [email];
+                        if (contact.additionalEmails && Array.isArray(contact.additionalEmails)) {
+                            for (const addEmail of contact.additionalEmails) {
+                                if (addEmail && !emailsArray.includes(addEmail.toLowerCase())) {
+                                    emailsArray.push(addEmail.toLowerCase());
+                                }
+                            }
+                        }
+                        
                         await client.query(`
-                            UPDATE mining_results SET
-                                company_name = COALESCE(NULLIF($1, ''), company_name),
-                                contact_name = COALESCE(NULLIF($2, ''), contact_name),
-                                job_title = COALESCE(NULLIF($3, ''), job_title),
-                                phone = COALESCE(NULLIF($4, ''), phone),
-                                country = COALESCE(NULLIF($5, ''), country),
-                                city = COALESCE(NULLIF($6, ''), city),
-                                website = COALESCE(NULLIF($7, ''), website),
-                                address = COALESCE(NULLIF($8, ''), address),
-                                confidence_score = GREATEST(confidence_score, $9),
-                                updated_at = NOW()
-                            WHERE id = $10
+                            INSERT INTO mining_results 
+                            (job_id, organizer_id, source_url, company_name, contact_name, 
+                             job_title, phone, country, city, website, address, emails, 
+                             confidence_score, raw)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                         `, [
+                            jobId,
+                            organizerId,
+                            contact.sourceUrl,
                             contact.companyName,
                             contact.contactName,
                             contact.jobTitle,
@@ -495,48 +681,22 @@ class ResultAggregator {
                             contact.city,
                             contact.website,
                             contact.address,
+                            emailsArray,
                             contact.confidence || 50,
-                            existing.rows[0].id
+                            JSON.stringify({
+                                source: contact.source,
+                                evidence: contact.evidence,
+                                extractedAt: contact.extractedAt
+                            })
                         ]);
+                        savedCount++;
+                        emailCount++;
                     }
-                } else {
-                    // Insert new
-                    await client.query(`
-                        INSERT INTO mining_results 
-                        (job_id, organizer_id, source_url, company_name, contact_name, 
-                         job_title, phone, country, city, website, address, emails, 
-                         confidence_score, raw)
-                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-                    `, [
-                        jobId,
-                        organizerId,
-                        contact.sourceUrl,
-                        contact.companyName,
-                        contact.contactName,
-                        contact.jobTitle,
-                        contact.phone,
-                        contact.country,
-                        contact.city,
-                        contact.website,
-                        contact.address,
-                        hasEmail ? [email, ...(contact.additionalEmails || [])] : [],
-                        contact.confidence || 50,
-                        JSON.stringify({
-                            source: contact.source,
-                            evidence: contact.evidence,
-                            extractedAt: contact.extractedAt
-                        })
-                    ]);
-                    
-                    savedCount++;
-                }
-                
-                if (hasEmail) {
-                    emailCount++;
                 }
             }
             
             // Update job stats
+            const totalProcessed = savedCount + updatedCount;
             await client.query(`
                 UPDATE mining_jobs SET
                     total_found = $1,
@@ -544,18 +704,24 @@ class ResultAggregator {
                     status = 'completed',
                     completed_at = NOW()
                 WHERE id = $3
-            `, [savedCount, emailCount, jobId]);
+            `, [totalProcessed, emailCount, jobId]);
             
             await client.query('COMMIT');
             
-            console.log(`[Aggregator] DB write: ${savedCount} new, ${emailCount} total`);
+            console.log(`[Aggregator] DB write: ${savedCount} new (${emailCount} email-based, ${profileOnlyCount} profile-only), ${updatedCount} updated`);
             
-            return { savedCount, emailCount, error: null };
+            return { 
+                savedCount, 
+                emailCount, 
+                profileOnlyCount, 
+                updatedCount,
+                error: null 
+            };
             
         } catch (err) {
             await client.query('ROLLBACK');
             console.error('[Aggregator] DB write error:', err.message);
-            return { savedCount: 0, emailCount: 0, error: err.message };
+            return { savedCount: 0, emailCount: 0, profileOnlyCount: 0, error: err.message };
             
         } finally {
             client.release();
@@ -571,5 +737,6 @@ function createResultAggregator(db) {
 module.exports = {
     ResultAggregator,
     createResultAggregator,
-    ENRICHMENT_THRESHOLD
+    ENRICHMENT_THRESHOLD,
+    PROFILE_ONLY_CONFIDENCE
 };
