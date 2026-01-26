@@ -23,7 +23,7 @@ const ROUTER_CONFIG = {
         playwrightTableMiner: 2,
         playwrightMiner: 3,
         aiMiner: 4,
-        websiteScraperMiner: 5
+        websiteScraperMiner: 5,
         documentMiner: 6
     },
     
