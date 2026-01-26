@@ -368,17 +368,7 @@ class SmartRouter {
             return this.forceRoute(job, config.preferred_miner);
         }
         
-        // Check for mining mode
-        if (config.mining_mode) {
-            switch (config.mining_mode) {
-                case 'quick':
-                    return this.forceRoute(job, 'httpBasicMiner');
-                case 'full':
-                    return this.forceRoute(job, 'playwrightMiner');
-                case 'ai':
-                    return this.forceRoute(job, 'aiMiner');
-            }
-        }
+        // mining_mode is handled by execution plans; SmartRouter does not interpret it.
         
         // No config preference, use smart routing
         return null;
