@@ -5,10 +5,7 @@
  * Available Miners:
  * - playwrightTableMiner: Single page tables/lists
  * - aiMiner: Claude AI powered extraction (best quality)
- * 
- * Utilities:
- * - cloudflareDecoder: Decode CF protected emails
- * - resultMerger: Merge results from multiple miners
+ * - documentMiner: Document viewer platforms (FlipHTML5, Issuu, etc.)
  */
 
 const playwrightTableMiner = require('./playwrightTableMiner');
@@ -24,10 +21,20 @@ try {
     console.log('[urlMiners] ⚠️ AIMiner not available:', e.message);
 }
 
+// Document Miner (for flipbook platforms)
+let documentMiner = null;
+try {
+    documentMiner = require('./documentMiner');
+    console.log('[urlMiners] ✅ DocumentMiner loaded');
+} catch (e) {
+    console.log('[urlMiners] ⚠️ DocumentMiner not available:', e.message);
+}
+
 module.exports = {
     // Miners
     playwrightTableMiner,
     aiMiner,
+    documentMiner,
     
     // Utilities
     cloudflareDecoder,
@@ -40,6 +47,9 @@ module.exports = {
         ];
         if (aiMiner) {
             miners.push({ name: 'AIMiner', mine: aiMiner.mine });
+        }
+        if (documentMiner) {
+            miners.push({ name: 'DocumentMiner', mine: documentMiner.mine });
         }
         return miners;
     }

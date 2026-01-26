@@ -24,6 +24,7 @@ const PAGE_TYPES = {
     DYNAMIC: 'dynamic',                     // JS-rendered content
     BLOCKED: 'blocked',                     // Access denied
     ERROR: 'error',                         // Page error
+    DOCUMENT_VIEWER: 'document_viewer',    // Flipbook/PDF viewer
     UNKNOWN: 'unknown'
 };
 
@@ -521,4 +522,90 @@ module.exports = {
     getPageAnalyzer,
     PAGE_TYPES,
     PAGINATION_TYPES
+};
+
+// ============================================
+// DOCUMENT VIEWER DETECTION (Added v1.2)
+// ============================================
+PageAnalyzer.prototype.detectDocumentViewer = function($, html, url) {
+    const bodyText = $('body').text();
+    const scriptContent = $('script').text();
+    const fullContent = html + scriptContent;
+    
+    let score = 0;
+    const indicators = [];
+    
+    // SEO text layer check (P:XX pattern) - Strong indicator
+    const pageMatches = bodyText.match(/P:\d+[\s\S]{20,}?(?=P:\d+|$)/g) || [];
+    if (pageMatches.length >= 3) {
+        score += 50;
+        indicators.push('seo_text_pages:' + pageMatches.length);
+    }
+    
+    // Canvas elements - Medium indicator
+    const canvasCount = $('canvas').length;
+    if (canvasCount >= 2) {
+        score += 20;
+        indicators.push('canvas_elements:' + canvasCount);
+    }
+    
+    // JSON API indicators in content (NOT domain-based)
+    if (/pages\.json|documentPages|bookData|textContent/i.test(fullContent)) {
+        score += 15;
+        indicators.push('json_api_indicator');
+    }
+    
+    // Flipbook class patterns
+    if (/flipbook|pageflip|book-viewer|document-viewer/i.test(fullContent)) {
+        score += 15;
+        indicators.push('flipbook_class');
+    }
+    
+    // PDF links
+    const pdfLinks = $('a[href*=".pdf"]').length;
+    if (pdfLinks > 0) {
+        score += 10;
+        indicators.push('pdf_links:' + pdfLinks);
+    }
+    
+    return {
+        isDocumentViewer: score >= 40,
+        indicators: indicators,
+        confidence: Math.min(100, score),
+    };
+};
+
+// Override analyzeHtml to include document viewer detection
+const originalAnalyzeHtml = PageAnalyzer.prototype.analyzeHtml;
+PageAnalyzer.prototype.analyzeHtml = function(html, url) {
+    const result = originalAnalyzeHtml.call(this, html, url);
+    
+    // Add document viewer detection
+    const $ = cheerio.load(html);
+    const docViewerAnalysis = this.detectDocumentViewer($, html, url);
+    
+    result.isDocumentViewer = docViewerAnalysis.isDocumentViewer;
+    result.documentViewerIndicators = docViewerAnalysis.indicators;
+    
+    // Override pageType if document viewer detected
+    if (result.isDocumentViewer) {
+        result.pageType = PAGE_TYPES.DOCUMENT_VIEWER;
+        console.log('[PageAnalyzer] Document viewer detected:', docViewerAnalysis.indicators.join(', '));
+    }
+    
+    return result;
+};
+
+// Override getRecommendation to handle DOCUMENT_VIEWER
+const originalGetRecommendation = PageAnalyzer.prototype.getRecommendation;
+PageAnalyzer.prototype.getRecommendation = function(analysis) {
+    if (analysis.pageType === PAGE_TYPES.DOCUMENT_VIEWER) {
+        return {
+            miner: 'documentMiner',
+            useCache: true,
+            reason: 'Document viewer detected, using DocumentMiner',
+            indicators: analysis.documentViewerIndicators || []
+        };
+    }
+    return originalGetRecommendation.call(this, analysis);
 };
