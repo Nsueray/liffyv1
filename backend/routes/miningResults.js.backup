@@ -138,6 +138,7 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
 
     // ===== CENTRAL EDIT PIPELINE =====
 
+    // Step 1: Convert raw miner results to plain objects for validator
     const plainContacts = results.map(r => ({
       email: r.email || (r.emails && r.emails[0]),
       name: r.contactName || r.contact_name || r.name,
@@ -151,8 +152,10 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
       _raw: r
     }));
 
+    // Step 2: Validate contacts (plain objects)
     const validationResult = validateContacts(plainContacts);
 
+    // Step 3: Prepare plain objects for deduplicator (no _raw, no _unified)
     const contactsForDedup = validationResult.valid.map(v => ({
       email: v.email,
       name: v.name,
@@ -166,8 +169,10 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
       _raw: v._raw
     }));
 
+    // Step 4: Deduplicate (plain objects)
     const dedupeResult = deduplicate(contactsForDedup);
 
+    // Step 5: Convert final plain objects to UnifiedContact (ONCE)
     const finalContacts = dedupeResult.contacts.map(c => {
       const raw = c._raw || {};
       const source = raw.source || (req.is_manual_miner ? 'manual' : 'import');
@@ -190,6 +195,7 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
       }, source);
     });
 
+    // Step 6: Convert to DB format and insert
     let totalEmails = 0;
 
     for (const uc of finalContacts) {
@@ -236,6 +242,8 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
         ]
       );
     }
+
+    // ===== END CENTRAL EDIT PIPELINE =====
 
     const totalFound = finalContacts.length;
     const statsPayload = {
@@ -401,348 +409,6 @@ router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (r
     return res.status(500).json({ error: "Failed to fetch results" });
   }
 });
-
-
-/**
- * ============================================================
- * NEW: POST /api/mining/jobs/:id/import-all
- * ============================================================
- * Import ALL mining results from a job to prospects (leads)
- * - Only imports results with valid emails
- * - Supports tags
- * - Optionally creates a list
- * - Single click = 600+ contacts imported!
- */
-router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, async (req, res) => {
-  const client = await db.connect();
-  
-  try {
-    const jobId = req.params.id;
-    const organizerId = req.auth.organizer_id;
-    const { 
-      tags = [],           // Array of tags to apply
-      create_list = false, // Whether to create a list
-      list_name = null     // List name (required if create_list is true)
-    } = req.body;
-
-    // Validate job exists and belongs to organizer
-    const jobRes = await client.query(
-      `SELECT id, name, input, total_found FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
-      [jobId, organizerId]
-    );
-
-    if (jobRes.rowCount === 0) {
-      return res.status(404).json({ error: "Mining job not found" });
-    }
-
-    const job = jobRes.rows[0];
-
-    // Validate list name if creating list
-    if (create_list && (!list_name || !list_name.trim())) {
-      return res.status(400).json({ error: "List name is required when create_list is true" });
-    }
-
-    await client.query('BEGIN');
-
-    // Get ALL mining results with valid emails (no pagination!)
-    const resultsRes = await client.query(`
-      SELECT 
-        mr.id,
-        mr.company_name,
-        mr.contact_name,
-        mr.job_title,
-        mr.emails,
-        mr.website,
-        mr.phone,
-        mr.country,
-        mr.city,
-        mr.address,
-        mr.source_url,
-        mr.confidence_score,
-        mr.verification_status,
-        mr.status
-      FROM mining_results mr
-      WHERE mr.job_id = $1 
-        AND mr.organizer_id = $2
-        AND (
-          CASE 
-            WHEN jsonb_typeof(COALESCE(mr.emails::jsonb, '[]'::jsonb)) = 'array'
-            THEN jsonb_array_length(COALESCE(mr.emails::jsonb, '[]'::jsonb))
-            ELSE 0
-          END
-        ) > 0
-        AND COALESCE(mr.status, 'new') != 'imported'
-    `, [jobId, organizerId]);
-
-    const miningResults = resultsRes.rows;
-
-    if (miningResults.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ 
-        error: "No results to import", 
-        message: "No results with valid emails found, or all results are already imported"
-      });
-    }
-
-    // Create list if requested
-    let listId = null;
-    let listCreated = null;
-
-    if (create_list) {
-      const trimmedListName = list_name.trim();
-      
-      // Check if list name already exists
-      const existingList = await client.query(
-        'SELECT id FROM lists WHERE organizer_id = $1 AND LOWER(name) = LOWER($2)',
-        [organizerId, trimmedListName]
-      );
-
-      if (existingList.rows.length > 0) {
-        await client.query('ROLLBACK');
-        return res.status(409).json({ error: `A list named "${trimmedListName}" already exists` });
-      }
-
-      const listRes = await client.query(
-        `INSERT INTO lists (organizer_id, name, type) VALUES ($1, $2, 'mining_import') RETURNING id, name, created_at`,
-        [organizerId, trimmedListName]
-      );
-      listId = listRes.rows[0].id;
-      listCreated = listRes.rows[0];
-    }
-
-    // Process tags
-    const tagsArray = Array.isArray(tags) 
-      ? tags.filter(t => t && typeof t === 'string' && t.trim()).map(t => t.trim())
-      : [];
-
-    // Process each mining result
-    let imported = 0;
-    let skipped = 0;
-    let duplicates = 0;
-    const errors = [];
-
-    for (const mr of miningResults) {
-      try {
-        // Parse emails array
-        let emails = [];
-        if (Array.isArray(mr.emails)) {
-          emails = mr.emails;
-        } else if (typeof mr.emails === 'string') {
-          try {
-            emails = JSON.parse(mr.emails);
-          } catch {
-            emails = [mr.emails];
-          }
-        }
-
-        // Get first valid email
-        const primaryEmail = emails.find(e => e && typeof e === 'string' && e.includes('@'));
-        
-        if (!primaryEmail) {
-          skipped++;
-          continue;
-        }
-
-        const trimmedEmail = primaryEmail.trim().toLowerCase();
-
-        // Check if prospect already exists
-        const existingProspect = await client.query(
-          'SELECT id, tags FROM prospects WHERE organizer_id = $1 AND LOWER(email) = $2',
-          [organizerId, trimmedEmail]
-        );
-
-        let prospectId;
-
-        if (existingProspect.rows.length > 0) {
-          // Prospect exists - update tags if new ones provided
-          prospectId = existingProspect.rows[0].id;
-          duplicates++;
-
-          if (tagsArray.length > 0) {
-            const existingTags = existingProspect.rows[0].tags || [];
-            const mergedTags = [...new Set([...existingTags, ...tagsArray])];
-            await client.query(
-              'UPDATE prospects SET tags = $1 WHERE id = $2',
-              [mergedTags, prospectId]
-            );
-          }
-        } else {
-          // Create new prospect
-          const meta = {
-            mining_result_id: mr.id,
-            job_id: jobId,
-            job_title: mr.job_title,
-            all_emails: emails,
-            website: mr.website,
-            phone: mr.phone,
-            city: mr.city,
-            address: mr.address,
-            source_url: mr.source_url,
-            confidence_score: mr.confidence_score
-          };
-
-          const prospectRes = await client.query(
-            `INSERT INTO prospects (
-              organizer_id, 
-              email, 
-              name, 
-              company, 
-              country,
-              source_type, 
-              source_ref,
-              verification_status,
-              tags,
-              meta
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            RETURNING id`,
-            [
-              organizerId,
-              trimmedEmail,
-              mr.contact_name || null,
-              mr.company_name || null,
-              mr.country || null,
-              'mining',
-              jobId,
-              mr.verification_status || 'unknown',
-              tagsArray.length > 0 ? tagsArray : [],
-              meta
-            ]
-          );
-          prospectId = prospectRes.rows[0].id;
-        }
-
-        // Add to list if creating one
-        if (listId) {
-          await client.query(
-            `INSERT INTO list_members (list_id, prospect_id, organizer_id)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (list_id, prospect_id) DO NOTHING`,
-            [listId, prospectId, organizerId]
-          );
-        }
-
-        // Mark mining result as imported
-        await client.query(
-          `UPDATE mining_results SET status = 'imported', updated_at = NOW() WHERE id = $1`,
-          [mr.id]
-        );
-
-        imported++;
-      } catch (rowErr) {
-        console.error(`Error importing result ${mr.id}:`, rowErr.message);
-        errors.push({ id: mr.id, error: rowErr.message });
-        skipped++;
-      }
-    }
-
-    await client.query('COMMIT');
-
-    // Build response
-    const response = {
-      success: true,
-      stats: {
-        total_with_email: miningResults.length,
-        imported: imported,
-        skipped: skipped,
-        duplicates_updated: duplicates,
-        new_prospects: imported - duplicates
-      },
-      tags_applied: tagsArray,
-      message: `Successfully imported ${imported} leads from "${job.name || jobId}"`
-    };
-
-    if (listCreated) {
-      response.list_created = listCreated;
-      
-      // Get final list member count
-      const listCount = await db.query(
-        'SELECT COUNT(*) as count FROM list_members WHERE list_id = $1',
-        [listId]
-      );
-      response.list_created.member_count = parseInt(listCount.rows[0].count, 10);
-    }
-
-    if (errors.length > 0) {
-      response.errors = errors.slice(0, 10); // Return first 10 errors
-    }
-
-    return res.status(201).json(response);
-
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('POST /mining/jobs/:id/import-all error:', err);
-    return res.status(500).json({ 
-      error: "Failed to import results", 
-      message: err.message 
-    });
-  } finally {
-    client.release();
-  }
-});
-
-
-/**
- * GET /api/mining/jobs/:id/import-preview
- * Preview how many results will be imported (with email, not yet imported)
- */
-router.get('/api/mining/jobs/:id/import-preview', authRequired, validateJobId, async (req, res) => {
-  try {
-    const jobId = req.params.id;
-    const organizerId = req.auth.organizer_id;
-
-    // Verify job exists
-    const jobRes = await db.query(
-      `SELECT id, name, total_found FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
-      [jobId, organizerId]
-    );
-
-    if (jobRes.rowCount === 0) {
-      return res.status(404).json({ error: "Mining job not found" });
-    }
-
-    const job = jobRes.rows[0];
-
-    // Count results with email that haven't been imported
-    const countRes = await db.query(`
-      SELECT 
-        COUNT(*) FILTER (WHERE (
-          CASE 
-            WHEN jsonb_typeof(COALESCE(mr.emails::jsonb, '[]'::jsonb)) = 'array'
-            THEN jsonb_array_length(COALESCE(mr.emails::jsonb, '[]'::jsonb))
-            ELSE 0
-          END
-        ) > 0) as with_email,
-        COUNT(*) FILTER (WHERE (
-          CASE 
-            WHEN jsonb_typeof(COALESCE(mr.emails::jsonb, '[]'::jsonb)) = 'array'
-            THEN jsonb_array_length(COALESCE(mr.emails::jsonb, '[]'::jsonb))
-            ELSE 0
-          END
-        ) > 0 AND COALESCE(mr.status, 'new') != 'imported') as importable,
-        COUNT(*) FILTER (WHERE COALESCE(mr.status, 'new') = 'imported') as already_imported,
-        COUNT(*) as total
-      FROM mining_results mr
-      WHERE mr.job_id = $1 AND mr.organizer_id = $2
-    `, [jobId, organizerId]);
-
-    const stats = countRes.rows[0];
-
-    return res.json({
-      job_id: jobId,
-      job_name: job.name,
-      total_results: parseInt(stats.total, 10),
-      with_email: parseInt(stats.with_email, 10),
-      importable: parseInt(stats.importable, 10),
-      already_imported: parseInt(stats.already_imported, 10),
-      without_email: parseInt(stats.total, 10) - parseInt(stats.with_email, 10)
-    });
-
-  } catch (err) {
-    console.error('GET /mining/jobs/:id/import-preview error:', err);
-    return res.status(500).json({ error: "Failed to get preview" });
-  }
-});
-
 
 /**
  * PATCH /api/mining/results/:id
