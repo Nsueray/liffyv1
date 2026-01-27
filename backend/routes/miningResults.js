@@ -136,8 +136,6 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
     const job = jobRes.rows[0];
     const organizerId = job.organizer_id;
 
-    // ===== CENTRAL EDIT PIPELINE =====
-
     const plainContacts = results.map(r => ({
       email: r.email || (r.emails && r.emails[0]),
       name: r.contactName || r.contact_name || r.name,
@@ -305,16 +303,12 @@ router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (r
     const where = ['mj.organizer_id = $1', 'mr.job_id = $2'];
     const params = [organizerId, jobId];
     let idx = 3;
-    const emailLengthExpr = `CASE 
-      WHEN jsonb_typeof(COALESCE(mr.emails::jsonb, '[]'::jsonb)) = 'array'
-      THEN jsonb_array_length(COALESCE(mr.emails::jsonb, '[]'::jsonb))
-      ELSE 0
-    END`;
-
+    
+    // emails is text[] array, use array_length
     if (has_email === 'with') {
-      where.push(`${emailLengthExpr} > 0`);
+      where.push(`COALESCE(array_length(mr.emails, 1), 0) > 0`);
     } else if (has_email === 'without') {
-      where.push(`${emailLengthExpr} = 0`);
+      where.push(`COALESCE(array_length(mr.emails, 1), 0) = 0`);
     }
 
     if (status && status !== 'all') {
@@ -341,7 +335,7 @@ router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (r
         COALESCE(mr.contact_name, '') ILIKE $${idx} OR
         COALESCE(mr.website, '') ILIKE $${idx} OR
         COALESCE(mr.source_url, '') ILIKE $${idx} OR
-        COALESCE((mr.emails)::jsonb::text, '') ILIKE $${idx}
+        COALESCE(array_to_string(mr.emails, ','), '') ILIKE $${idx}
       )`);
       params.push(`%${search}%`);
       idx++;
@@ -405,7 +399,7 @@ router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (r
 
 /**
  * ============================================================
- * NEW: POST /api/mining/jobs/:id/import-all
+ * POST /api/mining/jobs/:id/import-all
  * ============================================================
  * Import ALL mining results from a job to prospects (leads)
  * - Only imports results with valid emails
@@ -420,9 +414,9 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
     const jobId = req.params.id;
     const organizerId = req.auth.organizer_id;
     const { 
-      tags = [],           // Array of tags to apply
-      create_list = false, // Whether to create a list
-      list_name = null     // List name (required if create_list is true)
+      tags = [],
+      create_list = false,
+      list_name = null
     } = req.body;
 
     // Validate job exists and belongs to organizer
@@ -445,6 +439,7 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
     await client.query('BEGIN');
 
     // Get ALL mining results with valid emails (no pagination!)
+    // emails is text[] array, use array_length
     const resultsRes = await client.query(`
       SELECT 
         mr.id,
@@ -464,13 +459,7 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
       FROM mining_results mr
       WHERE mr.job_id = $1 
         AND mr.organizer_id = $2
-        AND (
-          CASE 
-            WHEN jsonb_typeof(COALESCE(mr.emails::jsonb, '[]'::jsonb)) = 'array'
-            THEN jsonb_array_length(COALESCE(mr.emails::jsonb, '[]'::jsonb))
-            ELSE 0
-          END
-        ) > 0
+        AND COALESCE(array_length(mr.emails, 1), 0) > 0
         AND COALESCE(mr.status, 'new') != 'imported'
     `, [jobId, organizerId]);
 
@@ -523,17 +512,8 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
 
     for (const mr of miningResults) {
       try {
-        // Parse emails array
-        let emails = [];
-        if (Array.isArray(mr.emails)) {
-          emails = mr.emails;
-        } else if (typeof mr.emails === 'string') {
-          try {
-            emails = JSON.parse(mr.emails);
-          } catch {
-            emails = [mr.emails];
-          }
-        }
+        // emails is already a text[] array from PostgreSQL
+        const emails = Array.isArray(mr.emails) ? mr.emails : [];
 
         // Get first valid email
         const primaryEmail = emails.find(e => e && typeof e === 'string' && e.includes('@'));
@@ -663,7 +643,7 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
     }
 
     if (errors.length > 0) {
-      response.errors = errors.slice(0, 10); // Return first 10 errors
+      response.errors = errors.slice(0, 10);
     }
 
     return res.status(201).json(response);
@@ -702,23 +682,11 @@ router.get('/api/mining/jobs/:id/import-preview', authRequired, validateJobId, a
 
     const job = jobRes.rows[0];
 
-    // Count results with email that haven't been imported
+    // Count results - emails is text[] array, use array_length
     const countRes = await db.query(`
       SELECT 
-        COUNT(*) FILTER (WHERE (
-          CASE 
-            WHEN jsonb_typeof(COALESCE(mr.emails::jsonb, '[]'::jsonb)) = 'array'
-            THEN jsonb_array_length(COALESCE(mr.emails::jsonb, '[]'::jsonb))
-            ELSE 0
-          END
-        ) > 0) as with_email,
-        COUNT(*) FILTER (WHERE (
-          CASE 
-            WHEN jsonb_typeof(COALESCE(mr.emails::jsonb, '[]'::jsonb)) = 'array'
-            THEN jsonb_array_length(COALESCE(mr.emails::jsonb, '[]'::jsonb))
-            ELSE 0
-          END
-        ) > 0 AND COALESCE(mr.status, 'new') != 'imported') as importable,
+        COUNT(*) FILTER (WHERE COALESCE(array_length(mr.emails, 1), 0) > 0) as with_email,
+        COUNT(*) FILTER (WHERE COALESCE(array_length(mr.emails, 1), 0) > 0 AND COALESCE(mr.status, 'new') != 'imported') as importable,
         COUNT(*) FILTER (WHERE COALESCE(mr.status, 'new') = 'imported') as already_imported,
         COUNT(*) as total
       FROM mining_results mr
