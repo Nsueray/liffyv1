@@ -1,6 +1,10 @@
 const { chromium } = require("playwright");
 const db = require("../db");
 
+// Shadow Mode Integration (Phase 1 - Step C)
+const { normalizeMinerOutput } = require('./normalizer');
+const aggregationTrigger = require('./aggregationTrigger');
+
 // ENV (for standalone execution)
 const JOB_ID = process.env.MINING_JOB_ID || null;
 
@@ -301,6 +305,72 @@ async function getAllExhibitorLinks(page, baseUrl, config = {}) {
 }
 
 /* =========================================
+   SHADOW MODE HELPER (Phase 1 - Step C)
+   ========================================= */
+
+/**
+ * Shadow Mode Normalization
+ * Converts allResults[] to normalized candidates and logs them
+ * DOES NOT persist anything - LOG ONLY
+ * 
+ * @param {Object} job - Mining job object
+ * @param {Array} allResults - Extracted results array
+ */
+async function runShadowModeNormalization(job, allResults) {
+  if (process.env.DISABLE_SHADOW_MODE === 'true') {
+    return;
+  }
+
+  try {
+    console.log(`[SHADOW_MODE] Starting normalization for job ${job.id}`);
+
+    const minerOutput = {
+      status: 'success',
+      raw: {
+        text: '',
+        html: '',
+        blocks: allResults.map(r => ({
+          email: r.emails && r.emails[0] ? r.emails[0] : null,
+          emails: r.emails || [],
+          company_name: r.companyName || null,
+          contact_name: r.contactName || null,
+          website: r.website || null,
+          country: r.country || null,
+          phone: r.phone || null,
+          text: null,
+          data: r,
+        })),
+        links: [],
+      },
+      meta: {
+        miner_name: 'miningWorker',
+        duration_ms: 0,
+        confidence_hint: null,
+        source_url: job.input || null,
+        page_title: null,
+      },
+    };
+
+    const normalizationResult = normalizeMinerOutput(minerOutput);
+
+    aggregationTrigger.process({
+      jobId: job.id,
+      normalizationResult: normalizationResult,
+      metadata: {
+        original_result_count: allResults.length,
+        source_url: job.input || null,
+        strategy: job.strategy || 'playwright',
+      },
+    });
+
+    console.log(`[SHADOW_MODE] Completed for job ${job.id}: ${normalizationResult.stats.candidates_produced} candidates`);
+
+  } catch (error) {
+    console.error(`[SHADOW_MODE] Error for job ${job.id}:`, error.message);
+  }
+}
+
+/* =========================================
    MAIN STRATEGY
    ========================================= */
 
@@ -363,7 +433,10 @@ async function runPlaywrightStrategy(job) {
       }
     }
 
-    // 3. Save to DB
+    // 3. Shadow Mode Normalization (Phase 1 - Step C)
+    await runShadowModeNormalization(job, allResults);
+
+    // 4. Save to DB
     const summary = {
         total_exhibitors: links.length,
         total_results: allResults.length,
