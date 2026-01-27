@@ -12,6 +12,10 @@
 const { orchestrate: orchestrateFile } = require('./fileOrchestrator');
 const db = require('../db');
 
+// Shadow Mode Integration (Phase 1 - Step C)
+const { normalizeMinerOutput } = require('./normalizer');
+const aggregationTrigger = require('./aggregationTrigger');
+
 // Import result merger
 let resultMerger;
 try {
@@ -127,6 +131,74 @@ try {
 }
 
 // ============================================
+// SHADOW MODE HELPER (Phase 1 - Step C)
+// ============================================
+
+/**
+ * Shadow Mode Normalization from Merged Result
+ * Converts finalResult.contacts to normalized candidates and logs them
+ * DOES NOT persist anything - LOG ONLY
+ * 
+ * @param {Object} job - Mining job object
+ * @param {Object} finalResult - Merged result with contacts array
+ */
+async function runShadowModeFromMergedResult(job, finalResult) {
+    if (process.env.DISABLE_SHADOW_MODE === 'true') {
+        return;
+    }
+
+    try {
+        console.log(`[SHADOW_MODE] Starting normalization for job ${job.id}`);
+
+        const contacts = finalResult.contacts || [];
+
+        const minerOutput = {
+            status: 'success',
+            raw: {
+                text: '',
+                html: '',
+                blocks: contacts.map(c => ({
+                    email: c.email || null,
+                    emails: c.email ? [c.email] : [],
+                    company_name: c.companyName || c.company_name || null,
+                    contact_name: c.contactName || c.contact_name || null,
+                    website: c.website || null,
+                    country: c.country || null,
+                    phone: c.phone || null,
+                    text: null,
+                    data: c,
+                })),
+                links: [],
+            },
+            meta: {
+                miner_name: 'miningService-fullMode',
+                duration_ms: 0,
+                confidence_hint: null,
+                source_url: job.input || null,
+                page_title: null,
+            },
+        };
+
+        const normalizationResult = normalizeMinerOutput(minerOutput);
+
+        aggregationTrigger.process({
+            jobId: job.id,
+            normalizationResult: normalizationResult,
+            metadata: {
+                original_contact_count: contacts.length,
+                source_url: job.input || null,
+                mining_mode: 'full',
+            },
+        });
+
+        console.log(`[SHADOW_MODE] Completed for job ${job.id}: ${normalizationResult.stats.candidates_produced} candidates`);
+
+    } catch (error) {
+        console.error(`[SHADOW_MODE] Error for job ${job.id}:`, error.message);
+    }
+}
+
+// ============================================
 // MINING MODES
 // ============================================
 
@@ -176,6 +248,9 @@ async function runFullMining(job) {
     } else {
         finalResult = { status: 'PARTIAL', emails: [], contacts: [] };
     }
+    
+    // Shadow Mode Normalization (Phase 1 - Step C)
+    await runShadowModeFromMergedResult(job, finalResult);
     
     // Save merged contacts
     if (finalResult.contacts?.length > 0) {
