@@ -446,6 +446,26 @@ async function updateJobStatus(job, result, executionTime) {
 }
 
 // ============================================
+// HELPERS
+// ============================================
+
+/**
+ * Check if URL points to a PDF file
+ * @param {string} url 
+ * @returns {boolean}
+ */
+function isPdfUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+    try {
+        const urlObj = new URL(url);
+        const pathname = urlObj.pathname.toLowerCase();
+        return pathname.endsWith('.pdf');
+    } catch (e) {
+        return url.toLowerCase().endsWith('.pdf');
+    }
+}
+
+// ============================================
 // MAIN PROCESSOR
 // ============================================
 
@@ -464,8 +484,14 @@ async function processMiningJob(job) {
         return orchestrateFile(job);
     }
 
-    // URL JOBS → Select mining mode
+    // URL JOBS → Check for PDF URL before mining mode selection
     if (jobType === 'url') {
+        // PDF URL Guard: Route PDF URLs to File Orchestrator
+        if (isPdfUrl(job.input)) {
+            console.log(`[MiningService] PDF URL detected, routing to File Orchestrator`);
+            return orchestrateFile(job);
+        }
+
         // Get mining mode from config (default to 'ai' for best quality)
         const mode = job.config?.mining_mode || 'ai';
         console.log(`[MiningService] Mining Mode: ${mode}`);
