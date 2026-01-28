@@ -11,6 +11,9 @@
 
 const { orchestrate: orchestrateFile } = require('./fileOrchestrator');
 const db = require('../db');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 // Shadow Mode Integration (Phase 1 - Step C)
 const { normalizeMinerOutput } = require('./normalizer');
@@ -465,6 +468,72 @@ function isPdfUrl(url) {
     }
 }
 
+/**
+ * Download PDF from URL to temporary file
+ * @param {string} url - PDF URL
+ * @param {number} jobId - Job ID for filename
+ * @returns {Promise<string>} - Path to downloaded file
+ */
+async function downloadPdfFromUrl(url, jobId) {
+    const https = require('https');
+    const http = require('http');
+    
+    const tempDir = os.tmpdir();
+    const filename = `liffy_pdf_${jobId}_${Date.now()}.pdf`;
+    const filePath = path.join(tempDir, filename);
+    
+    console.log(`[MiningService] Downloading PDF from: ${url}`);
+    console.log(`[MiningService] Saving to: ${filePath}`);
+    
+    return new Promise((resolve, reject) => {
+        const protocol = url.startsWith('https') ? https : http;
+        
+        const request = protocol.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+            },
+            timeout: 60000
+        }, (response) => {
+            // Handle redirects
+            if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+                console.log(`[MiningService] Following redirect to: ${response.headers.location}`);
+                downloadPdfFromUrl(response.headers.location, jobId)
+                    .then(resolve)
+                    .catch(reject);
+                return;
+            }
+            
+            if (response.statusCode !== 200) {
+                reject(new Error(`HTTP ${response.statusCode}: Failed to download PDF`));
+                return;
+            }
+            
+            const fileStream = fs.createWriteStream(filePath);
+            response.pipe(fileStream);
+            
+            fileStream.on('finish', () => {
+                fileStream.close();
+                console.log(`[MiningService] PDF downloaded successfully`);
+                resolve(filePath);
+            });
+            
+            fileStream.on('error', (err) => {
+                fs.unlink(filePath, () => {});
+                reject(err);
+            });
+        });
+        
+        request.on('error', (err) => {
+            reject(err);
+        });
+        
+        request.on('timeout', () => {
+            request.destroy();
+            reject(new Error('PDF download timeout'));
+        });
+    });
+}
+
 // ============================================
 // MAIN PROCESSOR
 // ============================================
@@ -486,10 +555,46 @@ async function processMiningJob(job) {
 
     // URL JOBS → Check for PDF URL before mining mode selection
     if (jobType === 'url') {
-        // PDF URL Guard: Route PDF URLs to File Orchestrator
+        // PDF URL Guard: Download PDF and route to File Orchestrator
         if (isPdfUrl(job.input)) {
-            console.log(`[MiningService] PDF URL detected, routing to File Orchestrator`);
-            return orchestrateFile(job);
+            console.log(`[MiningService] PDF URL detected, downloading and routing to File Orchestrator`);
+            
+            try {
+                const pdfFilePath = await downloadPdfFromUrl(job.input, job.id);
+                
+                // Attach file path to job for File Orchestrator
+                job.file_path = pdfFilePath;
+                job.original_filename = path.basename(job.input);
+                job.type = 'pdf';
+                
+                const result = await orchestrateFile(job);
+                
+                // Cleanup temp file after processing
+                try {
+                    fs.unlinkSync(pdfFilePath);
+                    console.log(`[MiningService] Temp PDF file cleaned up`);
+                } catch (cleanupErr) {
+                    console.log(`[MiningService] Temp file cleanup warning: ${cleanupErr.message}`);
+                }
+                
+                return result;
+                
+            } catch (downloadErr) {
+                console.error(`[MiningService] PDF download failed: ${downloadErr.message}`);
+                
+                // Mark job as failed
+                await db.query(
+                    `UPDATE mining_jobs SET status = 'failed', error = $1, completed_at = NOW() WHERE id = $2`,
+                    [`PDF download failed: ${downloadErr.message}`, job.id]
+                );
+                
+                return {
+                    status: 'ERROR',
+                    emails: [],
+                    contacts: [],
+                    meta: { error: `PDF download failed: ${downloadErr.message}` }
+                };
+            }
         }
 
         // Get mining mode from config (default to 'ai' for best quality)
