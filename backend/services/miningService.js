@@ -559,19 +559,30 @@ async function processMiningJob(job) {
         if (isPdfUrl(job.input)) {
             console.log(`[MiningService] PDF URL detected, downloading and routing to File Orchestrator`);
             
+            let tempFilePath = null;
+            
             try {
-                const pdfFilePath = await downloadPdfFromUrl(job.input, job.id);
+                // Download PDF to temp file
+                tempFilePath = await downloadPdfFromUrl(job.input, job.id);
                 
-                // Attach file path to job for File Orchestrator
-                job.file_path = pdfFilePath;
-                job.original_filename = path.basename(job.input);
+                // Read file into buffer for file_data
+                const fileBuffer = fs.readFileSync(tempFilePath);
+                console.log(`[MiningService] PDF loaded into buffer: ${fileBuffer.length} bytes`);
+                
+                // Extract filename from URL for extension detection
+                const urlObj = new URL(job.input);
+                const originalFilename = path.basename(urlObj.pathname) || 'downloaded.pdf';
+                
+                // Attach file_data to job for File Orchestrator
+                job.file_data = fileBuffer;
                 job.type = 'pdf';
+                job.input = originalFilename;
                 
                 const result = await orchestrateFile(job);
                 
                 // Cleanup temp file after processing
                 try {
-                    fs.unlinkSync(pdfFilePath);
+                    fs.unlinkSync(tempFilePath);
                     console.log(`[MiningService] Temp PDF file cleaned up`);
                 } catch (cleanupErr) {
                     console.log(`[MiningService] Temp file cleanup warning: ${cleanupErr.message}`);
@@ -581,6 +592,13 @@ async function processMiningJob(job) {
                 
             } catch (downloadErr) {
                 console.error(`[MiningService] PDF download failed: ${downloadErr.message}`);
+                
+                // Cleanup temp file on error
+                if (tempFilePath) {
+                    try {
+                        fs.unlinkSync(tempFilePath);
+                    } catch (e) {}
+                }
                 
                 // Mark job as failed
                 await db.query(
