@@ -28,6 +28,16 @@ try {
     console.log('[MiningService] ⚠️ ResultMerger not available:', e.message);
 }
 
+// Pagination handler
+const {
+    buildPageUrl,
+    detectTotalPages,
+    fetchPage,
+    createContentHash,
+    DEFAULT_MAX_PAGES,
+    DEFAULT_DELAY_MS
+} = require('./superMiner/services/paginationHandler');
+
 // ============================================
 // MINERS
 // ============================================
@@ -203,6 +213,95 @@ async function runShadowModeFromMergedResult(job, finalResult) {
 }
 
 // ============================================
+// PAGINATION HELPERS
+// ============================================
+
+/**
+ * Detect pagination for a job URL and return page URLs.
+ * @param {Object} job
+ * @returns {Promise<{isPaginated: boolean, pageUrls: string[], totalPages: number}>}
+ */
+async function detectJobPagination(job) {
+    const maxPages = job.config?.max_pages || DEFAULT_MAX_PAGES;
+
+    // Check if URL has pagination signal
+    const url = job.input || '';
+    const hasPageParam = /[?&]page=\d+/i.test(url) || /\/page\/\d+/i.test(url);
+
+    if (!hasPageParam) {
+        return { isPaginated: false, pageUrls: [url], totalPages: 1 };
+    }
+
+    console.log(`[Pagination] URL has page param, detecting total pages...`);
+
+    // Fetch page 1 to detect total
+    let totalDetected = 1;
+    try {
+        const result = await fetchPage(url);
+        if (!result.blocked && result.html) {
+            totalDetected = detectTotalPages(result.html, url);
+        }
+    } catch (err) {
+        console.warn(`[Pagination] Detection fetch failed: ${err.message}`);
+    }
+
+    if (totalDetected <= 1) {
+        totalDetected = 5; // Conservative default
+        console.log(`[Pagination] Could not detect total, using default: ${totalDetected}`);
+    }
+
+    const totalPages = Math.min(totalDetected, maxPages);
+
+    if (totalPages <= 1) {
+        return { isPaginated: false, pageUrls: [url], totalPages: 1 };
+    }
+
+    const pageUrls = [];
+    for (let i = 1; i <= totalPages; i++) {
+        pageUrls.push(buildPageUrl(url, i));
+    }
+
+    console.log(`[Pagination] Will mine ${totalPages} pages`);
+    return { isPaginated: true, pageUrls, totalPages };
+}
+
+/**
+ * Merge contacts from multiple page results (AI or full mode).
+ * Deduplicates by email.
+ * @param {Array} allContacts - Flat array of contact objects
+ * @returns {Array} Deduplicated contacts
+ */
+function deduplicateContacts(allContacts) {
+    const emailMap = new Map();
+    const noEmailContacts = [];
+
+    for (const c of allContacts) {
+        const email = (c.email || c.emails?.[0] || '').toLowerCase();
+        if (email) {
+            if (!emailMap.has(email)) {
+                emailMap.set(email, c);
+            } else {
+                // Merge: fill in missing fields from new contact
+                const existing = emailMap.get(email);
+                for (const key of Object.keys(c)) {
+                    if (c[key] && !existing[key]) {
+                        existing[key] = c[key];
+                    }
+                }
+            }
+        } else if (c.companyName || c.contactName || c.company_name || c.contact_name) {
+            noEmailContacts.push(c);
+        }
+    }
+
+    return [...emailMap.values(), ...noEmailContacts];
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ============================================
 // MINING MODES
 // ============================================
 
@@ -223,83 +322,246 @@ async function runQuickMining(job) {
 
 /**
  * Full Mode - All miners + merge
+ * v5.1: Pagination support — mines all pages for paginated URLs
  */
 async function runFullMining(job) {
     console.log(`\n${'='.repeat(60)}`);
     console.log(`[Full Mode] Starting for job ${job.id}`);
     console.log(`[Full Mode] URL: ${job.input}`);
     console.log(`${'='.repeat(60)}\n`);
-    
-    const miners = [httpBasicMiner, playwrightTableMiner, playwrightDetailMiner].filter(m => m);
-    const results = [];
+
+    const availableMiners = [httpBasicMiner, playwrightTableMiner, playwrightDetailMiner].filter(m => m);
     const startTime = Date.now();
-    
-    for (const miner of miners) {
-        console.log(`\n[Full Mode] >>> Running ${miner.name}...`);
-        try {
-            const result = await miner.mine(job);
-            results.push(result);
-            console.log(`[Full Mode] <<< ${miner.name}: ${result.status}`);
-        } catch (err) {
-            console.log(`[Full Mode] <<< ${miner.name} failed: ${err.message}`);
+
+    // Detect pagination
+    const pagination = await detectJobPagination(job);
+
+    let allPageResults = [];
+
+    if (pagination.isPaginated) {
+        console.log(`[Full Mode] Paginated mining: ${pagination.totalPages} pages`);
+        const delayMs = job.config?.list_page_delay_ms || DEFAULT_DELAY_MS;
+        const seenHashes = new Set();
+        let consecutiveEmpty = 0;
+
+        for (let i = 0; i < pagination.pageUrls.length; i++) {
+            const pageUrl = pagination.pageUrls[i];
+            const pageNum = i + 1;
+            console.log(`\n[Full Mode] --- Page ${pageNum}/${pagination.totalPages}: ${pageUrl}`);
+
+            const pageJob = { ...job, input: pageUrl };
+            const pageResults = [];
+
+            for (const miner of availableMiners) {
+                console.log(`[Full Mode] >>> Running ${miner.name} on page ${pageNum}...`);
+                try {
+                    const result = await miner.mine(pageJob);
+                    pageResults.push(result);
+                    console.log(`[Full Mode] <<< ${miner.name}: ${result.status}`);
+                } catch (err) {
+                    console.log(`[Full Mode] <<< ${miner.name} failed: ${err.message}`);
+                }
+            }
+
+            // Merge this page's results
+            let pageResult;
+            if (resultMerger) {
+                pageResult = resultMerger.mergeResults(pageResults);
+            } else {
+                pageResult = { status: 'PARTIAL', emails: [], contacts: [] };
+            }
+
+            const contacts = pageResult.contacts || [];
+            if (contacts.length === 0) {
+                consecutiveEmpty++;
+                if (consecutiveEmpty >= 3) {
+                    console.log(`[Full Mode] Stopping: 3 consecutive empty pages`);
+                    break;
+                }
+            } else {
+                consecutiveEmpty = 0;
+                const hash = createContentHash(contacts);
+                if (seenHashes.has(hash)) {
+                    console.log(`[Full Mode] Page ${pageNum}: duplicate content, stopping`);
+                    break;
+                }
+                seenHashes.add(hash);
+                allPageResults.push(pageResult);
+                console.log(`[Full Mode] Page ${pageNum}: ${contacts.length} contacts`);
+            }
+
+            if (i < pagination.pageUrls.length - 1) {
+                await sleep(delayMs);
+            }
         }
-    }
-    
-    // Merge results
-    let finalResult;
-    if (resultMerger) {
-        finalResult = resultMerger.mergeResults(results);
     } else {
-        finalResult = { status: 'PARTIAL', emails: [], contacts: [] };
+        // Single page — original behavior
+        const results = [];
+        for (const miner of availableMiners) {
+            console.log(`\n[Full Mode] >>> Running ${miner.name}...`);
+            try {
+                const result = await miner.mine(job);
+                results.push(result);
+                console.log(`[Full Mode] <<< ${miner.name}: ${result.status}`);
+            } catch (err) {
+                console.log(`[Full Mode] <<< ${miner.name} failed: ${err.message}`);
+            }
+        }
+
+        let pageResult;
+        if (resultMerger) {
+            pageResult = resultMerger.mergeResults(results);
+        } else {
+            pageResult = { status: 'PARTIAL', emails: [], contacts: [] };
+        }
+        allPageResults.push(pageResult);
     }
-    
+
+    // Merge all pages
+    let finalResult;
+    if (allPageResults.length === 0) {
+        finalResult = { status: 'EMPTY', emails: [], contacts: [] };
+    } else if (allPageResults.length === 1) {
+        finalResult = allPageResults[0];
+    } else {
+        // Merge across pages
+        let allContacts = [];
+        let allEmails = [];
+        for (const pr of allPageResults) {
+            allContacts.push(...(pr.contacts || []));
+            allEmails.push(...(pr.emails || []));
+        }
+        allContacts = deduplicateContacts(allContacts);
+        allEmails = [...new Set(allEmails)];
+        finalResult = {
+            status: allContacts.length > 0 ? 'SUCCESS' : 'EMPTY',
+            contacts: allContacts,
+            emails: allEmails
+        };
+    }
+
     // Shadow Mode Normalization (Phase 1 - Step C)
     await runShadowModeFromMergedResult(job, finalResult);
-    
+
     // Save merged contacts
     if (finalResult.contacts?.length > 0) {
         await saveMergedResults(job, finalResult.contacts);
     }
-    
+
     await updateJobStatus(job, finalResult, Date.now() - startTime);
-    
+
     console.log(`\n[Full Mode] COMPLETED - ${finalResult.contacts?.length || 0} contacts`);
+    if (pagination.isPaginated) {
+        console.log(`[Full Mode] Pages mined: ${pagination.totalPages}`);
+    }
     return finalResult;
 }
 
 /**
  * AI Mode - Claude AI extraction (BEST)
+ * v5.1: Pagination support — mines all pages for paginated URLs
  */
 async function runAIMining(job) {
     console.log(`\n${'='.repeat(60)}`);
-    console.log(`[AI Mode] 🤖 Starting for job ${job.id}`);
+    console.log(`[AI Mode] Starting for job ${job.id}`);
     console.log(`[AI Mode] URL: ${job.input}`);
     console.log(`${'='.repeat(60)}\n`);
-    
+
     if (!aiMiner) {
         throw new Error('AIMiner not available - check ANTHROPIC_API_KEY');
     }
-    
+
     const startTime = Date.now();
-    const result = await aiMiner.mine(job);
+
+    // Detect pagination
+    const pagination = await detectJobPagination(job);
+
+    let allContacts = [];
+    let allEmails = [];
+
+    if (pagination.isPaginated) {
+        console.log(`[AI Mode] Paginated mining: ${pagination.totalPages} pages`);
+        const delayMs = job.config?.list_page_delay_ms || DEFAULT_DELAY_MS;
+        const seenHashes = new Set();
+        let consecutiveEmpty = 0;
+
+        for (let i = 0; i < pagination.pageUrls.length; i++) {
+            const pageUrl = pagination.pageUrls[i];
+            const pageNum = i + 1;
+            console.log(`[AI Mode] --- Page ${pageNum}/${pagination.totalPages}: ${pageUrl}`);
+
+            const pageJob = { ...job, input: pageUrl };
+            try {
+                const pageResult = await aiMiner.mine(pageJob);
+                const contacts = pageResult.contacts || [];
+                const emails = pageResult.emails || [];
+
+                if (contacts.length === 0) {
+                    consecutiveEmpty++;
+                    if (consecutiveEmpty >= 3) {
+                        console.log(`[AI Mode] Stopping: 3 consecutive empty pages`);
+                        break;
+                    }
+                } else {
+                    consecutiveEmpty = 0;
+                    const hash = createContentHash(contacts);
+                    if (seenHashes.has(hash)) {
+                        console.log(`[AI Mode] Page ${pageNum}: duplicate content, stopping`);
+                        break;
+                    }
+                    seenHashes.add(hash);
+                    allContacts.push(...contacts);
+                    allEmails.push(...emails);
+                    console.log(`[AI Mode] Page ${pageNum}: ${contacts.length} contacts, ${emails.length} emails`);
+                }
+            } catch (err) {
+                console.error(`[AI Mode] Page ${pageNum} failed: ${err.message}`);
+            }
+
+            // Polite delay between pages
+            if (i < pagination.pageUrls.length - 1) {
+                await sleep(delayMs);
+            }
+        }
+
+        // Deduplicate across pages
+        allContacts = deduplicateContacts(allContacts);
+        allEmails = [...new Set(allEmails)];
+        console.log(`[AI Mode] All pages: ${allContacts.length} unique contacts after dedup`);
+    } else {
+        // Single page — original behavior
+        const result = await aiMiner.mine(job);
+        allContacts = result.contacts || [];
+        allEmails = result.emails || [];
+    }
+
+    const finalResult = {
+        status: allContacts.length > 0 ? 'SUCCESS' : 'EMPTY',
+        contacts: allContacts,
+        emails: allEmails,
+        meta: { source: 'aiMiner', pages_mined: pagination.totalPages }
+    };
 
     // Save contacts to DB
-    if (result.contacts?.length > 0) {
-        await saveAIResults(job, result.contacts);
+    if (finalResult.contacts.length > 0) {
+        await saveAIResults(job, finalResult.contacts);
     }
 
     // Aggregation trigger (canonical tables: persons + affiliations)
-    await runShadowModeFromMergedResult(job, result);
+    await runShadowModeFromMergedResult(job, finalResult);
 
-    await updateJobStatus(job, result, Date.now() - startTime);
-    
+    await updateJobStatus(job, finalResult, Date.now() - startTime);
+
     console.log(`\n${'='.repeat(60)}`);
-    console.log(`[AI Mode] ✅ COMPLETED in ${Date.now() - startTime}ms`);
-    console.log(`[AI Mode] Total contacts: ${result.contacts?.length || 0}`);
-    console.log(`[AI Mode] Total emails: ${result.emails?.length || 0}`);
+    console.log(`[AI Mode] COMPLETED in ${Date.now() - startTime}ms`);
+    console.log(`[AI Mode] Total contacts: ${finalResult.contacts.length}`);
+    console.log(`[AI Mode] Total emails: ${finalResult.emails.length}`);
+    if (pagination.isPaginated) {
+        console.log(`[AI Mode] Pages mined: ${pagination.totalPages}`);
+    }
     console.log(`${'='.repeat(60)}\n`);
-    
-    return result;
+
+    return finalResult;
 }
 
 // ============================================

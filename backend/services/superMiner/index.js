@@ -13,8 +13,8 @@
 const SUPERMINER_ENABLED = process.env.SUPERMINER_ENABLED === 'true';
 
 // Version info
-const VERSION = '3.1.5';
-const BUILD_DATE = '2025-01-week6';
+const VERSION = '3.2.0';
+const BUILD_DATE = '2026-02-week8';
 
 // Check required env variables
 function checkRequirements() {

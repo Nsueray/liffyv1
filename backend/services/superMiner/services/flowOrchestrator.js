@@ -1,5 +1,5 @@
 /**
- * flowOrchestrator.js - SuperMiner v3.1.6
+ * flowOrchestrator.js - SuperMiner v3.2
  *
  * Ana akış kontrolü - Flow 1 ve Flow 2 yönetimi.
  *
@@ -13,6 +13,11 @@
  * - Aggregator V1 Redis'e yazar (temp_results:{jobId})
  * - Aggregator V2 DB'ye yazar (final merge)
  *
+ * v3.2 CHANGELOG:
+ * - FEAT: Pagination support — multi-page mining for paginated sites
+ * - FlowOrchestrator now detects pagination via PageAnalyzer/SmartRouter hints
+ *   and iterates through all pages, merging results before aggregation
+ *
  * v3.1.6 CHANGELOG:
  * - FIX: normalizeResult() now handles both camelCase and snake_case field names
  * - aiMiner returns companyName (camelCase), we now check both formats
@@ -25,10 +30,18 @@ const { getHtmlCache } = require('./htmlCache');
 const { createResultAggregator, ENRICHMENT_THRESHOLD } = require('./resultAggregator');
 const { getEventBus, CHANNELS } = require('./eventBus');
 const { getIntermediateStorage } = require('./intermediateStorage');
-const { getPageAnalyzer, PAGE_TYPES } = require('./pageAnalyzer');
+const { getPageAnalyzer, PAGE_TYPES, PAGINATION_TYPES } = require('./pageAnalyzer');
 const { buildExecutionPlan } = require('./executionPlanBuilder');
 const documentTextNormalizer = require('./documentTextNormalizer');
 const { UnifiedContact } = require('../types/UnifiedContact');
+const {
+    buildPageUrl,
+    detectTotalPages,
+    fetchPage,
+    createContentHash,
+    DEFAULT_MAX_PAGES,
+    DEFAULT_DELAY_MS
+} = require('./paginationHandler');
 
 // Flow states
 const FLOW_STATE = {
@@ -47,7 +60,10 @@ const DEFAULT_CONFIG = {
     enableFlow2: true,
     flow2Threshold: ENRICHMENT_THRESHOLD,
     maxFlow2Websites: 20,
-    timeoutMs: 300000 // 5 minutes
+    timeoutMs: 300000, // 5 minutes
+    enablePagination: true,
+    maxPages: DEFAULT_MAX_PAGES,
+    pageDelayMs: DEFAULT_DELAY_MS
 };
 
 class FlowOrchestrator {
@@ -72,7 +88,7 @@ class FlowOrchestrator {
         // Job tracking
         this.activeJobs = new Map();
 
-        console.log('[FlowOrchestrator] ✅ Initialized (v3.1.6)');
+        console.log('[FlowOrchestrator] ✅ Initialized (v3.2 - pagination support)');
     }
 
     /**
@@ -379,7 +395,8 @@ class FlowOrchestrator {
                 totalTime,
                 flow1: {
                     contactCount: flow1Result.contactCount,
-                    enrichmentRate: flow1Result.enrichmentRate
+                    enrichmentRate: flow1Result.enrichmentRate,
+                    pagination: flow1Result.paginationStats || null
                 },
                 flow2: flow2Result ? {
                     triggered: flow1Result.enrichmentRate < this.config.flow2Threshold,
@@ -431,8 +448,204 @@ class FlowOrchestrator {
     }
 
     /**
+     * Detect if a job URL is paginated and return pagination info.
+     * Uses PageAnalyzer results + SmartRouter hints + page 1 HTML detection.
+     *
+     * @param {Object} job - Mining job
+     * @param {Object} routeDecision - SmartRouter decision (optional)
+     * @returns {Promise<{isPaginated: boolean, totalPages: number, pageUrls: string[]}>}
+     */
+    async detectPagination(job, routeDecision = null) {
+        if (!this.config.enablePagination) {
+            return { isPaginated: false, totalPages: 1, pageUrls: [job.input] };
+        }
+
+        const maxPages = job.config?.max_pages || this.config.maxPages;
+
+        // Check SmartRouter hints first
+        const hints = routeDecision?.hints || {};
+        const paginationType = routeDecision?.paginationType || null;
+        const hasPaginationHint = hints.pagination?.detected || false;
+
+        // Also check if the URL itself has a page param (strong signal)
+        const urlHasPageParam = /[?&]page=\d+/i.test(job.input) || /\/page\/\d+/i.test(job.input);
+
+        if (!hasPaginationHint && !urlHasPageParam) {
+            return { isPaginated: false, totalPages: 1, pageUrls: [job.input] };
+        }
+
+        console.log(`[Pagination] Detected pagination signal (hint: ${hasPaginationHint}, urlParam: ${urlHasPageParam})`);
+
+        // Fetch page 1 to detect total pages
+        let page1Html = null;
+        try {
+            const result = await fetchPage(job.input);
+            if (!result.blocked && result.html) {
+                page1Html = result.html;
+            }
+        } catch (err) {
+            console.warn(`[Pagination] Could not fetch page 1 for detection: ${err.message}`);
+        }
+
+        let totalDetected = 1;
+        if (page1Html) {
+            totalDetected = detectTotalPages(page1Html, job.input);
+        }
+
+        // If URL has page param but detection found 1, use a reasonable default scan
+        if (totalDetected <= 1 && urlHasPageParam) {
+            totalDetected = 5; // Conservative default for URL-signaled pagination
+            console.log(`[Pagination] URL has page param but could not detect total, using default: ${totalDetected}`);
+        }
+
+        const totalPages = Math.min(totalDetected, maxPages);
+
+        if (totalPages <= 1) {
+            return { isPaginated: false, totalPages: 1, pageUrls: [job.input] };
+        }
+
+        // Build URLs for all pages
+        const pageUrls = [];
+        for (let i = 1; i <= totalPages; i++) {
+            pageUrls.push(buildPageUrl(job.input, i));
+        }
+
+        console.log(`[Pagination] Will mine ${totalPages} pages (detected: ${totalDetected}, max: ${maxPages})`);
+
+        return { isPaginated: true, totalPages, pageUrls };
+    }
+
+    /**
+     * Mine a single page URL with the given miner.
+     * Returns normalized miner result.
+     *
+     * @param {Object} miner - Miner instance
+     * @param {Object} job - Original job (will be cloned with modified input)
+     * @param {string} pageUrl - URL for this specific page
+     * @param {number} pageNum - Page number (for logging)
+     * @returns {Promise<Object>} Miner result
+     */
+    async mineSinglePage(miner, job, pageUrl, pageNum) {
+        // Create a shallow copy of the job with the page URL
+        const pageJob = { ...job, input: pageUrl };
+
+        try {
+            const result = await miner.mine(pageJob);
+
+            const contactCount = result.contacts?.length || 0;
+            const emailCount = result.emails?.length || 0;
+            console.log(`[Pagination] Page ${pageNum}: ${contactCount} contacts, ${emailCount} emails`);
+
+            if (this.circuitBreaker && result.status !== 'BLOCKED') {
+                this.circuitBreaker.recordSuccess(pageUrl);
+            }
+
+            return result;
+        } catch (err) {
+            console.error(`[Pagination] Page ${pageNum} failed: ${err.message}`);
+
+            if (this.circuitBreaker) {
+                this.circuitBreaker.recordFailure(pageUrl, err.message);
+            }
+
+            return { status: 'FAILED', contacts: [], emails: [], error: err.message };
+        }
+    }
+
+    /**
+     * Mine all pages of a paginated site and return merged results.
+     *
+     * @param {Object} miner - Miner to use
+     * @param {Object} job - Mining job
+     * @param {string[]} pageUrls - URLs for each page
+     * @returns {Promise<Object>} Merged result from all pages
+     */
+    async mineAllPages(miner, job, pageUrls) {
+        const allResults = [];
+        const seenHashes = new Set();
+        const delayMs = job.config?.list_page_delay_ms || this.config.pageDelayMs;
+        let consecutiveDuplicates = 0;
+        let consecutiveEmpty = 0;
+
+        console.log(`[Pagination] Mining ${pageUrls.length} pages (delay: ${delayMs}ms)`);
+
+        for (let i = 0; i < pageUrls.length; i++) {
+            const pageNum = i + 1;
+            const pageUrl = pageUrls[i];
+
+            console.log(`[Pagination] --- Page ${pageNum}/${pageUrls.length}: ${pageUrl}`);
+
+            const result = await this.mineSinglePage(miner, job, pageUrl, pageNum);
+
+            // Check for empty result
+            if (!result.contacts || result.contacts.length === 0) {
+                consecutiveEmpty++;
+                console.log(`[Pagination] Page ${pageNum}: empty (consecutive: ${consecutiveEmpty})`);
+
+                if (consecutiveEmpty >= 3) {
+                    console.log(`[Pagination] Stopping: 3 consecutive empty pages`);
+                    break;
+                }
+
+                // Still delay before next page
+                if (i < pageUrls.length - 1) {
+                    await this.sleep(delayMs);
+                }
+                continue;
+            }
+
+            consecutiveEmpty = 0; // Reset empty counter
+
+            // Duplicate content detection
+            const hash = createContentHash(result.contacts);
+            if (seenHashes.has(hash)) {
+                consecutiveDuplicates++;
+                console.log(`[Pagination] Page ${pageNum}: duplicate content (consecutive: ${consecutiveDuplicates})`);
+
+                if (consecutiveDuplicates >= 2) {
+                    console.log(`[Pagination] Stopping: 2 consecutive duplicate pages`);
+                    break;
+                }
+            } else {
+                consecutiveDuplicates = 0;
+                seenHashes.add(hash);
+                allResults.push(result);
+            }
+
+            // Delay between pages (polite crawling)
+            if (i < pageUrls.length - 1) {
+                await this.sleep(delayMs);
+            }
+        }
+
+        console.log(`[Pagination] Completed: ${allResults.length} unique pages mined`);
+
+        // Merge all page results
+        if (allResults.length === 0) {
+            return { status: 'EMPTY', contacts: [], emails: [], source: 'pagination' };
+        }
+
+        if (allResults.length === 1) {
+            return allResults[0];
+        }
+
+        return this.mergeResults(allResults);
+    }
+
+    /**
+     * Sleep helper for delays between pages.
+     * @param {number} ms
+     */
+    sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    /**
      * Execute Flow 1: Miners → Aggregator V1 → Redis
      * DOES NOT WRITE TO DB!
+     *
+     * v3.2: Now supports pagination — detects paginated sites and
+     * iterates through all pages before aggregating.
      */
     async executeFlow1(job) {
         const jobId = job.id;
@@ -490,52 +703,105 @@ class FlowOrchestrator {
                         }
                     }
 
+                    // --- Pagination detection for execution plan path ---
+                    const paginationInfo = await this.detectPagination(job, {
+                        paginationType: analysis.paginationType,
+                        hints: { pagination: { detected: analysis.paginationType !== PAGINATION_TYPES.NONE } }
+                    });
+
                     const minerResults = [];
 
-                    for (const step of executablePlan) {
-                        const miner = miners[step.miner];
+                    if (paginationInfo.isPaginated) {
+                        console.log(`[Flow1] Paginated execution plan: ${paginationInfo.totalPages} pages`);
 
-                        console.log(`[Flow1] Step 2: Mining with ${step.miner}...`);
+                        // For paginated sites with execution plan, run primary miner across all pages
+                        const primaryStep = executablePlan[0];
+                        const primaryMiner = miners[primaryStep.miner];
 
-                        let minerResult;
+                        const paginatedResult = await this.mineAllPages(primaryMiner, job, paginationInfo.pageUrls);
 
-                        try {
-                            minerResult = await miner.mine(job);
-
-                            console.log(`[Flow1] Miner result: ${minerResult.contacts?.length || 0} contacts, ${minerResult.emails?.length || 0} emails`);
-
-                            if (this.circuitBreaker && minerResult.status !== 'BLOCKED') {
-                                this.circuitBreaker.recordSuccess(job.input);
-                            }
-                        } catch (err) {
-                            console.error(`[Flow1] Miner failed: ${err.message}`);
-
-                            if (this.circuitBreaker) {
-                                this.circuitBreaker.recordFailure(job.input, err.message);
-                            }
-
-                            minerResult = { status: 'FAILED', contacts: [], emails: [], error: err.message };
+                        if (primaryStep.normalizer === 'documentTextNormalizer') {
+                            const normalized = documentTextNormalizer.normalize(paginatedResult, job.input);
+                            paginatedResult.contacts = normalized.contacts || [];
+                            paginatedResult.emails = (normalized.contacts || []).map(c => c.email).filter(Boolean);
+                            if (normalized.stats) paginatedResult.normalizationStats = normalized.stats;
                         }
 
-                        if (step.normalizer === 'documentTextNormalizer') {
-                            const normalized = documentTextNormalizer.normalize(minerResult, job.input);
+                        minerResults.push(paginatedResult);
 
-                            // contacts (yeni sistem)
-                            minerResult.contacts = normalized.contacts || [];
+                        // Run remaining miners on page 1 only (for enrichment)
+                        for (let i = 1; i < executablePlan.length; i++) {
+                            const step = executablePlan[i];
+                            const miner = miners[step.miner];
+                            console.log(`[Flow1] Enrichment miner (page 1 only): ${step.miner}`);
 
-                            // Legacy Aggregator uyumu icin
-                            minerResult.emails = (normalized.contacts || [])
-                                .map(c => c.email)
-                                .filter(Boolean);
-
-                            if (normalized.stats) {
-                                minerResult.normalizationStats = normalized.stats;
+                            let minerResult;
+                            try {
+                                minerResult = await miner.mine(job);
+                                if (this.circuitBreaker && minerResult.status !== 'BLOCKED') {
+                                    this.circuitBreaker.recordSuccess(job.input);
+                                }
+                            } catch (err) {
+                                console.error(`[Flow1] Enrichment miner failed: ${err.message}`);
+                                minerResult = { status: 'FAILED', contacts: [], emails: [], error: err.message };
                             }
+
+                            if (step.normalizer === 'documentTextNormalizer') {
+                                const normalized = documentTextNormalizer.normalize(minerResult, job.input);
+                                minerResult.contacts = normalized.contacts || [];
+                                minerResult.emails = (normalized.contacts || []).map(c => c.email).filter(Boolean);
+                                if (normalized.stats) minerResult.normalizationStats = normalized.stats;
+                            }
+
+                            minerResults.push(minerResult);
                         }
+                    } else {
+                        // No pagination — original behavior
+                        for (const step of executablePlan) {
+                            const miner = miners[step.miner];
 
-                        console.log(`[Flow1] Executed ${step.miner} (normalizer: ${step.normalizer})`);
+                            console.log(`[Flow1] Step 2: Mining with ${step.miner}...`);
 
-                        minerResults.push(minerResult);
+                            let minerResult;
+
+                            try {
+                                minerResult = await miner.mine(job);
+
+                                console.log(`[Flow1] Miner result: ${minerResult.contacts?.length || 0} contacts, ${minerResult.emails?.length || 0} emails`);
+
+                                if (this.circuitBreaker && minerResult.status !== 'BLOCKED') {
+                                    this.circuitBreaker.recordSuccess(job.input);
+                                }
+                            } catch (err) {
+                                console.error(`[Flow1] Miner failed: ${err.message}`);
+
+                                if (this.circuitBreaker) {
+                                    this.circuitBreaker.recordFailure(job.input, err.message);
+                                }
+
+                                minerResult = { status: 'FAILED', contacts: [], emails: [], error: err.message };
+                            }
+
+                            if (step.normalizer === 'documentTextNormalizer') {
+                                const normalized = documentTextNormalizer.normalize(minerResult, job.input);
+
+                                // contacts (yeni sistem)
+                                minerResult.contacts = normalized.contacts || [];
+
+                                // Legacy Aggregator uyumu icin
+                                minerResult.emails = (normalized.contacts || [])
+                                    .map(c => c.email)
+                                    .filter(Boolean);
+
+                                if (normalized.stats) {
+                                    minerResult.normalizationStats = normalized.stats;
+                                }
+                            }
+
+                            console.log(`[Flow1] Executed ${step.miner} (normalizer: ${step.normalizer})`);
+
+                            minerResults.push(minerResult);
+                        }
                     }
 
                     console.log('[Flow1] Step 3: Aggregating (V1 → Redis)...');
@@ -554,7 +820,11 @@ class FlowOrchestrator {
                         enrichmentRate: aggregationResult.enrichmentRate,
                         websiteUrls: aggregationResult.websiteUrlCount > 0 ?
                             (await this.storage.getFlowResults(jobId))?.websiteUrls : [],
-                        minerStats: aggregationResult.minerStats
+                        minerStats: aggregationResult.minerStats,
+                        paginationStats: paginationInfo.isPaginated ? {
+                            totalPages: paginationInfo.totalPages,
+                            pageUrls: paginationInfo.pageUrls.length
+                        } : null
                     };
                 }
             }
@@ -578,34 +848,44 @@ class FlowOrchestrator {
             }
         }
 
-        // 3. Execute miner
-        console.log(`[Flow1] Step 2: Mining with ${selectedMiner}...`);
+        // 3. Detect pagination
+        const paginationInfo = await this.detectPagination(job, routeDecision);
 
+        // 4. Execute miner (single page or paginated)
         const miner = miners[selectedMiner] || miners.fullMiner;
         let minerResult;
 
-        try {
-            minerResult = await miner.mine(job);
+        if (paginationInfo.isPaginated) {
+            // PAGINATED: Mine all pages
+            console.log(`[Flow1] Step 2: Paginated mining with ${selectedMiner} (${paginationInfo.totalPages} pages)...`);
+            minerResult = await this.mineAllPages(miner, job, paginationInfo.pageUrls);
+        } else {
+            // SINGLE PAGE: Original behavior
+            console.log(`[Flow1] Step 2: Mining with ${selectedMiner}...`);
 
-            console.log(`[Flow1] Miner result: ${minerResult.contacts?.length || 0} contacts, ${minerResult.emails?.length || 0} emails`);
+            try {
+                minerResult = await miner.mine(job);
 
-            // Record success in circuit breaker
-            if (this.circuitBreaker && minerResult.status !== 'BLOCKED') {
-                this.circuitBreaker.recordSuccess(job.input);
+                console.log(`[Flow1] Miner result: ${minerResult.contacts?.length || 0} contacts, ${minerResult.emails?.length || 0} emails`);
+
+                // Record success in circuit breaker
+                if (this.circuitBreaker && minerResult.status !== 'BLOCKED') {
+                    this.circuitBreaker.recordSuccess(job.input);
+                }
+
+            } catch (err) {
+                console.error(`[Flow1] Miner failed: ${err.message}`);
+
+                // Record failure in circuit breaker
+                if (this.circuitBreaker) {
+                    this.circuitBreaker.recordFailure(job.input, err.message);
+                }
+
+                minerResult = { status: 'FAILED', contacts: [], emails: [], error: err.message };
             }
-
-        } catch (err) {
-            console.error(`[Flow1] Miner failed: ${err.message}`);
-
-            // Record failure in circuit breaker
-            if (this.circuitBreaker) {
-                this.circuitBreaker.recordFailure(job.input, err.message);
-            }
-
-            minerResult = { status: 'FAILED', contacts: [], emails: [], error: err.message };
         }
 
-        // 4. Aggregate V1 (save to Redis, NOT DB!)
+        // 5. Aggregate V1 (save to Redis, NOT DB!)
         console.log('[Flow1] Step 3: Aggregating (V1 → Redis)...');
 
         const aggregationResult = await this.aggregator.aggregateV1(
@@ -622,7 +902,11 @@ class FlowOrchestrator {
             enrichmentRate: aggregationResult.enrichmentRate,
             websiteUrls: aggregationResult.websiteUrlCount > 0 ?
                 (await this.storage.getFlowResults(jobId))?.websiteUrls : [],
-            minerStats: aggregationResult.minerStats
+            minerStats: aggregationResult.minerStats,
+            paginationStats: paginationInfo.isPaginated ? {
+                totalPages: paginationInfo.totalPages,
+                pageUrls: paginationInfo.pageUrls.length
+            } : null
         };
     }
 
