@@ -277,6 +277,35 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 
 ---
 
+## Persons API (`backend/routes/persons.js`)
+
+Frontend-facing canonical persons + affiliations endpoints. Replaces legacy `prospects` read path.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/persons` | GET | List persons with pagination, search, filter (`verification_status`, `country`, `company`, `has_intent`). Returns latest affiliation per person. |
+| `/api/persons/stats` | GET | Dashboard counts: total, verified, invalid, unverified, with_intent |
+| `/api/persons/:id` | GET | Full person detail with all affiliations, intents, engagement summary, Zoho pushes |
+| `/api/persons/:id/affiliations` | GET | Person's affiliation list |
+| `/api/persons/:id` | DELETE | Delete person + affiliations + push logs |
+
+---
+
+## Import Dual-Write (Phase 3)
+
+All import paths now dual-write to canonical tables:
+
+| Import Path | File | Legacy Write | Canonical Write |
+|-------------|------|--------------|-----------------|
+| CSV Upload | `routes/lists.js` | `prospects` + `list_members` | `persons` UPSERT + `affiliations` UPSERT |
+| Import All (mining) | `routes/miningResults.js` | `prospects` + `list_members` | `persons` UPSERT + `affiliations` UPSERT |
+| Lead Import | `routes/leads.js` | `prospects` + `list_members` | `persons` UPSERT + `affiliations` UPSERT |
+| Aggregation Trigger | `services/aggregationTrigger.js` | — | `persons` + `affiliations` (canonical only) |
+
+All import responses include `canonical_sync: { persons_upserted, affiliations_upserted }`.
+
+---
+
 ## Zoho CRM Push — Integration (`backend/services/zohoService.js`, `backend/routes/zoho.js`)
 
 **Per-organizer** Zoho OAuth2 credentials stored in `organizers` table (`zoho_client_id`, `zoho_client_secret`, `zoho_refresh_token`, `zoho_datacenter`).

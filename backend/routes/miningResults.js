@@ -508,6 +508,8 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
     let imported = 0;
     let skipped = 0;
     let duplicates = 0;
+    let personsUpserted = 0;
+    let affiliationsUpserted = 0;
     const errors = [];
 
     for (const mr of miningResults) {
@@ -601,6 +603,52 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
           );
         }
 
+        // --- CANONICAL: persons table UPSERT (Phase 3 dual-write) ---
+        const nameParts = (mr.contact_name || '').trim().split(/\s+/);
+        const firstName = nameParts[0] || null;
+        const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null;
+
+        const personResult = await client.query(
+          `INSERT INTO persons (organizer_id, email, first_name, last_name)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
+             first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
+             last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
+             updated_at = NOW()
+           RETURNING id`,
+          [organizerId, trimmedEmail, firstName, lastName]
+        );
+        personsUpserted++;
+        const personId = personResult.rows[0].id;
+
+        // --- CANONICAL: affiliations table UPSERT (if company present) ---
+        if (mr.company_name) {
+          await client.query(
+            `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, city, website, phone, source_type, source_ref)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'mining', $9)
+             ON CONFLICT (organizer_id, person_id, LOWER(company_name))
+             WHERE company_name IS NOT NULL
+             DO UPDATE SET
+               position = COALESCE(NULLIF(EXCLUDED.position, ''), affiliations.position),
+               country_code = COALESCE(NULLIF(EXCLUDED.country_code, ''), affiliations.country_code),
+               city = COALESCE(NULLIF(EXCLUDED.city, ''), affiliations.city),
+               website = COALESCE(NULLIF(EXCLUDED.website, ''), affiliations.website),
+               phone = COALESCE(NULLIF(EXCLUDED.phone, ''), affiliations.phone)`,
+            [
+              organizerId,
+              personId,
+              mr.company_name,
+              mr.job_title || null,
+              mr.country ? mr.country.substring(0, 2).toUpperCase() : null,
+              mr.city || null,
+              mr.website || null,
+              mr.phone || null,
+              jobId
+            ]
+          );
+          affiliationsUpserted++;
+        }
+
         // Mark mining result as imported
         await client.query(
           `UPDATE mining_results SET status = 'imported', updated_at = NOW() WHERE id = $1`,
@@ -626,6 +674,10 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
         skipped: skipped,
         duplicates_updated: duplicates,
         new_prospects: imported - duplicates
+      },
+      canonical_sync: {
+        persons_upserted: personsUpserted,
+        affiliations_upserted: affiliationsUpserted
       },
       tags_applied: tagsArray,
       message: `Successfully imported ${imported} leads from "${job.name || jobId}"`

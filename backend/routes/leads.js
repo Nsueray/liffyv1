@@ -192,6 +192,8 @@ router.post('/import', authRequired, async (req, res) => {
 
     let imported = 0;
     let updated = 0;
+    let personsUpserted = 0;
+    let affiliationsUpserted = 0;
     const errors = [];
     const importedProspectIds = []; // Track imported prospect IDs for list creation
 
@@ -278,6 +280,53 @@ router.post('/import', authRequired, async (req, res) => {
           );
         }
 
+        // --- CANONICAL: persons table UPSERT (Phase 3 dual-write) ---
+        const nameParts = (lead.name || '').trim().split(/\s+/);
+        const firstName = nameParts[0] || null;
+        const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null;
+
+        const personResult = await client.query(
+          `INSERT INTO persons (organizer_id, email, first_name, last_name)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
+             first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
+             last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
+             updated_at = NOW()
+           RETURNING id`,
+          [organizerId, email, firstName, lastName]
+        );
+        personsUpserted++;
+        const personId = personResult.rows[0].id;
+
+        // --- CANONICAL: affiliations table UPSERT (if company present) ---
+        if (lead.company) {
+          await client.query(
+            `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, city, website, phone, source_type, source_ref)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (organizer_id, person_id, LOWER(company_name))
+             WHERE company_name IS NOT NULL
+             DO UPDATE SET
+               position = COALESCE(NULLIF(EXCLUDED.position, ''), affiliations.position),
+               country_code = COALESCE(NULLIF(EXCLUDED.country_code, ''), affiliations.country_code),
+               city = COALESCE(NULLIF(EXCLUDED.city, ''), affiliations.city),
+               website = COALESCE(NULLIF(EXCLUDED.website, ''), affiliations.website),
+               phone = COALESCE(NULLIF(EXCLUDED.phone, ''), affiliations.phone)`,
+            [
+              organizerId,
+              personId,
+              lead.company,
+              meta.job_title || null,
+              lead.country ? lead.country.substring(0, 2).toUpperCase() : null,
+              meta.city || null,
+              meta.website || lead.website || null,
+              meta.phone || lead.phone || null,
+              lead.source_type || 'import',
+              lead.source_ref || null
+            ]
+          );
+          affiliationsUpserted++;
+        }
+
       } catch (insertErr) {
         console.error(`Error importing lead ${lead.email}:`, insertErr.message);
         errors.push({ email: lead.email, error: insertErr.message });
@@ -321,6 +370,10 @@ router.post('/import', authRequired, async (req, res) => {
       imported,
       updated,
       total: leadsToImport.length,
+      canonical_sync: {
+        persons_upserted: personsUpserted,
+        affiliations_upserted: affiliationsUpserted
+      },
       tags_applied: normalizedTags,
       list_created: createdList,
       errors: errors.length > 0 ? errors : undefined
