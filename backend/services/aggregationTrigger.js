@@ -46,7 +46,7 @@ function isPersistEnabled() {
  * @param {Object} [options.metadata] - Additional context
  * @returns {Promise<Object>} Processing result
  */
-async function process({ jobId, organizerId, normalizationResult, metadata = {} }) {
+async function aggregate({ jobId, organizerId, normalizationResult, metadata = {} }) {
   if (!isEnabled()) {
     return { processed: false, reason: 'disabled', timestamp: new Date().toISOString() };
   }
@@ -301,7 +301,7 @@ function getStatus() {
 }
 
 module.exports = {
-  process,
+  process: aggregate,
   isEnabled,
   isPersistEnabled,
   getStatus,
