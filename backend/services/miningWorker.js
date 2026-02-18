@@ -265,11 +265,17 @@ async function getAllExhibitorLinks(page, baseUrl, config = {}) {
 
   for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
     if (pageNum > 1) {
-      // Smart URL construction
+      // Smart URL construction — replace existing page param if present
       let paramUrl;
-      if (baseUrl.includes("/page/")) paramUrl = baseUrl.replace(/\/page\/\d+/, `/page/${pageNum}`);
-      else if (baseUrl.endsWith("/")) paramUrl = `${baseUrl}page/${pageNum}/`;
-      else paramUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}page=${pageNum}`;
+      if (baseUrl.includes("/page/")) {
+        paramUrl = baseUrl.replace(/\/page\/\d+/, `/page/${pageNum}`);
+      } else if (baseUrl.match(/[?&]page=\d+/)) {
+        paramUrl = baseUrl.replace(/([?&])page=\d+/, `$1page=${pageNum}`);
+      } else if (baseUrl.endsWith("/")) {
+        paramUrl = `${baseUrl}page/${pageNum}/`;
+      } else {
+        paramUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}page=${pageNum}`;
+      }
 
       console.log(`  🔄 Page ${pageNum}: ${paramUrl}`);
       try {
@@ -278,7 +284,13 @@ async function getAllExhibitorLinks(page, baseUrl, config = {}) {
       } catch (e) {
         if (e.message.includes("BLOCK_DETECTED")) throw e;
         console.log("    Using fallback query param pagination...");
-        const altUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}page=${pageNum}`;
+        // Fallback: also handle existing page param
+        let altUrl;
+        if (baseUrl.match(/[?&]page=\d+/)) {
+          altUrl = baseUrl.replace(/([?&])page=\d+/, `$1page=${pageNum}`);
+        } else {
+          altUrl = `${baseUrl}${baseUrl.includes('?') ? '&' : '?'}page=${pageNum}`;
+        }
         await page.goto(altUrl, { waitUntil: "domcontentloaded", timeout: 20000 });
       }
     }

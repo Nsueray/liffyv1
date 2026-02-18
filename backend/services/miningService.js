@@ -174,7 +174,7 @@ async function runShadowModeFromMergedResult(job, finalResult) {
                 links: [],
             },
             meta: {
-                miner_name: 'miningService-fullMode',
+                miner_name: `miningService-${job.config?.mining_mode || 'full'}Mode`,
                 duration_ms: 0,
                 confidence_hint: null,
                 source_url: job.input || null,
@@ -191,7 +191,7 @@ async function runShadowModeFromMergedResult(job, finalResult) {
             metadata: {
                 original_contact_count: contacts.length,
                 source_url: job.input || null,
-                mining_mode: 'full',
+                mining_mode: job.config?.mining_mode || 'full',
             },
         });
 
@@ -282,12 +282,15 @@ async function runAIMining(job) {
     
     const startTime = Date.now();
     const result = await aiMiner.mine(job);
-    
+
     // Save contacts to DB
     if (result.contacts?.length > 0) {
         await saveAIResults(job, result.contacts);
     }
-    
+
+    // Aggregation trigger (canonical tables: persons + affiliations)
+    await runShadowModeFromMergedResult(job, result);
+
     await updateJobStatus(job, result, Date.now() - startTime);
     
     console.log(`\n${'='.repeat(60)}`);
