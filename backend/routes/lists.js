@@ -330,6 +330,23 @@ router.post('/upload-csv', authRequired, upload.single('file'), async (req, res)
 
     await client.query('COMMIT');
 
+    // --- AUTO-QUEUE for email verification (best-effort, non-blocking) ---
+    let verificationQueued = 0;
+    try {
+      const orgCheck = await db.query(
+        `SELECT zerobounce_api_key FROM organizers WHERE id = $1`,
+        [organizerId]
+      );
+      if (orgCheck.rows.length > 0 && orgCheck.rows[0].zerobounce_api_key) {
+        const { queueEmails } = require('../services/verificationService');
+        const emailsToVerify = validRows.map(r => r.email.toLowerCase().trim());
+        const queueResult = await queueEmails(organizerId, emailsToVerify, 'csv_upload');
+        verificationQueued = queueResult.queued;
+      }
+    } catch (vErr) {
+      console.error('CSV upload auto-queue verification error (non-fatal):', vErr.message);
+    }
+
     res.status(201).json({
       list_id: newList.id,
       list_name: newList.name,
@@ -340,7 +357,8 @@ router.post('/upload-csv', authRequired, upload.single('file'), async (req, res)
       canonical_sync: {
         persons_upserted: personsUpserted,
         affiliations_upserted: affiliationsUpserted
-      }
+      },
+      verification_queued: verificationQueued
     });
 
   } catch (err) {

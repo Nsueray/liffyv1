@@ -134,6 +134,7 @@ const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 30000;
 const CAMPAIGN_SCHEDULER_INTERVAL_MS = 10000;
 const CAMPAIGN_SENDER_INTERVAL_MS = 3000;
+const VERIFICATION_PROCESSOR_INTERVAL_MS = 30000;
 const EMAIL_BATCH_SIZE = 5;
 
 /* =========================================================
@@ -301,6 +302,40 @@ async function startCampaignSender() {
 }
 
 /* =========================================================
+   VERIFICATION PROCESSOR (ZeroBounce queue)
+   ========================================================= */
+async function startVerificationProcessor() {
+  const { processQueue } = require("./services/verificationService");
+
+  while (true) {
+    try {
+      // Find organizers with a ZeroBounce key and pending queue items
+      const orgRes = await db.query(`
+        SELECT DISTINCT o.id
+        FROM organizers o
+        JOIN verification_queue vq ON vq.organizer_id = o.id AND vq.status = 'pending'
+        WHERE o.zerobounce_api_key IS NOT NULL
+        LIMIT 10
+      `);
+
+      for (const org of orgRes.rows) {
+        try {
+          const result = await processQueue(org.id, 50);
+          if (result.processed > 0) {
+            console.log(`[Verification] Processed ${result.processed} emails for organizer ${org.id}`);
+          }
+        } catch (orgErr) {
+          console.error(`[Verification] Error for organizer ${org.id}:`, orgErr.message);
+        }
+      }
+    } catch (err) {
+      console.error("❌ Verification processor error:", err.message);
+    }
+    await sleep(VERIFICATION_PROCESSOR_INTERVAL_MS);
+  }
+}
+
+/* =========================================================
    WORKER LOOP
    ========================================================= */
 async function startWorker() {
@@ -309,6 +344,7 @@ async function startWorker() {
   await initSuperMiner();
   startCampaignScheduler();
   startCampaignSender();
+  startVerificationProcessor();
 
   while (true) {
     await processNextJob();

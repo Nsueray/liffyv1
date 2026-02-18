@@ -25,7 +25,7 @@ router.get('/', authRequired, async (req, res) => {
     
     // API Key'i güvenlik için maskeleyerek gönderiyoruz (son 4 hane hariç)
     const result = await db.query(
-      `SELECT sendgrid_api_key FROM organizers WHERE id = $1`,
+      `SELECT sendgrid_api_key, zerobounce_api_key FROM organizers WHERE id = $1`,
       [organizer_id]
     );
 
@@ -37,13 +37,21 @@ router.get('/', authRequired, async (req, res) => {
     let maskedKey = '';
 
     if (apiKey && apiKey.length > 5) {
-      maskedKey = '...' + apiKey.slice(-4); 
+      maskedKey = '...' + apiKey.slice(-4);
+    }
+
+    let zbKey = result.rows[0].zerobounce_api_key || '';
+    let maskedZbKey = '';
+    if (zbKey && zbKey.length > 5) {
+      maskedZbKey = '...' + zbKey.slice(-4);
     }
 
     res.json({
       settings: {
-        has_api_key: !!apiKey, // Frontend bilsin diye true/false
-        masked_api_key: maskedKey
+        has_api_key: !!apiKey,
+        masked_api_key: maskedKey,
+        has_zerobounce_key: !!zbKey,
+        masked_zerobounce_key: maskedZbKey
       }
     });
 
@@ -72,6 +80,38 @@ router.put('/apikey', authRequired, async (req, res) => {
 
   } catch (err) {
     console.error("PUT /api/settings/apikey error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/settings/zerobounce-key - ZeroBounce API Key update
+router.put('/zerobounce-key', authRequired, async (req, res) => {
+  try {
+    const { organizer_id } = req.auth;
+    const { api_key } = req.body;
+
+    if (!api_key || typeof api_key !== 'string' || api_key.trim().length < 10) {
+      return res.status(400).json({ error: "Invalid ZeroBounce API key" });
+    }
+
+    const trimmedKey = api_key.trim();
+
+    // Validate key by checking credits
+    const { checkCredits } = require('../services/verificationService');
+    const creditResult = await checkCredits(trimmedKey);
+
+    if (!creditResult.success) {
+      return res.status(400).json({ error: `Invalid ZeroBounce API key: ${creditResult.error}` });
+    }
+
+    await db.query(
+      `UPDATE organizers SET zerobounce_api_key = $1 WHERE id = $2`,
+      [trimmedKey, organizer_id]
+    );
+
+    res.json({ success: true, credits: creditResult.credits });
+  } catch (err) {
+    console.error("PUT /api/settings/zerobounce-key error:", err);
     res.status(500).json({ error: err.message });
   }
 });
