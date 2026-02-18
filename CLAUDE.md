@@ -41,7 +41,9 @@ Liffy strictly separates:
 
 Any component that crosses these boundaries is architecturally invalid.
 
-**Only the Aggregation layer may write to `persons` and `affiliations` tables.**
+**Canonical tables (`persons`, `affiliations`) are written by:**
+- Aggregation layer (mining pipeline, when `AGGREGATION_PERSIST=true`)
+- Import paths (CSV upload, import-all, leads/import) via Phase 3 dual-write
 Miners and normalizers NEVER write to the database directly.
 
 ### 3. No Silent Data Loss
@@ -80,7 +82,7 @@ A MiningResult is a discovery event, NOT a lead/contact/prospect.
 ### ProspectIntent (Intent Layer)
 A prospect is a person who has demonstrated intent (reply, form submission, manual qualification).
 - Mining NEVER creates prospects
-- Intent is linked to person_email + campaign_id
+- Intent is linked to person_id + campaign_id
 
 ### CampaignEvent (Engagement Layer)
 Engagement is stored as events, not scores.
@@ -273,6 +275,19 @@ resolve → status='ready' → schedule → status='scheduled' → (campaignSche
 **Worker:** `startVerificationProcessor()` runs every 30s, finds organizers with pending queue + ZeroBounce key, processes batches of 50. Rate-limited at ~20 calls/sec.
 
 **CSV Upload auto-queue:** After `POST /api/lists/upload-csv` commit, if organizer has ZeroBounce key, emails are auto-queued. Response includes `verification_queued` count.
+
+---
+
+## Reports & Logs (Migrated to `campaign_events`)
+
+Both reporting endpoints now read exclusively from `campaign_events` (canonical). The legacy `email_logs` table is no longer read or written.
+
+| Endpoint | Method | Source | Description |
+|----------|--------|--------|-------------|
+| `/api/reports/campaign/:id` | GET | `campaign_events` | Campaign report: event counts, timeline (per day), domain breakdown, bounce reasons |
+| `/api/reports/organizer/overview` | GET | `campaign_events` | Org-wide report: campaign stats, recipient stats, event counts, timeline, domains, bounces |
+| `/api/logs` | GET | `campaign_events` | Paginated event log with `campaign_id` and `event_type` filters |
+| `/api/logs/:id` | GET | `campaign_events` | Single event detail |
 
 ---
 
