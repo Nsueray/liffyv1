@@ -25,6 +25,10 @@ const { UnifiedContact, createSignature } = require('../types/UnifiedContact');
 const { validateContacts } = require('../pipeline/validatorV2');
 const { filterHallucinations } = require('../pipeline/hallucinationFilter');
 
+// Canonical aggregation (persons + affiliations)
+const { normalizeMinerOutput } = require('../../normalizer');
+const aggregationTrigger = require('../../aggregationTrigger');
+
 // Enrichment rate threshold for triggering Flow 2
 const ENRICHMENT_THRESHOLD = 0.2; // 20%
 
@@ -193,7 +197,12 @@ class ResultAggregator {
         
         // Write to DB (single transaction)
         const dbResult = await this.writeToDatabase(jobId, organizerId, contactsWithSource);
-        
+
+        // Canonical aggregation: persons + affiliations
+        if (dbResult.savedCount > 0 || dbResult.updatedCount > 0) {
+            await this.triggerCanonicalAggregation(contactsWithSource, jobContext);
+        }
+
         // Clear temp storage
         await this.storage.clearFlowResults(jobId);
         
@@ -271,7 +280,12 @@ class ResultAggregator {
         
         // Write to DB
         const dbResult = await this.writeToDatabase(jobId, organizerId, contactsWithSource);
-        
+
+        // Canonical aggregation: persons + affiliations
+        if (dbResult.savedCount > 0 || dbResult.updatedCount > 0) {
+            await this.triggerCanonicalAggregation(contactsWithSource, jobContext);
+        }
+
         console.log(`[Aggregator Simple] ✅ Completed: ${dbResult.savedCount} saved`);
         
         return {
@@ -709,22 +723,87 @@ class ResultAggregator {
             await client.query('COMMIT');
             
             console.log(`[Aggregator] DB write: ${savedCount} new (${emailCount} email-based, ${profileOnlyCount} profile-only), ${updatedCount} updated`);
-            
-            return { 
-                savedCount, 
-                emailCount, 
-                profileOnlyCount, 
+
+            return {
+                savedCount,
+                emailCount,
+                profileOnlyCount,
                 updatedCount,
-                error: null 
+                error: null
             };
-            
+
         } catch (err) {
             await client.query('ROLLBACK');
             console.error('[Aggregator] DB write error:', err.message);
             return { savedCount: 0, emailCount: 0, profileOnlyCount: 0, error: err.message };
-            
+
         } finally {
             client.release();
+        }
+    }
+
+    /**
+     * Trigger canonical aggregation (persons + affiliations).
+     * Best-effort — never breaks the main SuperMiner flow.
+     *
+     * @param {Array} contacts - Saved contacts
+     * @param {Object} jobContext - { jobId, organizerId, sourceUrl }
+     */
+    async triggerCanonicalAggregation(contacts, jobContext) {
+        if (process.env.DISABLE_SHADOW_MODE === 'true') {
+            return;
+        }
+
+        try {
+            const emailContacts = contacts.filter(c => c.email);
+            if (emailContacts.length === 0) return;
+
+            console.log(`[Aggregator] Triggering canonical aggregation for ${emailContacts.length} contacts`);
+
+            const minerOutput = {
+                status: 'success',
+                raw: {
+                    text: '',
+                    html: '',
+                    blocks: emailContacts.map(c => ({
+                        email: c.email || null,
+                        emails: c.email ? [c.email] : [],
+                        company_name: c.companyName || c.company_name || null,
+                        contact_name: c.contactName || c.contact_name || null,
+                        website: c.website || null,
+                        country: c.country || null,
+                        phone: c.phone || null,
+                        text: null,
+                        data: c,
+                    })),
+                    links: [],
+                },
+                meta: {
+                    miner_name: 'superMiner',
+                    duration_ms: 0,
+                    confidence_hint: null,
+                    source_url: jobContext.sourceUrl || null,
+                    page_title: null,
+                },
+            };
+
+            const normalizationResult = normalizeMinerOutput(minerOutput);
+
+            await aggregationTrigger.process({
+                jobId: jobContext.jobId,
+                organizerId: jobContext.organizerId,
+                normalizationResult,
+                metadata: {
+                    original_contact_count: emailContacts.length,
+                    source_url: jobContext.sourceUrl || null,
+                    mining_mode: 'superminer',
+                },
+            });
+
+            console.log(`[Aggregator] Canonical aggregation done: ${normalizationResult.stats.candidates_produced} candidates`);
+        } catch (err) {
+            // Best-effort — never break the SuperMiner flow
+            console.error(`[Aggregator] Canonical aggregation error:`, err.message);
         }
     }
 }
