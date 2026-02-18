@@ -21,8 +21,7 @@ const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
  * These are not real person emails
  */
 const GENERIC_EMAIL_PATTERNS = [
-  /^(info|contact|support|hello|help|sales|admin|webmaster|noreply|no-reply|mail|email|enquiry|enquiries|office|general)@/i,
-  /^(postmaster|hostmaster|abuse|spam|mailer-daemon)@/i,
+  /^(noreply|no-reply|mailer-daemon|postmaster|hostmaster|abuse|spam|webmaster)@/i,
   /example\.(com|org|net)$/i,
   /test@/i,
   /@localhost$/i,
