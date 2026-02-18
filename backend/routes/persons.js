@@ -63,12 +63,12 @@ router.get('/', authRequired, async (req, res) => {
     if (has_intent === 'true') {
       where.push(`EXISTS (
         SELECT 1 FROM prospect_intents pi
-        WHERE pi.person_email = p.email AND pi.organizer_id = p.organizer_id
+        WHERE pi.person_id = p.id AND pi.organizer_id = p.organizer_id
       )`);
     } else if (has_intent === 'false') {
       where.push(`NOT EXISTS (
         SELECT 1 FROM prospect_intents pi
-        WHERE pi.person_email = p.email AND pi.organizer_id = p.organizer_id
+        WHERE pi.person_id = p.id AND pi.organizer_id = p.organizer_id
       )`);
     }
 
@@ -108,7 +108,7 @@ router.get('/', authRequired, async (req, res) => {
          a.phone,
          EXISTS (
            SELECT 1 FROM prospect_intents pi
-           WHERE pi.person_email = p.email AND pi.organizer_id = p.organizer_id
+           WHERE pi.person_id = p.id AND pi.organizer_id = p.organizer_id
          ) AS has_intent
        FROM persons p
        LEFT JOIN LATERAL (
@@ -152,7 +152,7 @@ router.get('/stats', authRequired, async (req, res) => {
     );
 
     const intentRes = await db.query(
-      `SELECT COUNT(DISTINCT pi.person_email) AS with_intent
+      `SELECT COUNT(DISTINCT pi.person_id) AS with_intent
        FROM prospect_intents pi
        WHERE pi.organizer_id = $1`,
       [organizerId]
@@ -203,12 +203,12 @@ router.get('/:id', authRequired, async (req, res) => {
 
     // Get intent signals
     const intentRes = await db.query(
-      `SELECT id, intent_type, campaign_id, metadata, created_at
+      `SELECT id, intent_type, campaign_id, source, notes, confidence, occurred_at, created_at
        FROM prospect_intents
-       WHERE person_email = $1 AND organizer_id = $2
-       ORDER BY created_at DESC
+       WHERE person_id = $1 AND organizer_id = $2
+       ORDER BY occurred_at DESC
        LIMIT 20`,
-      [person.email, organizerId]
+      [personId, organizerId]
     );
 
     // Get campaign events summary

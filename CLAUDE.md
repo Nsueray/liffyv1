@@ -306,6 +306,33 @@ All import responses include `canonical_sync: { persons_upserted, affiliations_u
 
 ---
 
+## Prospect Intents API (`backend/routes/intents.js`)
+
+Frontend-facing intent signals. Enables lead vs prospect distinction in UI.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/intents` | GET | List intents with pagination, filter by `intent_type`, `campaign_id`, `person_id`, `source`. Joins person + campaign names. |
+| `/api/intents/stats` | GET | Counts by intent_type with unique_persons per type |
+| `/api/intents` | POST | Manually create intent. Body: `{ person_id, intent_type, campaign_id?, notes?, confidence? }` |
+| `/api/intents/:id` | DELETE | Delete an intent signal |
+
+---
+
+## Campaign Resolve (Phase 3 — Canonical Preference)
+
+`POST /api/campaigns/:id/resolve` now uses canonical tables with legacy fallback:
+
+- **Query:** `list_members JOIN prospects LEFT JOIN persons LEFT JOIN LATERAL affiliations`
+- **Name:** `COALESCE(persons.first_name + last_name, prospects.name)`
+- **Company:** `COALESCE(affiliations.company_name, prospects.company)`
+- **Verification:** `COALESCE(persons.verification_status, prospects.verification_status)`
+- **Meta enrichment:** `campaign_recipients.meta` includes `first_name`, `last_name`, `city`, `website`, `phone`, `person_id` from canonical tables
+
+Legacy `list_members → prospects` path still drives resolution (lists still use prospect_id). Canonical data enriches rather than replaces.
+
+---
+
 ## Zoho CRM Push — Integration (`backend/services/zohoService.js`, `backend/routes/zoho.js`)
 
 **Per-organizer** Zoho OAuth2 credentials stored in `organizers` table (`zoho_client_id`, `zoho_client_secret`, `zoho_refresh_token`, `zoho_datacenter`).
@@ -434,8 +461,8 @@ Miners NEVER:
 5. ~~**Email verification** — ZeroBounce integration, per-organizer key, queue processor~~ ✅ DONE
 6. ~~**Zoho CRM push** — push persons to Zoho CRM as Leads/Contacts~~ ✅ DONE
 7. **Scraping module improvements** — if needed
-8. **Phase 3 migration** — migrate import-all and campaign resolve to use canonical tables
-9. **Remove nodemailer** — drop dependency from package.json
+8. ~~**Phase 3 migration** — import-all dual-write, campaign resolve canonical, persons API, intents API~~ ✅ DONE
+9. ~~**Remove nodemailer** — dropped from package.json~~ ✅ DONE
 
 ---
 

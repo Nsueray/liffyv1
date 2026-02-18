@@ -323,25 +323,42 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
       });
     }
 
+    // --- Phase 3: Canonical resolve (persons + affiliations preferred, prospects fallback) ---
+    // Verification status: prefer persons.verification_status (canonical), fallback to prospects
     let verificationFilter;
     if (campaign.include_risky) {
-      verificationFilter = `p.verification_status != 'invalid'`;
+      verificationFilter = `COALESCE(pn.verification_status, p.verification_status, 'unknown') != 'invalid'`;
     } else {
-      verificationFilter = `p.verification_status NOT IN ('invalid', 'risky')`;
+      verificationFilter = `COALESCE(pn.verification_status, p.verification_status, 'unknown') NOT IN ('invalid', 'risky')`;
     }
 
     const prospectsQuery = `
       SELECT DISTINCT ON (p.id)
         p.id AS prospect_id,
         p.email,
-        p.name,
-        p.company,
-        p.country,
-        p.sector,
+        COALESCE(CONCAT_WS(' ', pn.first_name, pn.last_name), p.name) AS name,
+        COALESCE(aff.company_name, p.company) AS company,
+        COALESCE(aff.country_code, p.country) AS country,
+        COALESCE(aff.position, p.sector) AS sector,
         p.meta,
-        p.verification_status
+        COALESCE(pn.verification_status, p.verification_status, 'unknown') AS verification_status,
+        pn.id AS person_id,
+        pn.first_name,
+        pn.last_name,
+        aff.company_name AS affiliation_company,
+        aff.position AS affiliation_position,
+        aff.city AS affiliation_city,
+        aff.website AS affiliation_website,
+        aff.phone AS affiliation_phone
       FROM list_members lm
       INNER JOIN prospects p ON p.id = lm.prospect_id
+      LEFT JOIN persons pn ON LOWER(pn.email) = LOWER(p.email) AND pn.organizer_id = $2
+      LEFT JOIN LATERAL (
+        SELECT company_name, position, country_code, city, website, phone
+        FROM affiliations
+        WHERE person_id = pn.id AND organizer_id = $2
+        ORDER BY created_at DESC LIMIT 1
+      ) aff ON pn.id IS NOT NULL
       WHERE lm.list_id = $1
         AND lm.organizer_id = $2
         AND p.organizer_id = $2
@@ -370,19 +387,20 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
     const eligibleProspects = prospectsRes.rows;
 
     const totalInListRes = await client.query(
-      `SELECT COUNT(*) AS count FROM list_members 
+      `SELECT COUNT(*) AS count FROM list_members
        WHERE list_id = $1 AND organizer_id = $2`,
       [campaign.list_id, organizerId]
     );
     const totalInList = parseInt(totalInListRes.rows[0].count, 10) || 0;
 
     const invalidCountRes = await client.query(
-      `SELECT COUNT(*) AS count 
+      `SELECT COUNT(*) AS count
        FROM list_members lm
        INNER JOIN prospects p ON p.id = lm.prospect_id
-       WHERE lm.list_id = $1 
+       LEFT JOIN persons pn ON LOWER(pn.email) = LOWER(p.email) AND pn.organizer_id = $2
+       WHERE lm.list_id = $1
          AND lm.organizer_id = $2
-         AND p.verification_status = 'invalid'`,
+         AND COALESCE(pn.verification_status, p.verification_status, 'unknown') = 'invalid'`,
       [campaign.list_id, organizerId]
     );
     const excludedInvalid = parseInt(invalidCountRes.rows[0].count, 10) || 0;
@@ -390,22 +408,23 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
     let excludedRisky = 0;
     if (!campaign.include_risky) {
       const riskyCountRes = await client.query(
-        `SELECT COUNT(*) AS count 
+        `SELECT COUNT(*) AS count
          FROM list_members lm
          INNER JOIN prospects p ON p.id = lm.prospect_id
-         WHERE lm.list_id = $1 
+         LEFT JOIN persons pn ON LOWER(pn.email) = LOWER(p.email) AND pn.organizer_id = $2
+         WHERE lm.list_id = $1
            AND lm.organizer_id = $2
-           AND p.verification_status = 'risky'`,
+           AND COALESCE(pn.verification_status, p.verification_status, 'unknown') = 'risky'`,
         [campaign.list_id, organizerId]
       );
       excludedRisky = parseInt(riskyCountRes.rows[0].count, 10) || 0;
     }
 
     const unsubCountRes = await client.query(
-      `SELECT COUNT(*) AS count 
+      `SELECT COUNT(*) AS count
        FROM list_members lm
        INNER JOIN prospects p ON p.id = lm.prospect_id
-       WHERE lm.list_id = $1 
+       WHERE lm.list_id = $1
          AND lm.organizer_id = $2
          AND EXISTS (
            SELECT 1 FROM unsubscribes u
@@ -422,23 +441,40 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
       const values = [];
       const placeholders = [];
 
-      eligibleProspects.forEach((p, idx) => {
+      eligibleProspects.forEach((ep, idx) => {
         const baseIndex = idx * 6;
         placeholders.push(
           `($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3}, $${baseIndex + 4}, $${baseIndex + 5}, $${baseIndex + 6})`
         );
+
+        // Build enriched meta from canonical + legacy data
+        const legacyMeta = (typeof ep.meta === "string" ? JSON.parse(ep.meta || "{}") : ep.meta) || {};
+        const enrichedMeta = {
+          ...legacyMeta,
+          company: ep.company,
+          country: ep.country,
+          position: ep.sector,
+          company_name: ep.company,
+          first_name: ep.first_name || null,
+          last_name: ep.last_name || null,
+          city: ep.affiliation_city || legacyMeta.city || null,
+          website: ep.affiliation_website || legacyMeta.website || null,
+          phone: ep.affiliation_phone || legacyMeta.phone || null,
+          person_id: ep.person_id || null
+        };
+
         values.push(
           organizerId,
           campaignId,
-          p.prospect_id,
-          p.email,
-          p.name || null,
-          JSON.stringify({ ...((typeof p.meta === "string" ? JSON.parse(p.meta || "{}") : p.meta) || {}), company: p.company, country: p.country, position: p.sector, company_name: p.company })
+          ep.prospect_id,
+          ep.email,
+          ep.name || null,
+          JSON.stringify(enrichedMeta)
         );
       });
 
       const insertQuery = `
-        INSERT INTO campaign_recipients 
+        INSERT INTO campaign_recipients
           (organizer_id, campaign_id, prospect_id, email, name, meta)
         VALUES ${placeholders.join(', ')}
         RETURNING id

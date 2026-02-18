@@ -25,6 +25,7 @@ const statsRouter = require('./routes/stats');
 const verificationRouter = require('./routes/verification');
 const zohoRouter = require('./routes/zoho');
 const personsRouter = require('./routes/persons');
+const intentsRouter = require('./routes/intents');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -66,6 +67,7 @@ app.use('/api/campaigns', campaignsRouter);
 app.use('/api/verification', verificationRouter);
 app.use('/api/zoho', zohoRouter);
 app.use('/api/persons', personsRouter);
+app.use('/api/intents', intentsRouter);
 app.use(webhooksRouter);
 app.use(statsRouter);
 
