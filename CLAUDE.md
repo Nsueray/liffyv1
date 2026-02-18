@@ -89,7 +89,7 @@ Engagement is stored as events, not scores.
 
 ---
 
-## Database — Current State (19 tables)
+## Database — Current State (20 tables)
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -113,6 +113,7 @@ Engagement is stored as events, not scores.
 | `prospect_intents` | ACTIVE | 017 | Intent signals. Populated by webhook (reply, click_through). |
 | `campaign_events` | ACTIVE | 018 | Immutable event log. Populated by webhook + campaignSend + backfill. |
 | `verification_queue` | ACTIVE | 019 | Email verification queue. Processed by worker via ZeroBounce API. |
+| `zoho_push_log` | ACTIVE | 020 | Zoho CRM push audit trail. Tracks create/update per person+module. |
 
 ### Legacy Tables (Exist but transitional)
 | Table | Status | Notes |
@@ -276,7 +277,39 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 
 ---
 
-## Migrations (19 files)
+## Zoho CRM Push — Integration (`backend/services/zohoService.js`, `backend/routes/zoho.js`)
+
+**Per-organizer** Zoho OAuth2 credentials stored in `organizers` table (`zoho_client_id`, `zoho_client_secret`, `zoho_refresh_token`, `zoho_datacenter`).
+
+**Settings endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/settings` | GET | Now includes `has_zoho`, `zoho_datacenter`, `masked_zoho_client_id` |
+| `/api/settings/zoho` | PUT | Save Zoho OAuth2 credentials (validates via token refresh + org test). Body: `{ client_id, client_secret, refresh_token, datacenter }` |
+| `/api/settings/zoho` | DELETE | Remove all Zoho credentials |
+
+**Push endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/zoho/push` | POST | Push selected persons to Zoho CRM. Body: `{ person_ids: string[], module: 'Leads'\|'Contacts' }` |
+| `/api/zoho/push-list` | POST | Push all persons from a list. Body: `{ list_id, module }` |
+| `/api/zoho/push-history` | GET | Paginated push log. Query: `?person_id=&module=&page=1&limit=50` |
+| `/api/zoho/push-status` | GET | Summary statistics (total_pushed, leads_pushed, contacts_pushed, failed, last_push_at) |
+
+**Push flow:**
+```
+persons + affiliations → mapPersonToZoho() → Zoho CRM v7 API (batch 100/request) → zoho_push_log
+```
+
+**Dedup:** On re-push, existing `zoho_record_id` from `zoho_push_log` triggers UPDATE instead of CREATE.
+
+**Datacenter support:** `com`, `eu`, `in`, `com.au`, `jp`, `ca` — determines API and OAuth endpoint URLs.
+
+---
+
+## Migrations (20 files)
 
 | # | File | Tables |
 |---|------|--------|
@@ -298,6 +331,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 | 017 | `create_prospect_intents.sql` | `prospect_intents` |
 | 018 | `create_campaign_events.sql` | `campaign_events` |
 | 019 | `add_verification_columns.sql` | ALTER `organizers`, ALTER `persons`, `verification_queue` |
+| 020 | `add_zoho_crm_columns.sql` | ALTER `organizers`, `zoho_push_log` |
 
 ---
 
@@ -369,7 +403,7 @@ Miners NEVER:
 3. ~~**ProspectIntent** — prospect_intents table, intent detection from webhook~~ ✅ DONE
 4. ~~**Email Campaign improvements** — templates, list upload, send flow~~ ✅ DONE
 5. ~~**Email verification** — ZeroBounce integration, per-organizer key, queue processor~~ ✅ DONE
-6. **Zoho webhook** — push prospects to CRM
+6. ~~**Zoho CRM push** — push persons to Zoho CRM as Leads/Contacts~~ ✅ DONE
 7. **Scraping module improvements** — if needed
 8. **Phase 3 migration** — migrate import-all and campaign resolve to use canonical tables
 9. **Remove nodemailer** — drop dependency from package.json

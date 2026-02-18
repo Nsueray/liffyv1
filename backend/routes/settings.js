@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
+const { getAccessToken, testConnection } = require('../services/zohoService');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -25,7 +26,8 @@ router.get('/', authRequired, async (req, res) => {
     
     // API Key'i güvenlik için maskeleyerek gönderiyoruz (son 4 hane hariç)
     const result = await db.query(
-      `SELECT sendgrid_api_key, zerobounce_api_key FROM organizers WHERE id = $1`,
+      `SELECT sendgrid_api_key, zerobounce_api_key, zoho_client_id, zoho_datacenter
+       FROM organizers WHERE id = $1`,
       [organizer_id]
     );
 
@@ -46,12 +48,21 @@ router.get('/', authRequired, async (req, res) => {
       maskedZbKey = '...' + zbKey.slice(-4);
     }
 
+    const zohoClientId = result.rows[0].zoho_client_id || '';
+    let maskedZohoClientId = '';
+    if (zohoClientId && zohoClientId.length > 5) {
+      maskedZohoClientId = '...' + zohoClientId.slice(-4);
+    }
+
     res.json({
       settings: {
         has_api_key: !!apiKey,
         masked_api_key: maskedKey,
         has_zerobounce_key: !!zbKey,
-        masked_zerobounce_key: maskedZbKey
+        masked_zerobounce_key: maskedZbKey,
+        has_zoho: !!zohoClientId,
+        zoho_datacenter: result.rows[0].zoho_datacenter || 'com',
+        masked_zoho_client_id: maskedZohoClientId
       }
     });
 
@@ -112,6 +123,73 @@ router.put('/zerobounce-key', authRequired, async (req, res) => {
     res.json({ success: true, credits: creditResult.credits });
   } catch (err) {
     console.error("PUT /api/settings/zerobounce-key error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PUT /api/settings/zoho - Save Zoho CRM OAuth2 credentials (validate before save)
+router.put('/zoho', authRequired, async (req, res) => {
+  try {
+    const { organizer_id } = req.auth;
+    const { client_id, client_secret, refresh_token, datacenter } = req.body;
+
+    if (!client_id || !client_secret || !refresh_token) {
+      return res.status(400).json({ error: "client_id, client_secret, and refresh_token are required" });
+    }
+
+    const dc = datacenter || 'com';
+    const validDatacenters = ['com', 'eu', 'in', 'com.au', 'jp', 'ca'];
+    if (!validDatacenters.includes(dc)) {
+      return res.status(400).json({ error: `Invalid datacenter. Must be one of: ${validDatacenters.join(', ')}` });
+    }
+
+    // Save credentials first (needed for getAccessToken to work)
+    await db.query(
+      `UPDATE organizers
+       SET zoho_client_id = $1, zoho_client_secret = $2, zoho_refresh_token = $3,
+           zoho_datacenter = $4, zoho_access_token = NULL, zoho_access_token_expires_at = NULL
+       WHERE id = $5`,
+      [client_id.trim(), client_secret.trim(), refresh_token.trim(), dc, organizer_id]
+    );
+
+    // Validate by getting a token and testing connection
+    const connResult = await testConnection(organizer_id);
+
+    if (!connResult.success) {
+      // Credentials invalid — clear them
+      await db.query(
+        `UPDATE organizers
+         SET zoho_client_id = NULL, zoho_client_secret = NULL, zoho_refresh_token = NULL,
+             zoho_access_token = NULL, zoho_access_token_expires_at = NULL
+         WHERE id = $1`,
+        [organizer_id]
+      );
+      return res.status(400).json({ error: connResult.error });
+    }
+
+    res.json({ success: true, org_name: connResult.org_name });
+  } catch (err) {
+    console.error("PUT /api/settings/zoho error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/settings/zoho - Remove Zoho CRM credentials
+router.delete('/zoho', authRequired, async (req, res) => {
+  try {
+    const { organizer_id } = req.auth;
+
+    await db.query(
+      `UPDATE organizers
+       SET zoho_client_id = NULL, zoho_client_secret = NULL, zoho_refresh_token = NULL,
+           zoho_access_token = NULL, zoho_access_token_expires_at = NULL, zoho_datacenter = 'com'
+       WHERE id = $1`,
+      [organizer_id]
+    );
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("DELETE /api/settings/zoho error:", err);
     res.status(500).json({ error: err.message });
   }
 });
