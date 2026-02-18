@@ -203,6 +203,9 @@ async function processWebhookEvent(event) {
   // Record to canonical campaign_events table (Phase 2)
   await recordCampaignEvent(recipient, email, eventType, eventTime, event);
 
+  // Record prospect intent for intent-bearing events (Phase 2)
+  await recordProspectIntent(recipient, email, eventType, eventTime);
+
   // Also log to email_logs if needed (legacy)
   await db.query(
     `INSERT INTO email_logs (organizer_id, campaign_id, recipient_email, status, provider_response, sent_at)
@@ -258,6 +261,54 @@ async function recordCampaignEvent(recipient, email, eventType, eventTime, rawEv
   } catch (err) {
     // Never break the webhook flow — log and continue
     console.error(`  ⚠️ campaign_events insert failed for ${email}:`, err.message);
+  }
+}
+
+/**
+ * Record prospect intent for intent-bearing webhook events.
+ * Constitution: "A prospect is a person who has demonstrated intent (reply, form submission, manual qualification)."
+ *
+ * Intent-bearing events:
+ *   - reply      → intent_type: 'reply'
+ *   - click      → intent_type: 'click_through'  (clicked CTA = interest signal)
+ *
+ * Never breaks the main webhook flow — all errors are caught and logged.
+ */
+const INTENT_TYPE_MAP = {
+  'reply': 'reply',
+  'click': 'click_through',
+};
+
+async function recordProspectIntent(recipient, email, eventType, eventTime) {
+  const intentType = INTENT_TYPE_MAP[eventType];
+  if (!intentType) return; // Not an intent-bearing event
+
+  try {
+    // Require person_id — no person means no intent record
+    const personRes = await db.query(
+      `SELECT id FROM persons WHERE organizer_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+      [recipient.organizer_id, email]
+    );
+
+    if (personRes.rows.length === 0) return;
+
+    const personId = personRes.rows[0].id;
+
+    await db.query(`
+      INSERT INTO prospect_intents (
+        organizer_id, person_id, campaign_id,
+        intent_type, source, occurred_at
+      ) VALUES ($1, $2, $3, $4, 'webhook', $5)
+    `, [
+      recipient.organizer_id,
+      personId,
+      recipient.campaign_id,
+      intentType,
+      eventTime,
+    ]);
+  } catch (err) {
+    // Never break the webhook flow
+    console.error(`  ⚠️ prospect_intent insert failed for ${email}:`, err.message);
   }
 }
 
