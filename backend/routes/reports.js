@@ -5,9 +5,6 @@ const jwt = require('jsonwebtoken');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
-/**
- * Simple auth middleware using Bearer token.
- */
 function authRequired(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
@@ -34,10 +31,10 @@ function authRequired(req, res, next) {
 /**
  * GET /api/reports/campaign/:id
  *
- * Returns summary metrics for a single campaign:
+ * Returns summary metrics for a single campaign using campaign_events (canonical):
  * - campaign info
- * - recipient counts by status (pending/sent/failed)
- * - email_logs counts by status
+ * - recipient counts by status
+ * - event counts by type
  * - timeline (per day)
  * - domain breakdown
  * - bounce reasons
@@ -49,7 +46,7 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
 
     // 1) Campaign + template info
     const campRes = await db.query(
-      `SELECT 
+      `SELECT
          c.id,
          c.name,
          c.status,
@@ -84,50 +81,61 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
 
     const recStats = recRes.rows[0];
 
-    // 3) Email logs stats by status
-    const logRes = await db.query(
+    // 3) Event stats by type (from campaign_events — canonical)
+    const eventRes = await db.query(
       `SELECT
-         COUNT(*) AS total_logs,
-         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS logs_sent,
-         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS logs_failed
-       FROM email_logs
-       WHERE campaign_id = $1 AND organizer_id = $2`,
+         event_type,
+         COUNT(*) AS count
+       FROM campaign_events
+       WHERE campaign_id = $1 AND organizer_id = $2
+       GROUP BY event_type`,
       [campaign_id, organizer_id]
     );
 
-    const logStats = logRes.rows[0];
+    const events = {};
+    let totalEvents = 0;
+    for (const row of eventRes.rows) {
+      events[row.event_type] = parseInt(row.count, 10);
+      totalEvents += parseInt(row.count, 10);
+    }
+    events.total = totalEvents;
 
-    // 4) Timeline (per day)
+    // 4) Timeline (per day, from campaign_events)
     const timelineRes = await db.query(
       `SELECT
-         DATE(sent_at) AS day,
-         COUNT(*) AS total,
-         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
-         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
-       FROM email_logs
+         DATE(occurred_at) AS day,
+         event_type,
+         COUNT(*) AS count
+       FROM campaign_events
        WHERE campaign_id = $1
          AND organizer_id = $2
-         AND sent_at IS NOT NULL
-       GROUP BY DATE(sent_at)
+       GROUP BY DATE(occurred_at), event_type
        ORDER BY day ASC`,
       [campaign_id, organizer_id]
     );
 
-    const timeline = timelineRes.rows.map(r => ({
-      date: r.day,
-      total: parseInt(r.total || 0, 10),
-      sent: parseInt(r.sent || 0, 10),
-      failed: parseInt(r.failed || 0, 10)
-    }));
+    // Pivot timeline: group by day, each event_type as a column
+    const timelineMap = {};
+    for (const row of timelineRes.rows) {
+      const day = row.day;
+      if (!timelineMap[day]) {
+        timelineMap[day] = { date: day, total: 0 };
+      }
+      const count = parseInt(row.count, 10);
+      timelineMap[day][row.event_type] = count;
+      timelineMap[day].total += count;
+    }
+    const timeline = Object.values(timelineMap);
 
-    // 5) Domain breakdown
+    // 5) Domain breakdown (from campaign_events)
     const domainRes = await db.query(
       `SELECT
-         LOWER(split_part(recipient_email, '@', 2)) AS domain,
+         LOWER(split_part(email, '@', 2)) AS domain,
          COUNT(*) AS total,
-         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
-         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
-       FROM email_logs
+         COUNT(*) FILTER (WHERE event_type = 'delivered') AS delivered,
+         COUNT(*) FILTER (WHERE event_type = 'bounce') AS bounced,
+         COUNT(*) FILTER (WHERE event_type = 'open') AS opened
+       FROM campaign_events
        WHERE campaign_id = $1
          AND organizer_id = $2
        GROUP BY domain
@@ -139,19 +147,20 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
     const domains = domainRes.rows.map(r => ({
       domain: r.domain || 'unknown',
       total: parseInt(r.total || 0, 10),
-      sent: parseInt(r.sent || 0, 10),
-      failed: parseInt(r.failed || 0, 10)
+      delivered: parseInt(r.delivered || 0, 10),
+      bounced: parseInt(r.bounced || 0, 10),
+      opened: parseInt(r.opened || 0, 10)
     }));
 
-    // 6) Bounce reasons
+    // 6) Bounce reasons (from campaign_events)
     const bounceRes = await db.query(
       `SELECT
-         COALESCE(provider_response->>'error', 'unknown') AS reason,
+         COALESCE(reason, 'unknown') AS reason,
          COUNT(*) AS count
-       FROM email_logs
+       FROM campaign_events
        WHERE campaign_id = $1
          AND organizer_id = $2
-         AND status = 'failed'
+         AND event_type = 'bounce'
        GROUP BY reason
        ORDER BY count DESC
        LIMIT 20`,
@@ -181,11 +190,7 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
         sent: parseInt(recStats.sent || 0, 10),
         failed: parseInt(recStats.failed || 0, 10)
       },
-      logs: {
-        total: parseInt(logStats.total_logs || 0, 10),
-        sent: parseInt(logStats.logs_sent || 0, 10),
-        failed: parseInt(logStats.logs_failed || 0, 10)
-      },
+      events,
       timeline,
       domains,
       bounce_reasons
@@ -200,10 +205,10 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
 /**
  * GET /api/reports/organizer/overview
  *
- * High-level metrics for all campaigns of the organizer:
+ * High-level metrics for all campaigns of the organizer using campaign_events (canonical):
  * - campaign counts by status
  * - recipient counts
- * - email log counts
+ * - event counts by type
  * - timeline (per day)
  * - domain breakdown
  * - bounce reasons
@@ -240,47 +245,59 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
     );
     const recStats = recRes.rows[0];
 
-    // 3) Log stats (all campaigns)
-    const logRes = await db.query(
+    // 3) Event stats by type (from campaign_events — canonical)
+    const eventRes = await db.query(
       `SELECT
-         COUNT(*) AS total_logs,
-         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS logs_sent,
-         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS logs_failed
-       FROM email_logs
-       WHERE organizer_id = $1`,
+         event_type,
+         COUNT(*) AS count
+       FROM campaign_events
+       WHERE organizer_id = $1
+       GROUP BY event_type`,
       [organizer_id]
     );
-    const logStats = logRes.rows[0];
 
-    // 4) Timeline (per day, all campaigns)
+    const events = {};
+    let totalEvents = 0;
+    for (const row of eventRes.rows) {
+      events[row.event_type] = parseInt(row.count, 10);
+      totalEvents += parseInt(row.count, 10);
+    }
+    events.total = totalEvents;
+
+    // 4) Timeline (per day, all campaigns, from campaign_events)
     const timelineRes = await db.query(
       `SELECT
-         DATE(sent_at) AS day,
-         COUNT(*) AS total,
-         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
-         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
-       FROM email_logs
+         DATE(occurred_at) AS day,
+         event_type,
+         COUNT(*) AS count
+       FROM campaign_events
        WHERE organizer_id = $1
-         AND sent_at IS NOT NULL
-       GROUP BY DATE(sent_at)
+       GROUP BY DATE(occurred_at), event_type
        ORDER BY day ASC`,
       [organizer_id]
     );
-    const timeline = timelineRes.rows.map(r => ({
-      date: r.day,
-      total: parseInt(r.total || 0, 10),
-      sent: parseInt(r.sent || 0, 10),
-      failed: parseInt(r.failed || 0, 10)
-    }));
 
-    // 5) Domain breakdown (all campaigns)
+    const timelineMap = {};
+    for (const row of timelineRes.rows) {
+      const day = row.day;
+      if (!timelineMap[day]) {
+        timelineMap[day] = { date: day, total: 0 };
+      }
+      const count = parseInt(row.count, 10);
+      timelineMap[day][row.event_type] = count;
+      timelineMap[day].total += count;
+    }
+    const timeline = Object.values(timelineMap);
+
+    // 5) Domain breakdown (all campaigns, from campaign_events)
     const domainRes = await db.query(
       `SELECT
-         LOWER(split_part(recipient_email, '@', 2)) AS domain,
+         LOWER(split_part(email, '@', 2)) AS domain,
          COUNT(*) AS total,
-         SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
-         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
-       FROM email_logs
+         COUNT(*) FILTER (WHERE event_type = 'delivered') AS delivered,
+         COUNT(*) FILTER (WHERE event_type = 'bounce') AS bounced,
+         COUNT(*) FILTER (WHERE event_type = 'open') AS opened
+       FROM campaign_events
        WHERE organizer_id = $1
        GROUP BY domain
        ORDER BY total DESC
@@ -290,18 +307,19 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
     const domains = domainRes.rows.map(r => ({
       domain: r.domain || 'unknown',
       total: parseInt(r.total || 0, 10),
-      sent: parseInt(r.sent || 0, 10),
-      failed: parseInt(r.failed || 0, 10)
+      delivered: parseInt(r.delivered || 0, 10),
+      bounced: parseInt(r.bounced || 0, 10),
+      opened: parseInt(r.opened || 0, 10)
     }));
 
-    // 6) Bounce reasons (all campaigns)
+    // 6) Bounce reasons (all campaigns, from campaign_events)
     const bounceRes = await db.query(
       `SELECT
-         COALESCE(provider_response->>'error', 'unknown') AS reason,
+         COALESCE(reason, 'unknown') AS reason,
          COUNT(*) AS count
-       FROM email_logs
+       FROM campaign_events
        WHERE organizer_id = $1
-         AND status = 'failed'
+         AND event_type = 'bounce'
        GROUP BY reason
        ORDER BY count DESC
        LIMIT 20`,
@@ -328,11 +346,7 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
         sent: parseInt(recStats.sent || 0, 10),
         failed: parseInt(recStats.failed || 0, 10)
       },
-      logs: {
-        total: parseInt(logStats.total_logs || 0, 10),
-        sent: parseInt(logStats.logs_sent || 0, 10),
-        failed: parseInt(logStats.logs_failed || 0, 10)
-      },
+      events,
       timeline,
       domains,
       bounce_reasons

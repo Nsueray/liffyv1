@@ -18,7 +18,7 @@ If any implementation conflicts with the principles below, the principles win.
 - **Backend:** Node.js + Express
 - **Database:** PostgreSQL 17 (Render hosted)
 - **Frontend:** Next.js + TypeScript (liffy-ui repo) / Bootstrap 5 + CDN for static assets
-- **Email:** SendGrid API only (NO nodemailer — remove nodemailer dependency when possible)
+- **Email:** SendGrid API only (nodemailer removed)
 - **Deployment:** Render + custom domain (liffy.app, api.liffy.app, cdn.liffy.app)
 - **Design:** Static assets served from `https://cdn.liffy.app/` (logo.png, style.css)
 - **SQL:** Raw SQL with `pg` library. NO ORMs (no Sequelize, no Prisma, no Knex)
@@ -121,7 +121,7 @@ Engagement is stored as events, not scores.
 | `prospects` | LEGACY | Import-all + CSV upload (dual-write) still write here. Will be replaced when features migrate to persons + affiliations. |
 | `lists` | LEGACY | Used by campaign resolve + CSV upload. Will be re-evaluated. |
 | `list_members` | LEGACY | Used by campaign resolve + CSV upload. Will be re-evaluated. |
-| `email_logs` | LEGACY | Webhook still writes here. Will be removed when campaign_events is fully adopted. |
+| `email_logs` | DEPRECATED | No longer written to. Reports + logs migrated to `campaign_events`. Table retained for historical data only. |
 
 **RULE:** Legacy tables must NOT be deleted. They remain until migration is complete.
 New code should prefer canonical tables when available.
@@ -132,12 +132,20 @@ New code should prefer canonical tables when available.
 
 Phase 1 — Add canonical tables (persons, affiliations). Backfill from mining_results. ✅ DONE
 Phase 2 — Add intent + event tables (prospect_intents, campaign_events). Wire up webhook + send. ✅ DONE
-Phase 3 — New features use canonical tables. Legacy tables become read-only.
+Phase 3 — New features use canonical tables. All import paths dual-write. Campaign resolve uses canonical with legacy fallback. ✅ DONE
 Phase 4 — Remove legacy tables (only when fully migrated and tested).
 
-**Current phase: Phase 3**
+**Current phase: Late Phase 3 (approaching Phase 4)**
 
-**IMPORTANT:** Legacy tables still serve existing features (import-all → prospects, campaign resolve → lists). Do not remove them until each feature is explicitly migrated to use canonical tables.
+All migrations (001–020) applied in production. 20 tables active.
+`AGGREGATION_PERSIST=true` set on Render — mining pipeline writes to `persons` + `affiliations`.
+All import paths (CSV upload, import-all, leads/import) dual-write to both legacy and canonical tables.
+Campaign resolve prefers canonical data with legacy fallback.
+
+**Remaining legacy dependencies:**
+- `email_logs` — DEPRECATED. No longer written or read. Retained for historical data.
+- `prospects` — still written to by all import paths (dual-write), read by leads.js + prospects.js + list endpoints
+- `lists` + `list_members` — still used by campaign resolve (via prospect_id), CSV upload, list management
 
 ---
 
@@ -146,11 +154,13 @@ Phase 4 — Remove legacy tables (only when fully migrated and tested).
 The aggregation trigger (`backend/services/aggregationTrigger.js`) bridges mining → canonical tables.
 
 **Environment variables:**
-| Variable | Default | Effect |
-|----------|---------|--------|
-| `DISABLE_SHADOW_MODE` | `false` | `true` disables aggregation entirely |
-| `AGGREGATION_PERSIST` | `false` | `true` enables DB writes to persons + affiliations |
-| `SHADOW_MODE_VERBOSE` | `false` | `true` enables verbose candidate logging |
+| Variable | Default | Production | Effect |
+|----------|---------|------------|--------|
+| `DISABLE_SHADOW_MODE` | `false` | `false` | `true` disables aggregation entirely |
+| `AGGREGATION_PERSIST` | `false` | **`true`** | `true` enables DB writes to persons + affiliations |
+| `SHADOW_MODE_VERBOSE` | `false` | `false` | `true` enables verbose candidate logging |
+
+**Production status:** Aggregation is ACTIVE and PERSISTING. Mining pipeline writes to canonical tables.
 
 **Data flow (persist mode):**
 ```
@@ -168,7 +178,7 @@ Miner → normalizeMinerOutput() → aggregationTrigger.aggregate() → persons 
 SendGrid webhook (`backend/routes/webhooks.js`) processes events through 3 layers:
 
 ```
-SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → prospect_intents (INSERT, if intent-bearing) → email_logs (INSERT, legacy)
+SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → prospect_intents (INSERT, if intent-bearing)
 ```
 
 **Intent-bearing events:**
@@ -427,7 +437,7 @@ persons + affiliations → mapPersonToZoho() → Zoho CRM v7 API (batch 100/requ
 - Campaign directly mutating a person record
 - Cross-domain side effects (mining → prospect creation)
 - Miners normalizing, parsing names, inferring countries, or writing to DB
-- Using nodemailer (SendGrid API only)
+- Using nodemailer (removed — SendGrid API only)
 - Using ORMs (Sequelize, Prisma, Knex)
 - Refactoring mining engine without explicit instruction
 - Creating React/Vue/Angular frontend (Next.js already exists in liffy-ui)

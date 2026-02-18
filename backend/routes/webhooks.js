@@ -205,14 +205,6 @@ async function processWebhookEvent(event) {
 
   // Record prospect intent for intent-bearing events (Phase 2)
   await recordProspectIntent(recipient, email, eventType, eventTime);
-
-  // Also log to email_logs if needed (legacy)
-  await db.query(
-    `INSERT INTO email_logs (organizer_id, campaign_id, recipient_email, status, provider_response, sent_at)
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT DO NOTHING`,
-    [recipient.organizer_id, recipient.campaign_id, email, newStatus, JSON.stringify(event), eventTime]
-  ).catch(() => {}); // Ignore if fails
 }
 
 /**
