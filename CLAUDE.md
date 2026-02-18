@@ -172,6 +172,7 @@ Miner → normalizeMinerOutput() → aggregationTrigger.aggregate() → persons 
 **Call sites:**
 - `miningService.js` — full mode + AI mode mining (passes `job.organizer_id`)
 - `miningWorker.js` — Playwright strategy (passes `job.organizer_id`)
+- `superMiner/services/resultAggregator.js` — aggregateV2() + aggregateSimple() after writeToDatabase()
 
 ---
 
