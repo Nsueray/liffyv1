@@ -123,7 +123,7 @@ Engagement is stored as events, not scores.
 | `prospects` | LEGACY | Import-all + CSV upload (dual-write) still write here. Will be replaced when features migrate to persons + affiliations. |
 | `lists` | LEGACY | Used by campaign resolve + CSV upload. Will be re-evaluated. |
 | `list_members` | LEGACY | Used by campaign resolve + CSV upload. Will be re-evaluated. |
-| `email_logs` | DEPRECATED | No longer written to. Reports + logs migrated to `campaign_events`. Table retained for historical data only. |
+| `email_logs` | DEPRECATED | No longer written to (last write in `campaignSend.js` removed). Reports + logs migrated to `campaign_events`. Table retained for historical data only. |
 
 **RULE:** Legacy tables must NOT be deleted. They remain until migration is complete.
 New code should prefer canonical tables when available.
@@ -145,7 +145,7 @@ All import paths (CSV upload, import-all, leads/import) dual-write to both legac
 Campaign resolve prefers canonical data with legacy fallback.
 
 **Remaining legacy dependencies:**
-- `email_logs` — DEPRECATED. No longer written or read. Retained for historical data.
+- `email_logs` — DEPRECATED. No longer written (last INSERT in `campaignSend.js` removed) or read. Zero active references. Retained for historical data only.
 - `prospects` — still written to by all import paths (dual-write), read by leads.js + prospects.js + list endpoints
 - `lists` + `list_members` — still used by campaign resolve (via prospect_id), CSV upload, list management
 
