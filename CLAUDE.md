@@ -174,6 +174,10 @@ Miner → normalizeMinerOutput() → aggregationTrigger.aggregate() → persons 
 - `miningWorker.js` — Playwright strategy (passes `job.organizer_id`)
 - `superMiner/services/resultAggregator.js` — aggregateV2() + aggregateSimple() after writeToDatabase()
 
+**Normalizer email filter** (`backend/services/normalizer/emailExtractor.js`):
+- B2B-valid prefixes ALLOWED: `info@`, `contact@`, `sales@`, `admin@`, `support@`, `hello@`, `office@`, `general@`, etc.
+- Non-person prefixes FILTERED: `noreply@`, `no-reply@`, `mailer-daemon@`, `postmaster@`, `hostmaster@`, `abuse@`, `spam@`, `webmaster@`, `test@`
+
 ---
 
 ## Webhook Event Flow
