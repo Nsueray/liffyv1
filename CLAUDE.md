@@ -84,12 +84,12 @@ A prospect is a person who has demonstrated intent (reply, form submission, manu
 
 ### CampaignEvent (Engagement Layer)
 Engagement is stored as events, not scores.
-- Types: delivered, open, click, reply, bounce
+- Types: sent, delivered, open, click, reply, bounce, dropped, deferred, spam_report, unsubscribe
 - Scores are derived views, never persisted
 
 ---
 
-## Database — Current State (14 tables)
+## Database — Current State (18 tables)
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -105,37 +105,112 @@ Engagement is stored as events, not scores.
 | `sender_identities` | ACTIVE | Verified sender emails |
 | `unsubscribes` | ACTIVE | Opt-out records |
 
+### Canonical Tables (Constitution Migration — Active)
+| Table | Status | Migration | Notes |
+|-------|--------|-----------|-------|
+| `persons` | ACTIVE | 015 | Identity layer. `(organizer_id, LOWER(email))` unique. Populated by aggregationTrigger + backfill. |
+| `affiliations` | ACTIVE | 016 | Person-company relationships. Additive only. Populated by aggregationTrigger + backfill. |
+| `prospect_intents` | ACTIVE | 017 | Intent signals. Populated by webhook (reply, click_through). |
+| `campaign_events` | ACTIVE | 018 | Immutable event log. Populated by webhook + campaignSend + backfill. |
+
 ### Legacy Tables (Exist but transitional)
 | Table | Status | Notes |
 |-------|--------|-------|
-| `prospects` | LEGACY | Will be replaced by `prospect_intents` |
-| `lists` | LEGACY | Will be re-evaluated |
-| `list_members` | LEGACY | Will be re-evaluated |
-| `email_logs` | LEGACY | Will be replaced by `campaign_events` |
+| `prospects` | LEGACY | Import-all still writes here. Will be replaced when features migrate to persons + affiliations. |
+| `lists` | LEGACY | Still used by campaign resolve. Will be re-evaluated. |
+| `list_members` | LEGACY | Still used by campaign resolve. Will be re-evaluated. |
+| `email_logs` | LEGACY | Webhook still writes here. Will be removed when campaign_events is fully adopted. |
 
 **RULE:** Legacy tables must NOT be deleted. They remain until migration is complete.
-New code should prefer new canonical tables when available.
-
-### Tables To Build (Constitution Migration)
-| Table | Purpose | Priority |
-|-------|---------|----------|
-| `persons` | Identity layer (email = key) | HIGH |
-| `affiliations` | Person-company relationships | HIGH |
-| `prospect_intents` | Intent signals (reply, qualification) | MEDIUM |
-| `campaign_events` | Engagement events (open/click/reply/bounce) | MEDIUM |
+New code should prefer canonical tables when available.
 
 ---
 
 ## Migration Strategy
 
-Phase 1 — Add new canonical tables (persons, affiliations) WITHOUT removing anything.
-Phase 2 — Backfill persons/affiliations from mining_results data.
-Phase 3 — New features use canonical tables. Legacy tables remain read-only.
+Phase 1 — Add canonical tables (persons, affiliations). Backfill from mining_results. ✅ DONE
+Phase 2 — Add intent + event tables (prospect_intents, campaign_events). Wire up webhook + send. ✅ DONE
+Phase 3 — New features use canonical tables. Legacy tables become read-only.
 Phase 4 — Remove legacy tables (only when fully migrated and tested).
 
-**Current phase: Phase 1**
+**Current phase: Phase 3**
 
-**IMPORTANT:** During Phase 1, legacy tables remain the source of truth for existing features unless explicitly migrated. Do not rewrite existing features to use canonical tables until migration is confirmed complete for that feature.
+**IMPORTANT:** Legacy tables still serve existing features (import-all → prospects, campaign resolve → lists). Do not remove them until each feature is explicitly migrated to use canonical tables.
+
+---
+
+## Aggregation Layer
+
+The aggregation trigger (`backend/services/aggregationTrigger.js`) bridges mining → canonical tables.
+
+**Environment variables:**
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `DISABLE_SHADOW_MODE` | `false` | `true` disables aggregation entirely |
+| `AGGREGATION_PERSIST` | `false` | `true` enables DB writes to persons + affiliations |
+| `SHADOW_MODE_VERBOSE` | `false` | `true` enables verbose candidate logging |
+
+**Data flow (persist mode):**
+```
+Miner → normalizeMinerOutput() → aggregationTrigger.aggregate() → persons + affiliations
+```
+
+**Call sites:**
+- `miningService.js` — full mode mining (passes `job.organizer_id`)
+- `miningWorker.js` — Playwright strategy (passes `job.organizer_id`)
+
+---
+
+## Webhook Event Flow
+
+SendGrid webhook (`backend/routes/webhooks.js`) processes events through 3 layers:
+
+```
+SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → prospect_intents (INSERT, if intent-bearing) → email_logs (INSERT, legacy)
+```
+
+**Intent-bearing events:**
+| SendGrid Event | Intent Type | Table |
+|---------------|-------------|-------|
+| `reply` | `reply` | `prospect_intents` |
+| `click` | `click_through` | `prospect_intents` |
+
+**Campaign send** (`backend/routes/campaignSend.js`) also writes `sent` events to `campaign_events`.
+
+---
+
+## Backfill Scripts
+
+Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
+
+| Script | Source | Target | Notes |
+|--------|--------|--------|-------|
+| `backfill_persons.js` | `mining_results` | `persons` + `affiliations` | Uses nameParser + countryNormalizer |
+| `backfill_campaign_events.js` | `campaign_recipients` | `campaign_events` | Converts timestamp columns to events |
+
+---
+
+## Migrations (18 files)
+
+| # | File | Tables |
+|---|------|--------|
+| 001 | `create_email_templates.sql` | `email_templates` |
+| 002 | `create_campaigns.sql` | `campaigns` |
+| 003 | `create_email_logs.sql` | `email_logs` |
+| 004 | `create_organizers_users_sender_identities.sql` | `organizers`, `users`, `sender_identities` |
+| 005 | `create_campaign_recipients.sql` | `campaign_recipients` |
+| 005 | `mining_logs_and_results_updates.sql` | `mining_job_logs`, ALTER `mining_results` |
+| 006 | `create_prospects_and_lists.sql` | `prospects`, `lists`, `list_members` |
+| 007 | `create_mining_jobs.sql` | `mining_jobs` |
+| 010 | `campaigns_add_list_sender_columns.sql` | ALTER `campaigns` |
+| 011 | `campaign_recipients_add_prospect_id.sql` | ALTER `campaign_recipients` |
+| 012 | `create_unsubscribes.sql` | `unsubscribes` |
+| 013 | `add_webhook_tracking_columns.sql` | ALTER `campaign_recipients`, `unsubscribes` |
+| 014 | `add_physical_address.sql` | ALTER `organizers` |
+| 015 | `create_persons.sql` | `persons` |
+| 016 | `create_affiliations.sql` | `affiliations` |
+| 017 | `create_prospect_intents.sql` | `prospect_intents` |
+| 018 | `create_campaign_events.sql` | `campaign_events` |
 
 ---
 
@@ -202,13 +277,15 @@ Miners NEVER:
 
 ## Build Priority (Current)
 
-1. **Constitution Migration** — Create persons + affiliations tables, backfill from mining_results
-2. **Campaign Events** — Create campaign_events table, migrate from email_logs
-3. **ProspectIntent** — Create prospect_intents, define intent signals
+1. ~~**Constitution Migration** — persons + affiliations tables, backfill~~ ✅ DONE
+2. ~~**Campaign Events** — campaign_events table, webhook + send integration~~ ✅ DONE
+3. ~~**ProspectIntent** — prospect_intents table, intent detection from webhook~~ ✅ DONE
 4. **Email Campaign improvements** — templates, list upload, send flow
 5. **Email verification** — ZeroBounce/NeverBounce integration
 6. **Zoho webhook** — push prospects to CRM
 7. **Scraping module improvements** — if needed
+8. **Phase 3 migration** — migrate import-all and campaign resolve to use canonical tables
+9. **Remove nodemailer** — drop dependency from package.json
 
 ---
 
