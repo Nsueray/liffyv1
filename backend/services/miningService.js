@@ -184,8 +184,9 @@ async function runShadowModeFromMergedResult(job, finalResult) {
 
         const normalizationResult = normalizeMinerOutput(minerOutput);
 
-        aggregationTrigger.process({
+        await aggregationTrigger.process({
             jobId: job.id,
+            organizerId: job.organizer_id,
             normalizationResult: normalizationResult,
             metadata: {
                 original_contact_count: contacts.length,

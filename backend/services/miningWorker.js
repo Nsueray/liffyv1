@@ -353,8 +353,9 @@ async function runShadowModeNormalization(job, allResults) {
 
     const normalizationResult = normalizeMinerOutput(minerOutput);
 
-    aggregationTrigger.process({
+    await aggregationTrigger.process({
       jobId: job.id,
+      organizerId: job.organizer_id,
       normalizationResult: normalizationResult,
       metadata: {
         original_result_count: allResults.length,

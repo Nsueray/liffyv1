@@ -1,0 +1,239 @@
+# CLAUDE.md — Liffy Project Instructions (Constitution-Aligned)
+
+## What is Liffy?
+
+Liffy is a multi-tenant SaaS platform for data discovery, qualification, and communication.
+It is NOT a simple scraping or emailing tool.
+Built for Elan Expo, designed to scale.
+
+## Governing Document
+
+This project follows the **Liffy Product & Data Constitution**.
+If any implementation conflicts with the principles below, the principles win.
+
+---
+
+## Tech Stack
+
+- **Backend:** Node.js + Express
+- **Database:** PostgreSQL 17 (Render hosted)
+- **Frontend:** Next.js + TypeScript (liffy-ui repo) / Bootstrap 5 + CDN for static assets
+- **Email:** SendGrid API only (NO nodemailer — remove nodemailer dependency when possible)
+- **Deployment:** Render + custom domain (liffy.app, api.liffy.app, cdn.liffy.app)
+- **Design:** Static assets served from `https://cdn.liffy.app/` (logo.png, style.css)
+- **SQL:** Raw SQL with `pg` library. NO ORMs (no Sequelize, no Prisma, no Knex)
+
+---
+
+## Core Philosophy
+
+### 1. Mining Is Discovery, Not Creation
+Mining discovers that a person or company appears in a source.
+Mining NEVER creates leads, contacts, or prospects.
+Mining only declares: "This entity was found here, at this time, in this context."
+
+### 2. Separation of Concerns Is Sacred
+Liffy strictly separates:
+- **Extraction** (miners) — get raw data
+- **Interpretation** (normalization) — parse raw into candidates
+- **Decision & persistence** (aggregation) — merge into DB
+- **Communication** (campaigns) — send emails
+
+Any component that crosses these boundaries is architecturally invalid.
+
+**Only the Aggregation layer may write to `persons` and `affiliations` tables.**
+Miners and normalizers NEVER write to the database directly.
+
+### 3. No Silent Data Loss
+Never drop columns, tables, or data without explicit instruction.
+Migrations must be additive. If renaming: create new → migrate data → deprecate old.
+
+### 4. Multi-Tenant Always
+Every query MUST include `organizer_id` filtering. No exceptions.
+Different organizers NEVER merge, even if emails match.
+Cross-organizer email uniqueness does NOT exist.
+
+---
+
+## Canonical Domain Model
+
+### Person (Identity Layer)
+A Person represents a real individual.
+- primary key = `(organizer_id, email)` — email alone is NOT globally unique
+- email is immutable within an organizer scope
+- a person exists independently of companies or roles
+- different organizers may have the same email as separate persons
+
+### Affiliation (Contextual Role Layer)
+An Affiliation represents a relationship between a person and a company.
+- a person may have multiple affiliations
+- affiliations are additive, never overwritten
+- same email + different company = different affiliation
+- same email + same company + new info = enrichment, not replacement
+
+### MiningResult (Discovery Event)
+A MiningResult is a discovery event, NOT a lead/contact/prospect.
+- exists even if the person already exists in DB
+- is job-scoped
+- powers segmentation and campaigns
+
+### ProspectIntent (Intent Layer)
+A prospect is a person who has demonstrated intent (reply, form submission, manual qualification).
+- Mining NEVER creates prospects
+- Intent is linked to person_email + campaign_id
+
+### CampaignEvent (Engagement Layer)
+Engagement is stored as events, not scores.
+- Types: delivered, open, click, reply, bounce
+- Scores are derived views, never persisted
+
+---
+
+## Database — Current State (14 tables)
+
+### Core Tables (Active, Protected)
+| Table | Status | Notes |
+|-------|--------|-------|
+| `organizers` | ACTIVE | Multi-tenant root |
+| `users` | ACTIVE | Organizer users |
+| `mining_jobs` | ACTIVE | Scraping job definitions |
+| `mining_results` | ACTIVE | Discovery events (discovery only!) |
+| `mining_job_logs` | ACTIVE | Job execution logs |
+| `campaigns` | ACTIVE | Email campaigns |
+| `campaign_recipients` | ACTIVE | Per-recipient tracking |
+| `email_templates` | ACTIVE | Reusable templates with placeholders |
+| `sender_identities` | ACTIVE | Verified sender emails |
+| `unsubscribes` | ACTIVE | Opt-out records |
+
+### Legacy Tables (Exist but transitional)
+| Table | Status | Notes |
+|-------|--------|-------|
+| `prospects` | LEGACY | Will be replaced by `prospect_intents` |
+| `lists` | LEGACY | Will be re-evaluated |
+| `list_members` | LEGACY | Will be re-evaluated |
+| `email_logs` | LEGACY | Will be replaced by `campaign_events` |
+
+**RULE:** Legacy tables must NOT be deleted. They remain until migration is complete.
+New code should prefer new canonical tables when available.
+
+### Tables To Build (Constitution Migration)
+| Table | Purpose | Priority |
+|-------|---------|----------|
+| `persons` | Identity layer (email = key) | HIGH |
+| `affiliations` | Person-company relationships | HIGH |
+| `prospect_intents` | Intent signals (reply, qualification) | MEDIUM |
+| `campaign_events` | Engagement events (open/click/reply/bounce) | MEDIUM |
+
+---
+
+## Migration Strategy
+
+Phase 1 — Add new canonical tables (persons, affiliations) WITHOUT removing anything.
+Phase 2 — Backfill persons/affiliations from mining_results data.
+Phase 3 — New features use canonical tables. Legacy tables remain read-only.
+Phase 4 — Remove legacy tables (only when fully migrated and tested).
+
+**Current phase: Phase 1**
+
+**IMPORTANT:** During Phase 1, legacy tables remain the source of truth for existing features unless explicitly migrated. Do not rewrite existing features to use canonical tables until migration is confirmed complete for that feature.
+
+---
+
+## Terminology
+
+| Term | Meaning | Storage |
+|------|---------|---------|
+| Person | Real individual, identified by email | `persons` table |
+| Affiliation | Person's relationship to a company | `affiliations` table |
+| Mining Result | Discovery event from scraping | `mining_results` table |
+| Prospect | Person with demonstrated intent | `prospect_intents` table |
+| Campaign | Email outreach job | `campaigns` table |
+| Campaign Event | Engagement signal (open/click/reply) | `campaign_events` table |
+| Sender Identity | Verified sending email address | `sender_identities` table |
+
+### UI Concepts (Views, NOT tables)
+| UI Page | Meaning |
+|---------|---------|
+| Contacts | Person + selected affiliation |
+| Leads | Contacts without intent |
+| Prospects | Contacts with intent |
+| Mining Results | Discovery events |
+| Lists | Campaign targeting snapshots |
+
+**UI page names must NEVER mirror table names directly.**
+**liffy-ui must treat API responses as canonical domain views, not database representations.**
+
+---
+
+## Forbidden Patterns (Anti-Patterns)
+
+- Mining creates leads or prospects
+- Mining writes to persons/prospects directly
+- Email uniqueness enforced across organizers
+- UI logic based on table names
+- Storing engagement scores as persisted values
+- Campaign directly mutating a person record
+- Cross-domain side effects (mining → prospect creation)
+- Miners normalizing, parsing names, inferring countries, or writing to DB
+- Using nodemailer (SendGrid API only)
+- Using ORMs (Sequelize, Prisma, Knex)
+- Refactoring mining engine without explicit instruction
+- Creating React/Vue/Angular frontend (Next.js already exists in liffy-ui)
+- Skipping organizer_id in any query
+
+---
+
+## Miner Contract
+
+Miners are disposable plugins. They:
+- Accept input (URL or file)
+- Extract raw data
+- Return raw output
+
+Miners NEVER:
+- Normalize data
+- Parse names
+- Infer countries
+- Write to database
+- Merge data
+- Access organizer context
+
+---
+
+## Build Priority (Current)
+
+1. **Constitution Migration** — Create persons + affiliations tables, backfill from mining_results
+2. **Campaign Events** — Create campaign_events table, migrate from email_logs
+3. **ProspectIntent** — Create prospect_intents, define intent signals
+4. **Email Campaign improvements** — templates, list upload, send flow
+5. **Email verification** — ZeroBounce/NeverBounce integration
+6. **Zoho webhook** — push prospects to CRM
+7. **Scraping module improvements** — if needed
+
+---
+
+## Git & Versioning
+
+- Commit after every completed feature
+- Clear commit messages: `feat: add persons table migration`, `fix: campaign recipient dedup`
+- Tag milestones: v1, v2, etc.
+- Backend repo: `Nsueray/liffyv1` (API + assets)
+- Frontend repo: `Nsueray/liffy-ui` (Next.js)
+
+---
+
+## File-Based Development
+
+Each task produces complete, standalone files.
+When creating or editing a file, output the FULL file content.
+No partial snippets, no "rest stays the same" shortcuts.
+
+---
+
+## What NOT To Do
+
+- Do NOT refactor the mining engine unless explicitly asked
+- Do NOT "improve architecture" without being asked — build what's requested
+- Do NOT delete legacy tables — they stay until Phase 4
+- Do NOT assume tables exist that aren't listed in "Current State" above
+- Do NOT create new tables without checking this document first
