@@ -50,23 +50,28 @@ function processTemplate(text, recipient, extras = {}) {
   if (!text) return "";
   
   // Recipient verilerini hazırla
-  const fullName = recipient.name || "";
-  const nameParts = fullName.trim().split(/\s+/);
-  const firstName = nameParts[0] || "";
-  const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : "";
-  
   // Meta verisi JSONB olduğu için obje olarak gelebilir
   let meta = {};
   if (recipient.meta) {
     try {
-      meta = typeof recipient.meta === 'string' 
-        ? JSON.parse(recipient.meta) 
+      meta = typeof recipient.meta === 'string'
+        ? JSON.parse(recipient.meta)
         : recipient.meta;
     } catch (e) {
       meta = {};
     }
   }
-  
+
+  // Canonical first_name/last_name tercih et, yoksa name split fallback
+  const fullName = recipient.name || "";
+  let firstName = meta.first_name || "";
+  let lastName = meta.last_name || "";
+  if (!firstName && fullName) {
+    const nameParts = fullName.trim().split(/\s+/);
+    firstName = nameParts[0] || "";
+    lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : "";
+  }
+
   // Değerleri hazırla (hepsi güvenli, null ise boş string)
   const companyName = meta.company || meta.company_name || "";
   const country = meta.country || "";
@@ -244,15 +249,7 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
             [r.id]
           );
 
-          // Logla (legacy)
-          await client.query(
-            `INSERT INTO email_logs
-             (organizer_id, campaign_id, template_id, recipient_email, recipient_data, status, provider_response, sent_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
-            [organizer_id, campaign_id, campaign.template_id, r.email, r.meta, 'sent', mailResp]
-          );
-
-          // Record canonical 'sent' event (Phase 2)
+          // Record canonical 'sent' event
           await recordSentEvent(client, organizer_id, campaign_id, r);
 
         } else {
