@@ -108,17 +108,17 @@ Engagement is stored as events, not scores.
 ### Canonical Tables (Constitution Migration — Active)
 | Table | Status | Migration | Notes |
 |-------|--------|-----------|-------|
-| `persons` | ACTIVE | 015 | Identity layer. `(organizer_id, LOWER(email))` unique. Populated by aggregationTrigger + backfill. |
-| `affiliations` | ACTIVE | 016 | Person-company relationships. Additive only. Populated by aggregationTrigger + backfill. |
+| `persons` | ACTIVE | 015 | Identity layer. `(organizer_id, LOWER(email))` unique. Populated by aggregationTrigger + backfill + CSV upload. |
+| `affiliations` | ACTIVE | 016 | Person-company relationships. Additive only. Populated by aggregationTrigger + backfill + CSV upload. |
 | `prospect_intents` | ACTIVE | 017 | Intent signals. Populated by webhook (reply, click_through). |
 | `campaign_events` | ACTIVE | 018 | Immutable event log. Populated by webhook + campaignSend + backfill. |
 
 ### Legacy Tables (Exist but transitional)
 | Table | Status | Notes |
 |-------|--------|-------|
-| `prospects` | LEGACY | Import-all still writes here. Will be replaced when features migrate to persons + affiliations. |
-| `lists` | LEGACY | Still used by campaign resolve. Will be re-evaluated. |
-| `list_members` | LEGACY | Still used by campaign resolve. Will be re-evaluated. |
+| `prospects` | LEGACY | Import-all + CSV upload (dual-write) still write here. Will be replaced when features migrate to persons + affiliations. |
+| `lists` | LEGACY | Used by campaign resolve + CSV upload. Will be re-evaluated. |
+| `list_members` | LEGACY | Used by campaign resolve + CSV upload. Will be re-evaluated. |
 | `email_logs` | LEGACY | Webhook still writes here. Will be removed when campaign_events is fully adopted. |
 
 **RULE:** Legacy tables must NOT be deleted. They remain until migration is complete.
@@ -176,6 +176,59 @@ SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → 
 | `click` | `click_through` | `prospect_intents` |
 
 **Campaign send** (`backend/routes/campaignSend.js`) also writes `sent` events to `campaign_events`.
+
+---
+
+## Email Campaign Features
+
+### Template Preview & Clone (`backend/routes/emailTemplates.js`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/email-templates/:id/preview` | POST | Render template with sample data (or custom `sample_data` in body). Returns `{ preview: { subject, body_html, body_text } }` |
+| `/api/email-templates/:id/clone` | POST | Duplicate template with optional custom `name` (defaults to "Copy of {name}"). Returns new template. |
+
+Preview uses a local `processTemplate()` that mirrors the one in `campaignSend.js`.
+Default sample: `{ first_name: "John", last_name: "Doe", company: "Acme Corp", ... }`. `{{unsubscribe_url}}` resolves to `"#"` in preview.
+
+### CSV Upload to Lists (`backend/routes/lists.js`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/lists/upload-csv` | POST (multipart) | Upload CSV file to create a new list with dual-write |
+
+- Accepts `file` (CSV, max 10MB), `name` (optional), `tags` (optional JSON string)
+- Flexible header aliases: `email`/`e-mail`/`Email`, `company`/`organization`, `first_name`/`firstname`, etc.
+- **Dual-write (Phase 3 pattern):**
+  - Legacy: `prospects` (check-then-insert/update) + `list_members`
+  - Canonical: `persons` UPSERT + `affiliations` UPSERT (if company present)
+- Response includes `canonical_sync: { persons_upserted, affiliations_upserted }`
+- Route registered BEFORE `/:id` routes to avoid Express parameter collision
+
+### Campaign Analytics (`backend/routes/campaigns.js`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/campaigns/:id/analytics` | GET | Full analytics from `campaign_events` table |
+
+Returns 4 sections:
+1. **Summary**: event counts + derived rates (open_rate, click_rate, bounce_rate, spam_rate, unsubscribe_rate)
+2. **Timeline**: `date_trunc` bucketed by `hour` or `day` (`?bucket=hour`), pivoted by event_type
+3. **Top Links**: top 10 clicked URLs with click counts
+4. **Bounce Breakdown**: hard/soft/unknown classification based on reason text
+
+### Campaign Scheduling (`backend/routes/campaigns.js`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/campaigns/:id/schedule` | POST | Schedule campaign for future send. Requires `scheduled_at` (ISO 8601, must be future). Campaign must be `'ready'`. |
+| `/api/campaigns/:id/start` | POST | Start campaign immediately. Now accepts `'ready'` OR `'scheduled'` status (cancels schedule). |
+
+**Scheduling flow:**
+```
+resolve → status='ready' → schedule → status='scheduled' → (campaignScheduler picks up at scheduled_at) → status='sending' → (worker processes batches) → status='completed'
+```
+`/:id/start` can bypass scheduling by transitioning directly from `'ready'` or `'scheduled'` to `'sending'`.
 
 ---
 
@@ -280,7 +333,7 @@ Miners NEVER:
 1. ~~**Constitution Migration** — persons + affiliations tables, backfill~~ ✅ DONE
 2. ~~**Campaign Events** — campaign_events table, webhook + send integration~~ ✅ DONE
 3. ~~**ProspectIntent** — prospect_intents table, intent detection from webhook~~ ✅ DONE
-4. **Email Campaign improvements** — templates, list upload, send flow
+4. ~~**Email Campaign improvements** — templates, list upload, send flow~~ ✅ DONE
 5. **Email verification** — ZeroBounce/NeverBounce integration
 6. **Zoho webhook** — push prospects to CRM
 7. **Scraping module improvements** — if needed
