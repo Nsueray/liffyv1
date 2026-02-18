@@ -53,6 +53,20 @@ router.post('/api/webhooks/sendgrid', async (req, res) => {
 });
 
 /**
+ * Map SendGrid event types to campaign_events.event_type
+ */
+const CAMPAIGN_EVENT_TYPE_MAP = {
+  'delivered': 'delivered',
+  'open': 'open',
+  'click': 'click',
+  'bounce': 'bounce',
+  'dropped': 'dropped',
+  'deferred': 'deferred',
+  'spamreport': 'spam_report',
+  'unsubscribe': 'unsubscribe',
+};
+
+/**
  * Process individual SendGrid event
  */
 async function processWebhookEvent(event) {
@@ -122,11 +136,11 @@ async function processWebhookEvent(event) {
 
   if (!recipient) return;
 
-  // Update based on event type
+  // Update based on event type (existing campaign_recipients flow — untouched)
   switch (eventType) {
     case 'delivered':
       await db.query(
-        `UPDATE campaign_recipients 
+        `UPDATE campaign_recipients
          SET status = 'delivered', delivered_at = $2
          WHERE id = $1 AND status = 'sent'`,
         [recipient.id, eventTime]
@@ -135,8 +149,8 @@ async function processWebhookEvent(event) {
 
     case 'open':
       await db.query(
-        `UPDATE campaign_recipients 
-         SET status = 'opened', 
+        `UPDATE campaign_recipients
+         SET status = 'opened',
              opened_at = COALESCE(opened_at, $2),
              open_count = COALESCE(open_count, 0) + 1
          WHERE id = $1`,
@@ -146,8 +160,8 @@ async function processWebhookEvent(event) {
 
     case 'click':
       await db.query(
-        `UPDATE campaign_recipients 
-         SET status = 'clicked', 
+        `UPDATE campaign_recipients
+         SET status = 'clicked',
              clicked_at = COALESCE(clicked_at, $2),
              click_count = COALESCE(click_count, 0) + 1
          WHERE id = $1`,
@@ -159,8 +173,8 @@ async function processWebhookEvent(event) {
     case 'dropped':
       const errorMsg = reason || bounce_classification || eventType;
       await db.query(
-        `UPDATE campaign_recipients 
-         SET status = 'bounced', 
+        `UPDATE campaign_recipients
+         SET status = 'bounced',
              bounced_at = $2,
              last_error = $3
          WHERE id = $1`,
@@ -170,8 +184,8 @@ async function processWebhookEvent(event) {
 
     case 'spamreport':
       await db.query(
-        `UPDATE campaign_recipients 
-         SET status = 'bounced', 
+        `UPDATE campaign_recipients
+         SET status = 'bounced',
              bounced_at = $2,
              last_error = 'Spam report'
          WHERE id = $1`,
@@ -186,13 +200,65 @@ async function processWebhookEvent(event) {
       break;
   }
 
-  // Also log to email_logs if needed
+  // Record to canonical campaign_events table (Phase 2)
+  await recordCampaignEvent(recipient, email, eventType, eventTime, event);
+
+  // Also log to email_logs if needed (legacy)
   await db.query(
     `INSERT INTO email_logs (organizer_id, campaign_id, recipient_email, status, provider_response, sent_at)
      VALUES ($1, $2, $3, $4, $5, $6)
      ON CONFLICT DO NOTHING`,
     [recipient.organizer_id, recipient.campaign_id, email, newStatus, JSON.stringify(event), eventTime]
   ).catch(() => {}); // Ignore if fails
+}
+
+/**
+ * Record event to canonical campaign_events table.
+ * Never breaks the main webhook flow — all errors are caught and logged.
+ */
+async function recordCampaignEvent(recipient, email, eventType, eventTime, rawEvent) {
+  const canonicalType = CAMPAIGN_EVENT_TYPE_MAP[eventType];
+  if (!canonicalType) return;
+
+  try {
+    // Best-effort person_id lookup from canonical persons table
+    let personId = null;
+    const personRes = await db.query(
+      `SELECT id FROM persons WHERE organizer_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+      [recipient.organizer_id, email]
+    );
+    if (personRes.rows.length > 0) {
+      personId = personRes.rows[0].id;
+    }
+
+    await db.query(`
+      INSERT INTO campaign_events (
+        organizer_id, campaign_id, recipient_id, person_id,
+        event_type, email, url, user_agent, ip_address,
+        reason, provider_event_id, provider_response, occurred_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+      ON CONFLICT (campaign_id, event_type, LOWER(email), provider_event_id)
+        WHERE provider_event_id IS NOT NULL
+      DO NOTHING
+    `, [
+      recipient.organizer_id,
+      recipient.campaign_id,
+      recipient.id,
+      personId,
+      canonicalType,
+      email,
+      rawEvent.url || null,
+      rawEvent.useragent || null,
+      rawEvent.ip || null,
+      rawEvent.reason || rawEvent.bounce_classification || null,
+      rawEvent.sg_message_id || null,
+      JSON.stringify(rawEvent),
+      eventTime,
+    ]);
+  } catch (err) {
+    // Never break the webhook flow — log and continue
+    console.error(`  ⚠️ campaign_events insert failed for ${email}:`, err.message);
+  }
 }
 
 /**
