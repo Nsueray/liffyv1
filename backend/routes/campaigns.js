@@ -510,10 +510,10 @@ router.post('/:id/start', authRequired, async (req, res) => {
 
     const campaign = campRes.rows[0];
 
-    // Allow start from 'ready' status
-    if (campaign.status !== 'ready') {
+    // Allow start from 'ready' or 'scheduled' status
+    if (campaign.status !== 'ready' && campaign.status !== 'scheduled') {
       return res.status(400).json({
-        error: `Cannot start campaign: status is '${campaign.status}', expected 'ready'`
+        error: `Cannot start campaign: status is '${campaign.status}', expected 'ready' or 'scheduled'`
       });
     }
 
@@ -530,9 +530,9 @@ router.post('/:id/start', authRequired, async (req, res) => {
     }
 
     const updateRes = await db.query(
-      `UPDATE campaigns 
-       SET status = 'sending', started_at = NOW()
-       WHERE id = $1 AND organizer_id = $2 AND status = 'ready'
+      `UPDATE campaigns
+       SET status = 'sending', started_at = NOW(), scheduled_at = NULL
+       WHERE id = $1 AND organizer_id = $2 AND status IN ('ready', 'scheduled')
        RETURNING *`,
       [campaignId, organizerId]
     );
@@ -644,6 +644,66 @@ router.post('/:id/resume', authRequired, async (req, res) => {
   }
 });
 
+// POST /api/campaigns/:id/schedule
+router.post('/:id/schedule', authRequired, async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const organizerId = req.auth.organizer_id;
+    const { scheduled_at } = req.body;
+
+    if (!scheduled_at) {
+      return res.status(400).json({ error: "scheduled_at is required (ISO 8601 format)" });
+    }
+
+    const scheduleDate = new Date(scheduled_at);
+    if (isNaN(scheduleDate.getTime())) {
+      return res.status(400).json({ error: "Invalid date format. Use ISO 8601 (e.g. 2026-03-01T10:00:00Z)" });
+    }
+
+    if (scheduleDate <= new Date()) {
+      return res.status(400).json({ error: "scheduled_at must be in the future" });
+    }
+
+    const campRes = await db.query(
+      `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
+    if (campRes.rows.length === 0) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    const campaign = campRes.rows[0];
+
+    if (campaign.status !== 'ready') {
+      return res.status(400).json({
+        error: `Cannot schedule campaign: status is '${campaign.status}', expected 'ready'`
+      });
+    }
+
+    const updateRes = await db.query(
+      `UPDATE campaigns
+       SET status = 'scheduled', scheduled_at = $3
+       WHERE id = $1 AND organizer_id = $2 AND status = 'ready'
+       RETURNING *`,
+      [campaignId, organizerId, scheduleDate.toISOString()]
+    );
+
+    if (updateRes.rows.length === 0) {
+      return res.status(400).json({ error: "Failed to schedule campaign" });
+    }
+
+    return res.json({
+      success: true,
+      campaign: updateRes.rows[0]
+    });
+
+  } catch (err) {
+    console.error("Campaign schedule error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 // ============================================================
 // NEW ENDPOINTS ADDED BELOW - V2
 // ============================================================
@@ -700,6 +760,152 @@ router.get('/:id/stats', authRequired, async (req, res) => {
 
   } catch (err) {
     console.error("Campaign stats error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/campaigns/:id/analytics - Campaign analytics from campaign_events
+router.get('/:id/analytics', authRequired, async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+    const organizerId = req.auth.organizer_id;
+
+    // Verify campaign exists and belongs to organizer
+    const campRes = await db.query(
+      `SELECT id, name, status, recipient_count, started_at, completed_at
+       FROM campaigns
+       WHERE id = $1 AND organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
+    if (campRes.rows.length === 0) {
+      return res.status(404).json({ error: "Campaign not found" });
+    }
+
+    const campaign = campRes.rows[0];
+
+    // 1. Summary: event_type counts
+    const summaryRes = await db.query(
+      `SELECT event_type, COUNT(*) as count
+       FROM campaign_events
+       WHERE campaign_id = $1 AND organizer_id = $2
+       GROUP BY event_type`,
+      [campaignId, organizerId]
+    );
+
+    const counts = {};
+    summaryRes.rows.forEach(r => { counts[r.event_type] = parseInt(r.count, 10); });
+
+    const sent = counts.sent || 0;
+    const delivered = counts.delivered || 0;
+    const opens = counts.open || 0;
+    const clicks = counts.click || 0;
+    const bounces = counts.bounce || 0;
+    const spamReports = counts.spam_report || 0;
+    const unsubscribes = counts.unsubscribe || 0;
+
+    const base = sent || 1; // avoid division by zero
+    const summary = {
+      sent,
+      delivered,
+      opens,
+      clicks,
+      bounces,
+      spam_reports: spamReports,
+      unsubscribes,
+      replies: counts.reply || 0,
+      dropped: counts.dropped || 0,
+      deferred: counts.deferred || 0,
+      delivery_rate: +(delivered / base * 100).toFixed(2),
+      open_rate: +(opens / base * 100).toFixed(2),
+      click_rate: +(opens > 0 ? clicks / opens * 100 : 0).toFixed(2),
+      bounce_rate: +(bounces / base * 100).toFixed(2),
+      spam_rate: +(spamReports / base * 100).toFixed(2),
+      unsubscribe_rate: +(unsubscribes / base * 100).toFixed(2)
+    };
+
+    // 2. Timeline: bucketized by hour or day
+    const bucket = req.query.bucket === 'hour' ? 'hour' : 'day';
+    const timelineRes = await db.query(
+      `SELECT
+         date_trunc($3, occurred_at) as period,
+         event_type,
+         COUNT(*) as count
+       FROM campaign_events
+       WHERE campaign_id = $1 AND organizer_id = $2
+       GROUP BY period, event_type
+       ORDER BY period ASC`,
+      [campaignId, organizerId, bucket]
+    );
+
+    // Pivot timeline: group by period, with event counts
+    const timelineMap = new Map();
+    timelineRes.rows.forEach(r => {
+      const key = r.period.toISOString();
+      if (!timelineMap.has(key)) {
+        timelineMap.set(key, { period: key });
+      }
+      timelineMap.get(key)[r.event_type] = parseInt(r.count, 10);
+    });
+    const timeline = Array.from(timelineMap.values());
+
+    // 3. Top Links: most clicked URLs
+    const topLinksRes = await db.query(
+      `SELECT url, COUNT(*) as clicks
+       FROM campaign_events
+       WHERE campaign_id = $1 AND organizer_id = $2
+         AND event_type = 'click' AND url IS NOT NULL
+       GROUP BY url
+       ORDER BY clicks DESC
+       LIMIT 10`,
+      [campaignId, organizerId]
+    );
+
+    const topLinks = topLinksRes.rows.map(r => ({
+      url: r.url,
+      clicks: parseInt(r.clicks, 10)
+    }));
+
+    // 4. Bounce Breakdown: hard vs soft vs unknown
+    const bounceRes = await db.query(
+      `SELECT reason, COUNT(*) as count
+       FROM campaign_events
+       WHERE campaign_id = $1 AND organizer_id = $2
+         AND event_type = 'bounce'
+       GROUP BY reason`,
+      [campaignId, organizerId]
+    );
+
+    let hardBounces = 0;
+    let softBounces = 0;
+    let unknownBounces = 0;
+    bounceRes.rows.forEach(r => {
+      const count = parseInt(r.count, 10);
+      const reason = (r.reason || '').toLowerCase();
+      if (reason.includes('550') || reason.includes('invalid') || reason.includes('not exist') || reason.includes('hard')) {
+        hardBounces += count;
+      } else if (reason.includes('temp') || reason.includes('full') || reason.includes('soft') || reason.includes('defer')) {
+        softBounces += count;
+      } else {
+        unknownBounces += count;
+      }
+    });
+
+    return res.json({
+      campaign,
+      summary,
+      timeline,
+      top_links: topLinks,
+      bounce_breakdown: {
+        hard: hardBounces,
+        soft: softBounces,
+        unknown: unknownBounces,
+        total: hardBounces + softBounces + unknownBounces
+      }
+    });
+
+  } catch (err) {
+    console.error("Campaign analytics error:", err);
     return res.status(500).json({ error: err.message });
   }
 });

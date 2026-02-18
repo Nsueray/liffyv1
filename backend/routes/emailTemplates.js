@@ -153,5 +153,123 @@ router.delete('/:id', authRequired, async (req, res) => {
   }
 });
 
+// ============================================
+// TEMPLATE PREVIEW & CLONE
+// ============================================
+
+/**
+ * Process template placeholders with recipient data.
+ * Mirrors the logic from campaignSend.js processTemplate.
+ */
+function processTemplate(text, data, extras = {}) {
+  if (!text) return "";
+
+  const fullName = data.name || "";
+  const nameParts = fullName.trim().split(/\s+/);
+  const firstName = data.first_name || nameParts[0] || "";
+  const lastName = data.last_name || (nameParts.length > 1 ? nameParts.slice(1).join(' ') : "");
+
+  let processed = text;
+
+  processed = processed.replace(/{{first_name}}/gi, firstName);
+  processed = processed.replace(/{{last_name}}/gi, lastName);
+  processed = processed.replace(/{{name}}/gi, fullName || `${firstName} ${lastName}`.trim());
+  processed = processed.replace(/{{company_name}}/gi, data.company || "");
+  processed = processed.replace(/{{company}}/gi, data.company || "");
+  processed = processed.replace(/{{email}}/gi, data.email || "");
+  processed = processed.replace(/{{country}}/gi, data.country || "");
+  processed = processed.replace(/{{position}}/gi, data.position || "");
+  processed = processed.replace(/{{website}}/gi, data.website || "");
+  processed = processed.replace(/{{tag}}/gi, data.tag || "");
+
+  if (extras.unsubscribe_url) {
+    processed = processed.replace(/{{unsubscribe_url}}/gi, extras.unsubscribe_url);
+    processed = processed.replace(/{{unsubscribe_link}}/gi, extras.unsubscribe_url);
+  }
+
+  return processed;
+}
+
+// POST /api/email-templates/:id/preview
+router.post('/:id/preview', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const templateId = req.params.id;
+
+    const result = await pool.query(
+      `SELECT id, name, subject, body_html, body_text
+       FROM email_templates
+       WHERE id = $1 AND organizer_id = $2`,
+      [templateId, organizerId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+
+    const template = result.rows[0];
+
+    const sampleData = req.body.sample_data || {
+      first_name: "John",
+      last_name: "Doe",
+      name: "John Doe",
+      company: "Acme Corp",
+      email: "john@acme.com",
+      country: "US",
+      position: "Manager",
+      website: "acme.com",
+      tag: "Sample"
+    };
+
+    const extras = { unsubscribe_url: "#" };
+
+    res.json({
+      preview: {
+        subject: processTemplate(template.subject, sampleData, extras),
+        body_html: processTemplate(template.body_html, sampleData, extras),
+        body_text: processTemplate(template.body_text || "", sampleData, extras)
+      }
+    });
+  } catch (error) {
+    console.error('Error previewing template:', error);
+    res.status(500).json({ error: 'Failed to preview template' });
+  }
+});
+
+// POST /api/email-templates/:id/clone
+router.post('/:id/clone', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const templateId = req.params.id;
+
+    const existing = await pool.query(
+      `SELECT name, subject, body_html, body_text
+       FROM email_templates
+       WHERE id = $1 AND organizer_id = $2`,
+      [templateId, organizerId]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: 'Template not found' });
+    }
+
+    const source = existing.rows[0];
+    const newName = req.body.name || `Copy of ${source.name}`;
+
+    const result = await pool.query(
+      `INSERT INTO email_templates
+       (organizer_id, name, subject, body_html, body_text, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       RETURNING id, name, subject, body_html, body_text, created_at`,
+      [organizerId, newName, source.subject, source.body_html, source.body_text]
+    );
+
+    res.status(201).json({ template: result.rows[0] });
+  } catch (error) {
+    console.error('Error cloning template:', error);
+    res.status(500).json({ error: 'Failed to clone template' });
+  }
+});
+
 // IMPORTANT: module.exports must be at the END of the file
 module.exports = router;

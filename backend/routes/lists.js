@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const csvParser = require('csv-parser');
+const { Readable } = require('stream');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -105,6 +108,254 @@ function buildLeadsFilter(organizerId, filters) {
 
   return { whereClause, params, paramIndex };
 }
+
+// ============================================
+// CSV UPLOAD (must be registered BEFORE /:id routes)
+// ============================================
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype === 'text/csv' || file.originalname.endsWith('.csv')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only CSV files are allowed'));
+    }
+  }
+});
+
+// Header alias mapping for flexible CSV column matching
+const HEADER_ALIASES = {
+  email: ['email', 'e-mail', 'email_address', 'emailaddress', 'mail'],
+  name: ['name', 'full_name', 'fullname', 'contact_name', 'contactname'],
+  first_name: ['first_name', 'firstname', 'first', 'given_name'],
+  last_name: ['last_name', 'lastname', 'last', 'surname', 'family_name'],
+  company: ['company', 'organization', 'organisation', 'company_name', 'companyname', 'org'],
+  country: ['country', 'country_code', 'countrycode', 'location'],
+  position: ['position', 'title', 'job_title', 'jobtitle', 'role'],
+  website: ['website', 'url', 'web', 'site'],
+  phone: ['phone', 'telephone', 'tel', 'mobile', 'phone_number']
+};
+
+function normalizeHeader(header) {
+  const clean = header.toLowerCase().trim().replace(/[^a-z0-9_]/g, '_');
+  for (const [canonical, aliases] of Object.entries(HEADER_ALIASES)) {
+    if (aliases.includes(clean)) return canonical;
+  }
+  return clean;
+}
+
+function normalizeRow(row) {
+  const normalized = {};
+  for (const [key, value] of Object.entries(row)) {
+    const canonicalKey = normalizeHeader(key);
+    if (!normalized[canonicalKey] && value && value.trim()) {
+      normalized[canonicalKey] = value.trim();
+    }
+  }
+  // Build full name from first_name + last_name if name not present
+  if (!normalized.name && (normalized.first_name || normalized.last_name)) {
+    normalized.name = [normalized.first_name, normalized.last_name].filter(Boolean).join(' ');
+  }
+  return normalized;
+}
+
+function parseCSVBuffer(buffer) {
+  return new Promise((resolve, reject) => {
+    const rows = [];
+    const stream = Readable.from(buffer.toString('utf-8'));
+    stream
+      .pipe(csvParser())
+      .on('data', (row) => rows.push(row))
+      .on('end', () => resolve(rows))
+      .on('error', (err) => reject(err));
+  });
+}
+
+// POST /api/lists/upload-csv
+router.post('/upload-csv', authRequired, upload.single('file'), async (req, res) => {
+  const client = await db.connect();
+
+  try {
+    const organizerId = req.auth.organizer_id;
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'CSV file is required' });
+    }
+
+    // Parse CSV
+    const rawRows = await parseCSVBuffer(req.file.buffer);
+
+    if (rawRows.length === 0) {
+      return res.status(400).json({ error: 'CSV file is empty' });
+    }
+
+    if (rawRows.length > 10000) {
+      return res.status(400).json({ error: 'Maximum 10,000 rows per upload' });
+    }
+
+    // Normalize rows
+    const rows = rawRows.map(normalizeRow);
+
+    // Validate: at least one row must have an email
+    const validRows = rows.filter(r => r.email && r.email.includes('@'));
+    if (validRows.length === 0) {
+      return res.status(400).json({ error: 'No valid email addresses found in CSV. Ensure an "email" column exists.' });
+    }
+
+    // Create list
+    const listName = (req.body.name && req.body.name.trim()) || req.file.originalname.replace(/\.csv$/i, '');
+    let tags = null;
+    if (req.body.tags) {
+      try {
+        tags = JSON.parse(req.body.tags);
+        if (!Array.isArray(tags)) tags = null;
+      } catch (e) {
+        tags = null;
+      }
+    }
+
+    await client.query('BEGIN');
+
+    const listResult = await client.query(
+      `INSERT INTO lists (organizer_id, name, type) VALUES ($1, $2, 'import') RETURNING id, name, created_at`,
+      [organizerId, listName]
+    );
+    const newList = listResult.rows[0];
+
+    let imported = 0;
+    let skipped = 0;
+    const errors = [];
+    let personsUpserted = 0;
+    let affiliationsUpserted = 0;
+
+    // Process in batches of 100
+    for (let i = 0; i < validRows.length; i++) {
+      const row = validRows[i];
+      try {
+        const email = row.email.toLowerCase().trim();
+
+        // --- LEGACY: prospects table (check-then-insert, no unique index on organizer_id+email) ---
+        let prospectId;
+        const existingProspect = await client.query(
+          `SELECT id FROM prospects WHERE organizer_id = $1 AND LOWER(email) = $2`,
+          [organizerId, email]
+        );
+
+        if (existingProspect.rows.length > 0) {
+          prospectId = existingProspect.rows[0].id;
+          // Enrich existing prospect with new data (don't overwrite non-null)
+          await client.query(
+            `UPDATE prospects SET
+               name = COALESCE(NULLIF($3, ''), name),
+               company = COALESCE(NULLIF($4, ''), company),
+               country = COALESCE(NULLIF($5, ''), country),
+               sector = COALESCE(NULLIF($6, ''), sector)
+             WHERE id = $2 AND organizer_id = $1`,
+            [organizerId, prospectId, row.name || '', row.company || '', row.country || '', row.position || '']
+          );
+        } else {
+          const insertResult = await client.query(
+            `INSERT INTO prospects (organizer_id, email, name, company, country, sector, source_type, source_ref, tags)
+             VALUES ($1, $2, $3, $4, $5, $6, 'import', 'CSV upload', $7)
+             RETURNING id`,
+            [organizerId, email, row.name || null, row.company || null, row.country || null, row.position || null, tags || null]
+          );
+          prospectId = insertResult.rows[0].id;
+        }
+
+        // --- LEGACY: list_members ---
+        if (prospectId) {
+          await client.query(
+            `INSERT INTO list_members (list_id, prospect_id, organizer_id)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (list_id, prospect_id) DO NOTHING`,
+            [newList.id, prospectId, organizerId]
+          );
+        }
+
+        // --- CANONICAL: persons table UPSERT (Phase 3 dual-write) ---
+        const firstName = row.first_name || (row.name ? row.name.split(/\s+/)[0] : null);
+        const lastName = row.last_name || (row.name && row.name.includes(' ') ? row.name.split(/\s+/).slice(1).join(' ') : null);
+
+        const personResult = await client.query(
+          `INSERT INTO persons (organizer_id, email, first_name, last_name)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
+             first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
+             last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
+             updated_at = NOW()
+           RETURNING id`,
+          [organizerId, email, firstName || null, lastName || null]
+        );
+        personsUpserted++;
+        const personId = personResult.rows[0].id;
+
+        // --- CANONICAL: affiliations table UPSERT (if company present) ---
+        if (row.company) {
+          await client.query(
+            `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, website, phone, source_type, source_ref)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'import', 'CSV upload')
+             ON CONFLICT (organizer_id, person_id, LOWER(company_name))
+             WHERE company_name IS NOT NULL
+             DO UPDATE SET
+               position = COALESCE(NULLIF(EXCLUDED.position, ''), affiliations.position),
+               country_code = COALESCE(NULLIF(EXCLUDED.country_code, ''), affiliations.country_code),
+               website = COALESCE(NULLIF(EXCLUDED.website, ''), affiliations.website),
+               phone = COALESCE(NULLIF(EXCLUDED.phone, ''), affiliations.phone)`,
+            [
+              organizerId,
+              personId,
+              row.company,
+              row.position || null,
+              row.country ? row.country.substring(0, 2).toUpperCase() : null,
+              row.website || null,
+              row.phone || null
+            ]
+          );
+          affiliationsUpserted++;
+        }
+
+        imported++;
+      } catch (rowErr) {
+        errors.push({ row: i + 1, email: row.email, error: rowErr.message });
+        skipped++;
+      }
+    }
+
+    // Count rows without valid email
+    const invalidEmailCount = rows.length - validRows.length;
+    skipped += invalidEmailCount;
+
+    await client.query('COMMIT');
+
+    res.status(201).json({
+      list_id: newList.id,
+      list_name: newList.name,
+      total_rows: rows.length,
+      imported,
+      skipped,
+      errors: errors.slice(0, 20),
+      canonical_sync: {
+        persons_upserted: personsUpserted,
+        affiliations_upserted: affiliationsUpserted
+      }
+    });
+
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('POST /api/lists/upload-csv error:', err);
+
+    if (err.message === 'Only CSV files are allowed') {
+      return res.status(400).json({ error: err.message });
+    }
+
+    res.status(500).json({ error: err.message || 'Failed to upload CSV' });
+  } finally {
+    client.release();
+  }
+});
 
 // GET /api/lists - Get all lists with counts
 router.get('/', authRequired, async (req, res) => {
