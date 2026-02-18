@@ -180,6 +180,53 @@ Miner → normalizeMinerOutput() → aggregationTrigger.aggregate() → persons 
 
 ---
 
+## Mining Engine — Pagination (SuperMiner v3.2)
+
+Mining engine now supports multi-page crawling for paginated sites. Previously only page 1 was mined.
+
+**How it works:**
+```
+Job URL (e.g. ?page=1)
+  → detectPagination() — checks URL pattern + SmartRouter hints + HTML analysis
+  → detectTotalPages() — scans pagination elements, link hrefs, "Page X of Y" text
+  → mineAllPages() — iterates through all pages, merges + deduplicates results
+  → Aggregator V1 → Redis (all contacts from all pages)
+  → Aggregator V2 → DB write + canonical aggregation
+```
+
+**Pagination detection signals:**
+- URL contains `?page=N` or `/page/N/` (strong signal)
+- PageAnalyzer detects pagination elements (`.pagination`, `nav[aria-label*="pagination"]`)
+- SmartRouter hints include `pagination.detected: true`
+
+**Safety guards:**
+- Stops after 3 consecutive empty pages
+- Stops after 2 consecutive duplicate-content pages (content hash fingerprinting)
+- Polite delay between pages (`list_page_delay_ms`, default 2000ms)
+- Hard max pages limit (`max_pages`, default 20)
+
+**Job config options:**
+| Config Key | Default | Description |
+|------------|---------|-------------|
+| `max_pages` | `20` | Maximum pages to mine |
+| `list_page_delay_ms` | `2000` | Delay between page requests (ms) |
+
+**URL construction strategies** (in priority order):
+1. `/page/\d+` → replace with `/page/{N}`
+2. `?page=\d+` or `&page=\d+` → replace param value
+3. Append `?page=N` or `&page=N`
+
+**Files:**
+- `backend/services/superMiner/services/paginationHandler.js` — URL builder, page detection, content hashing
+- `backend/services/superMiner/services/flowOrchestrator.js` — `detectPagination()`, `mineAllPages()`, `mineSinglePage()`
+- `backend/services/miningService.js` — `detectJobPagination()`, pagination in `runAIMining()` + `runFullMining()`
+
+**Both paths support pagination:**
+- SuperMiner path (FlowOrchestrator) — when `SUPERMINER_ENABLED=true`
+- Legacy path (miningService) — `runAIMining()` and `runFullMining()`
+
+---
+
 ## Webhook Event Flow
 
 SendGrid webhook (`backend/routes/webhooks.js`) processes events through 3 layers:
@@ -490,7 +537,7 @@ Miners NEVER:
 4. ~~**Email Campaign improvements** — templates, list upload, send flow~~ ✅ DONE
 5. ~~**Email verification** — ZeroBounce integration, per-organizer key, queue processor~~ ✅ DONE
 6. ~~**Zoho CRM push** — push persons to Zoho CRM as Leads/Contacts~~ ✅ DONE
-7. **Scraping module improvements** — if needed
+7. ~~**Scraping module improvements** — pagination support for multi-page sites~~ ✅ DONE
 8. ~~**Phase 3 migration** — import-all dual-write, campaign resolve canonical, persons API, intents API~~ ✅ DONE
 9. ~~**Remove nodemailer** — dropped from package.json~~ ✅ DONE
 
