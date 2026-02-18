@@ -89,7 +89,7 @@ Engagement is stored as events, not scores.
 
 ---
 
-## Database — Current State (18 tables)
+## Database — Current State (19 tables)
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -112,6 +112,7 @@ Engagement is stored as events, not scores.
 | `affiliations` | ACTIVE | 016 | Person-company relationships. Additive only. Populated by aggregationTrigger + backfill + CSV upload. |
 | `prospect_intents` | ACTIVE | 017 | Intent signals. Populated by webhook (reply, click_through). |
 | `campaign_events` | ACTIVE | 018 | Immutable event log. Populated by webhook + campaignSend + backfill. |
+| `verification_queue` | ACTIVE | 019 | Email verification queue. Processed by worker via ZeroBounce API. |
 
 ### Legacy Tables (Exist but transitional)
 | Table | Status | Notes |
@@ -230,6 +231,38 @@ resolve → status='ready' → schedule → status='scheduled' → (campaignSche
 ```
 `/:id/start` can bypass scheduling by transitioning directly from `'ready'` or `'scheduled'` to `'sending'`.
 
+### Email Verification — ZeroBounce (`backend/services/verificationService.js`, `backend/routes/verification.js`)
+
+**Per-organizer** ZeroBounce API key stored in `organizers.zerobounce_api_key`.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/verification/credits` | GET | Check ZeroBounce credit balance |
+| `/api/verification/verify-single` | POST | Verify one email immediately. Dual-writes to `persons` + `prospects`. Body: `{ email }` |
+| `/api/verification/verify-list` | POST | Queue list or email array for verification. Body: `{ list_id }` or `{ emails: [...] }` |
+| `/api/verification/queue-status` | GET | Queue counts (pending/processing/completed/failed). Optional `?list_id=` filter |
+| `/api/verification/process-queue` | POST | Manual trigger for queue processing. Body: `{ batch_size }` (default 50, max 200) |
+
+**Settings endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/settings` | GET | Now includes `has_zerobounce_key`, `masked_zerobounce_key` |
+| `/api/settings/zerobounce-key` | PUT | Save key after validating via `checkCredits()`. Body: `{ api_key }` |
+
+**ZeroBounce → Liffy status mapping:**
+
+| ZeroBounce | Liffy | Campaign Resolve |
+|------------|-------|------------------|
+| `valid` | `valid` | Send |
+| `catch-all` | `catchall` | Send (like unknown) |
+| `unknown` | `unknown` | Send |
+| `invalid`, `spamtrap`, `abuse`, `do_not_mail` | `invalid` | Always exclude |
+
+**Worker:** `startVerificationProcessor()` runs every 30s, finds organizers with pending queue + ZeroBounce key, processes batches of 50. Rate-limited at ~20 calls/sec.
+
+**CSV Upload auto-queue:** After `POST /api/lists/upload-csv` commit, if organizer has ZeroBounce key, emails are auto-queued. Response includes `verification_queued` count.
+
 ---
 
 ## Backfill Scripts
@@ -243,7 +276,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 
 ---
 
-## Migrations (18 files)
+## Migrations (19 files)
 
 | # | File | Tables |
 |---|------|--------|
@@ -264,6 +297,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 | 016 | `create_affiliations.sql` | `affiliations` |
 | 017 | `create_prospect_intents.sql` | `prospect_intents` |
 | 018 | `create_campaign_events.sql` | `campaign_events` |
+| 019 | `add_verification_columns.sql` | ALTER `organizers`, ALTER `persons`, `verification_queue` |
 
 ---
 
@@ -334,7 +368,7 @@ Miners NEVER:
 2. ~~**Campaign Events** — campaign_events table, webhook + send integration~~ ✅ DONE
 3. ~~**ProspectIntent** — prospect_intents table, intent detection from webhook~~ ✅ DONE
 4. ~~**Email Campaign improvements** — templates, list upload, send flow~~ ✅ DONE
-5. **Email verification** — ZeroBounce/NeverBounce integration
+5. ~~**Email verification** — ZeroBounce integration, per-organizer key, queue processor~~ ✅ DONE
 6. **Zoho webhook** — push prospects to CRM
 7. **Scraping module improvements** — if needed
 8. **Phase 3 migration** — migrate import-all and campaign resolve to use canonical tables
