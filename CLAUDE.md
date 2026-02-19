@@ -556,13 +556,14 @@ Miners NEVER:
 - ✅ **Contacts page (Leads → Persons migration)** — canonical `/api/persons` endpoint, stats cards (Total/Verified/Unverified/Prospects), search + 4 filters, contact detail slide-over panel with affiliations/engagement/intents/Zoho history (commit: b35562a)
 - ✅ **Sidebar: Leads → Contacts** rename + breadcrumb/title fix
 - ✅ **Backend fix:** `persons/:id` SQL — `event_at → occurred_at`, `recipient_email → email` (commits: 28e0f69, 068f7ba)
+- ✅ **Campaign Analytics Bug Fix** — analytics endpoint fallback to `campaign_recipients` when `campaign_events` empty. Summary, timeline, bounce breakdown all have fallback. Response includes `data_source` field. (commit: 564caf5)
+- ✅ **Prospects (Intents) page** — full page with stats cards, clickable intent type breakdown chips, filters (search/type/source), data table with confidence bars, pagination, loading/empty/error states (commit: 9ed12e9)
 
 ### Next UI Tasks (Priority Order)
 
 | Priority | Task | Backend Endpoints |
 |----------|------|-------------------|
-| P0 #3 | Campaign Analytics — rate cards, timeline chart, top links, bounce breakdown | `GET /api/campaigns/:id/analytics` |
-| P1 #4 | Prospects (Intents) — stub → real page with intent list, filters, stats | `GET /api/intents`, `/stats` |
+| P0 #3 | Campaign Analytics UI — rate cards, timeline chart, top links, bounce breakdown (backend fix done, frontend needed) | `GET /api/campaigns/:id/analytics` |
 | P1 #5 | Verification Dashboard — queue status, credit balance, batch verify | `GET /api/verification/queue-status`, `/credits` |
 | P1 #6 | Person Detail page — full-page detail (expand current slide-over) | `GET /api/persons/:id` |
 | P2 #7 | Zoho CRM Push UI — push button, module select, push history | `POST /api/zoho/push`, `GET /push-history` |
@@ -574,17 +575,18 @@ Miners NEVER:
 - Sidebar `/api/stats` endpoint returns 401 if no auth token (fixed: auth header added)
 - ZeroBounce account not yet configured — settings UI untested against live API
 - `/api/stats` polled every 30s — may add log noise in production
+- `campaign_events` backfill not yet run in production — analytics uses `campaign_recipients` fallback until backfill runs
+- Prospects page search is client-side only (backend `/api/intents` doesn't support text search param)
 
 ### Immediate Next Tasks (New Session)
 
-1. **Migration 021 çalıştır** — `backend/migrations/021_prospect_intents_unique_constraint.sql` içeriğini göster, psql ile manuel çalıştırılacak
+1. ~~**Migration 021 çalıştır**~~ ✅ SQL gösterildi, psql ile manuel çalıştırılacak
+2. ~~**Campaign Analytics Bug**~~ ✅ Fixed — fallback to `campaign_recipients` (commit: 564caf5)
+3. ~~**Prospects (Intents) sayfası**~~ ✅ Built — full page with stats, filters, table (commit: 9ed12e9)
 
-2. **Campaign Analytics Bug** — `/campaigns/:id` sayfasında Sent/Opened/Clicked/Bounced kartları hep 0 gösteriyor ama recipients tablosunda opened/bounced/delivered status'ları mevcut.
-   - `GET /api/campaigns/:id/analytics` endpoint'ini debug et
-   - Muhtemelen `campaign_events` tablosundan okuyor ama data `campaign_recipients`'ta
-   - Fix: analytics endpoint `campaign_recipients` status'larından aggregate etmeli VEYA `campaign_events`'e backfill yapılmalı
-
-3. **Prospects (Intents) sayfası** — P1 #4, stub'ı gerçek sayfaya çevir (`/api/intents`, `/api/intents/stats`)
+4. **Campaign Analytics UI** — P0 #3, frontend'te analytics sayfasını `/api/campaigns/:id/analytics` endpoint'iyle bağla (backend fix done)
+5. **Verification Dashboard** — P1 #5, queue status, credit balance, batch verify UI
+6. **Person Detail page** — P1 #6, slide-over'ı full-page detail'e genişlet
 
 ---
 
