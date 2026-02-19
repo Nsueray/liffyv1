@@ -108,6 +108,30 @@ function processTemplate(text, recipient, extras = {}) {
   return processed;
 }
 
+/**
+ * Plain text → HTML auto-converter.
+ * Eğer body_html içinde HTML tag yoksa, düz metni paragraflara çevirir.
+ * Zaten HTML ise dokunmaz.
+ */
+function convertPlainTextToHtml(text) {
+  if (!text || !text.trim()) return text;
+
+  // HTML tag var mı kontrol et (placeholder'lar hariç)
+  const withoutPlaceholders = text.replace(/\{\{[^}]+\}\}/g, '');
+  if (/<[a-z][\s\S]*?>/i.test(withoutPlaceholders)) {
+    // Zaten HTML, dokunma
+    return text;
+  }
+
+  // Düz metin → HTML: paragraflar + satır sonları
+  const paragraphs = text.split(/\n\s*\n/).map(p => {
+    const lines = p.trim().replace(/\n/g, '<br>');
+    return `<p>${lines}</p>`;
+  });
+
+  return `<div style="font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:1.6;color:#333">${paragraphs.join('')}</div>`;
+}
+
 // POST /api/campaigns/:id/send-batch
 // Bu endpoint Worker veya Frontend tarafından periyodik çağrılır
 router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
@@ -225,8 +249,11 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
 
         // A. Kişiselleştirme (Variable Replacement)
         const personalizedSubject = processTemplate(campaign.subject, r);
-        const personalizedHtml = processTemplate(campaign.body_html, r, { unsubscribe_url });
+        let personalizedHtml = processTemplate(campaign.body_html, r, { unsubscribe_url });
         const personalizedText = processTemplate(campaign.body_text || "", r, { unsubscribe_url });
+
+        // A2. Plain text → HTML auto-convert (tag yoksa paragraflara çevir)
+        personalizedHtml = convertPlainTextToHtml(personalizedHtml);
 
         // B. Compliance Pipeline (mandatory footer + physical address)
         const compliance = processEmailCompliance({
