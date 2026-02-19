@@ -361,6 +361,8 @@ resolve → status='ready' → schedule → status='scheduled' → (campaignSche
 
 **Worker:** `startVerificationProcessor()` runs every **15s**, finds organizers with pending queue + ZeroBounce key, processes batches of **100**. API calls run in **parallel chunks of 10** via `Promise.all` (600ms pause between chunks, ~16 calls/sec — safely under ZeroBounce 20/sec limit). Throughput: ~80-100 emails/min.
 
+**Staleness recovery:** Each poll cycle resets `processing` items with `processed_at IS NULL` back to `pending`. This recovers items stuck from a prior worker crash — safe because processing is synchronous within each cycle (no concurrent workers). The async processor is wrapped in `.catch()` to log fatal crashes instead of silently dying as unhandled rejections.
+
 **CSV Upload auto-queue:** After `POST /api/lists/upload-csv` commit, if organizer has ZeroBounce key, emails are auto-queued. Response includes `verification_queued` count.
 
 ---
@@ -636,6 +638,7 @@ Miners NEVER:
 - ✅ **Rich Text Template Editor + Plain Text Auto-Convert** — contentEditable editor with toolbar (Bold/Italic/Underline/Font Size/Link/Clear), clickable placeholder chips, no external libs. Backend `convertPlainTextToHtml()` in campaignSend.js auto-wraps plain text in styled `<p>` tags (Arial 14px, line-height 1.6, #333). Runs after processTemplate, before compliance pipeline. (commits: 652c1c8, 307dba3)
 - ✅ **Verification Worker Speed Optimization** — batch size 50→100, poll interval 30s→15s, sequential API calls → parallel chunks of 10 via `Promise.all` (600ms inter-chunk pause). Throughput ~18/min → ~80-100/min. (commit: d7f471b)
 - ✅ **Reports/Dashboard Backfill Fix** — both `/api/reports/campaign/:id` and `/api/reports/organizer/overview` now fall back to `campaign_recipients` timestamps when `campaign_events` is empty. Covers event stats, timeline, domain breakdown, bounce reasons. Response includes `data_source` field. (commit: 814cce2)
+- ✅ **Verification Worker Fix + Staleness Recovery** — worker wasn't producing logs after restart because 349 items stuck in `processing` status blocked the `pending`-only query. Added staleness recovery (resets `processing` with `processed_at IS NULL` → `pending` each cycle), startup log, per-batch logging, stack traces in error catches, `.catch()` on async processor. (commit: 9e4141b)
 
 ### Next UI Tasks (Priority Order)
 
@@ -654,6 +657,7 @@ Miners NEVER:
 - ~~`campaign_events` backfill not yet run~~ — FIXED: all endpoints (analytics + reports) now have `campaign_recipients` fallback. Backfill optional.
 - ~~Import-all 30s timeout on 3000+ records~~ — FIXED: background batch processing with 200-record batches (commit: 450a34c)
 - **Frontend import-all polling not yet implemented** — backend returns 202 + `import_status`/`import_progress`, but liffy-ui needs to poll `GET /api/mining/jobs/:id` and show progress bar
+- ~~**Verification worker silent after restart**~~ — FIXED: stuck `processing` items blocked pending-only query. Staleness recovery added (commit: 9e4141b)
 
 ### Immediate Next Tasks (New Session)
 
