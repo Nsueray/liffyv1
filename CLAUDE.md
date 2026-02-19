@@ -639,6 +639,7 @@ Miners NEVER:
 - ✅ **Verification Worker Speed Optimization** — batch size 50→100, poll interval 30s→15s, sequential API calls → parallel chunks of 10 via `Promise.all` (600ms inter-chunk pause). Throughput ~18/min → ~80-100/min. (commit: d7f471b)
 - ✅ **Reports/Dashboard Backfill Fix** — both `/api/reports/campaign/:id` and `/api/reports/organizer/overview` now fall back to `campaign_recipients` timestamps when `campaign_events` is empty. Covers event stats, timeline, domain breakdown, bounce reasons. Response includes `data_source` field. (commit: 814cce2)
 - ✅ **Verification Worker Fix + Staleness Recovery** — worker wasn't producing logs after restart because 349 items stuck in `processing` status blocked the `pending`-only query. Added staleness recovery (resets `processing` with `processed_at IS NULL` → `pending` each cycle), startup log, per-batch logging, stack traces in error catches, `.catch()` on async processor. (commit: 9e4141b)
+- ✅ **List Verification Counts Fix** — 3-way count grouping: verified (`valid`+`catchall`), invalid (`invalid`), unverified (`unknown`+NULL). Previously `catchall` was unverified and `invalid` was lumped into unverified causing totals > 100%. Detail endpoint now JOINs `persons` for canonical status. All 4 list endpoints consistent. (commit: e603f12)
 
 ### Next UI Tasks (Priority Order)
 
@@ -658,6 +659,7 @@ Miners NEVER:
 - ~~Import-all 30s timeout on 3000+ records~~ — FIXED: background batch processing with 200-record batches (commit: 450a34c)
 - **Frontend import-all polling not yet implemented** — backend returns 202 + `import_status`/`import_progress`, but liffy-ui needs to poll `GET /api/mining/jobs/:id` and show progress bar
 - ~~**Verification worker silent after restart**~~ — FIXED: stuck `processing` items blocked pending-only query. Staleness recovery added (commit: 9e4141b)
+- ~~**List verification counts don't add up**~~ — FIXED: 3-way grouping (verified/invalid/unverified), `catchall` counted as verified, `invalid_count` separate field (commit: e603f12)
 
 ### Immediate Next Tasks (New Session)
 
