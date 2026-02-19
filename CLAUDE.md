@@ -563,13 +563,13 @@ Miners NEVER:
 - ✅ **Unsubscribe compliance pipeline** — `processEmailCompliance` + RFC 8058 `List-Unsubscribe` headers wired into `campaignSend.js`. Mandatory footer injection + physical address append. (commit: f1b1636)
 - ✅ **Person Detail page** — full-page `/leads/[id]` with person header, verify button, affiliations, engagement summary, intent signals table, Zoho sync history, delete. Contacts table rows navigate to detail page. (commit: 8bede92)
 - ✅ **Dashboard** — real dashboard with 6 stat cards (contacts, campaigns, sent, open rate, bounce rate, prospects), quick actions, recent campaigns + mining jobs. Parallel API fetches with graceful fallback. (commit: 7835ec9)
+- ✅ **Reports page** — org-wide summary (7 stat cards), campaign comparison table with per-campaign stats, domain breakdown table, bounce reasons bar chart. Sidebar link with BarChart3 icon. (commit: 42732bb)
 
 ### Next UI Tasks (Priority Order)
 
 | Priority | Task | Backend Endpoints |
 |----------|------|-------------------|
 | P2 #6 | Zoho CRM Push UI — push button, module select, push history | `POST /api/zoho/push`, `GET /push-history` |
-| P2 #7 | Reports page — campaign comparison, domain breakdown | `GET /api/reports/campaign/:id` |
 
 ### Known Issues
 
@@ -592,8 +592,9 @@ Miners NEVER:
 
 7. ~~**Dashboard**~~ ✅ Built — real dashboard with stats, recent activity, quick actions (commit: 7835ec9)
 
-8. **Zoho CRM Push UI** — P2 #6, push button, module select, push history
-9. **Reports page** — P2 #7, campaign comparison, domain breakdown
+8. ~~**Reports page**~~ ✅ Built — org overview, campaign comparison, domain breakdown, bounce reasons (commit: 42732bb)
+
+9. **Zoho CRM Push UI** — P2 #6, push button, module select, push history
 
 ---
 
