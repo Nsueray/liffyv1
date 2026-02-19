@@ -126,13 +126,73 @@ async function queueEmails(organizerId, emails, source = 'manual') {
 }
 
 /**
+ * Process a single verification item — API call + DB writes.
+ * Returns result object. Never throws.
+ */
+async function processOneItem(client, apiKey, item, organizerId) {
+  try {
+    const verifyResult = await verifySingle(apiKey, item.email);
+
+    if (verifyResult.success) {
+      const liffyStatus = verifyResult.status;
+      const now = new Date().toISOString();
+
+      // Dual-write: update persons table
+      if (item.person_id) {
+        await client.query(
+          `UPDATE persons SET verification_status = $1, verified_at = $2, updated_at = NOW()
+           WHERE id = $3 AND organizer_id = $4`,
+          [liffyStatus, now, item.person_id, organizerId]
+        );
+      }
+
+      // Dual-write: update prospects table (legacy)
+      if (item.prospect_id) {
+        await client.query(
+          `UPDATE prospects SET verification_status = $1
+           WHERE id = $2 AND organizer_id = $3`,
+          [liffyStatus, item.prospect_id, organizerId]
+        );
+      }
+
+      // Mark queue item as completed
+      await client.query(
+        `UPDATE verification_queue SET status = 'completed', result = $1, processed_at = NOW()
+         WHERE id = $2`,
+        [JSON.stringify(verifyResult.raw_response), item.id]
+      );
+
+      return { email: item.email, status: liffyStatus, sub_status: verifyResult.sub_status, success: true };
+    } else {
+      // API call failed — mark as failed
+      await client.query(
+        `UPDATE verification_queue SET status = 'failed', result = $1, processed_at = NOW()
+         WHERE id = $2`,
+        [JSON.stringify({ error: verifyResult.error }), item.id]
+      );
+      return { email: item.email, status: 'failed', error: verifyResult.error, success: false };
+    }
+  } catch (itemErr) {
+    console.error(`[Verification] Process error for ${item.email}:`, itemErr.message);
+    await client.query(
+      `UPDATE verification_queue SET status = 'failed', result = $1, processed_at = NOW()
+       WHERE id = $2`,
+      [JSON.stringify({ error: itemErr.message }), item.id]
+    );
+    return { email: item.email, status: 'failed', error: itemErr.message, success: false };
+  }
+}
+
+/**
  * Process pending items from verification_queue.
  * Uses FOR UPDATE SKIP LOCKED for safe concurrent processing.
  * Dual-writes to prospects.verification_status + persons.verification_status.
- * Rate-limits at ~20 calls/sec (50ms sleep between calls).
+ * Processes in parallel chunks of 10 (safe within ZeroBounce ~20 calls/sec limit).
  * Returns { processed, results[] }.
  */
-async function processQueue(organizerId, batchSize = 50) {
+const PARALLEL_CHUNK_SIZE = 10;
+
+async function processQueue(organizerId, batchSize = 100) {
   // Get API key for this organizer
   const orgRes = await db.query(
     `SELECT zerobounce_api_key FROM organizers WHERE id = $1`,
@@ -173,62 +233,22 @@ async function processQueue(organizerId, batchSize = 50) {
     );
     await client.query('COMMIT');
 
-    // Process each email (outside transaction for individual error handling)
-    for (const item of pendingRes.rows) {
-      try {
-        const verifyResult = await verifySingle(apiKey, item.email);
+    // Process in parallel chunks of PARALLEL_CHUNK_SIZE
+    const items = pendingRes.rows;
+    for (let i = 0; i < items.length; i += PARALLEL_CHUNK_SIZE) {
+      const chunk = items.slice(i, i + PARALLEL_CHUNK_SIZE);
+      const chunkResults = await Promise.all(
+        chunk.map(item => processOneItem(client, apiKey, item, organizerId))
+      );
 
-        if (verifyResult.success) {
-          const liffyStatus = verifyResult.status;
-          const now = new Date().toISOString();
+      for (const r of chunkResults) {
+        results.push(r);
+        if (r.success) processed++;
+      }
 
-          // Dual-write: update persons table
-          if (item.person_id) {
-            await client.query(
-              `UPDATE persons SET verification_status = $1, verified_at = $2, updated_at = NOW()
-               WHERE id = $3 AND organizer_id = $4`,
-              [liffyStatus, now, item.person_id, organizerId]
-            );
-          }
-
-          // Dual-write: update prospects table (legacy)
-          if (item.prospect_id) {
-            await client.query(
-              `UPDATE prospects SET verification_status = $1
-               WHERE id = $2 AND organizer_id = $3`,
-              [liffyStatus, item.prospect_id, organizerId]
-            );
-          }
-
-          // Mark queue item as completed
-          await client.query(
-            `UPDATE verification_queue SET status = 'completed', result = $1, processed_at = NOW()
-             WHERE id = $2`,
-            [JSON.stringify(verifyResult.raw_response), item.id]
-          );
-
-          results.push({ email: item.email, status: liffyStatus, sub_status: verifyResult.sub_status });
-          processed++;
-        } else {
-          // API call failed — mark as failed
-          await client.query(
-            `UPDATE verification_queue SET status = 'failed', result = $1, processed_at = NOW()
-             WHERE id = $2`,
-            [JSON.stringify({ error: verifyResult.error }), item.id]
-          );
-          results.push({ email: item.email, status: 'failed', error: verifyResult.error });
-        }
-
-        // Rate limit: ~20 calls/sec
-        await sleep(50);
-      } catch (itemErr) {
-        console.error(`[Verification] Process error for ${item.email}:`, itemErr.message);
-        await client.query(
-          `UPDATE verification_queue SET status = 'failed', result = $1, processed_at = NOW()
-           WHERE id = $2`,
-          [JSON.stringify({ error: itemErr.message }), item.id]
-        );
-        results.push({ email: item.email, status: 'failed', error: itemErr.message });
+      // Brief pause between chunks to stay under rate limit (~20 calls/sec)
+      if (i + PARALLEL_CHUNK_SIZE < items.length) {
+        await sleep(600);
       }
     }
   } catch (err) {

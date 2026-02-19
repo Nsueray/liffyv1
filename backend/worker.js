@@ -134,7 +134,7 @@ const POLL_INTERVAL_MS = 5000;
 const HEARTBEAT_INTERVAL_MS = 30000;
 const CAMPAIGN_SCHEDULER_INTERVAL_MS = 10000;
 const CAMPAIGN_SENDER_INTERVAL_MS = 3000;
-const VERIFICATION_PROCESSOR_INTERVAL_MS = 30000;
+const VERIFICATION_PROCESSOR_INTERVAL_MS = 15000;
 const EMAIL_BATCH_SIZE = 5;
 
 /* =========================================================
@@ -320,7 +320,7 @@ async function startVerificationProcessor() {
 
       for (const org of orgRes.rows) {
         try {
-          const result = await processQueue(org.id, 50);
+          const result = await processQueue(org.id, 100);
           if (result.processed > 0) {
             console.log(`[Verification] Processed ${result.processed} emails for organizer ${org.id}`);
           }
