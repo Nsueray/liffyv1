@@ -575,6 +575,17 @@ Miners NEVER:
 - ZeroBounce account not yet configured — settings UI untested against live API
 - `/api/stats` polled every 30s — may add log noise in production
 
+### Immediate Next Tasks (New Session)
+
+1. **Migration 021 çalıştır** — `backend/migrations/021_prospect_intents_unique_constraint.sql` içeriğini göster, psql ile manuel çalıştırılacak
+
+2. **Campaign Analytics Bug** — `/campaigns/:id` sayfasında Sent/Opened/Clicked/Bounced kartları hep 0 gösteriyor ama recipients tablosunda opened/bounced/delivered status'ları mevcut.
+   - `GET /api/campaigns/:id/analytics` endpoint'ini debug et
+   - Muhtemelen `campaign_events` tablosundan okuyor ama data `campaign_recipients`'ta
+   - Fix: analytics endpoint `campaign_recipients` status'larından aggregate etmeli VEYA `campaign_events`'e backfill yapılmalı
+
+3. **Prospects (Intents) sayfası** — P1 #4, stub'ı gerçek sayfaya çevir (`/api/intents`, `/api/intents/stats`)
+
 ---
 
 ## Git & Versioning
