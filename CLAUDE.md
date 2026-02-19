@@ -367,7 +367,7 @@ Frontend-facing canonical persons + affiliations endpoints. Replaces legacy `pro
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/persons` | GET | List persons with pagination, search, filter (`verification_status`, `country`, `company`, `has_intent`). Returns latest affiliation per person. |
+| `/api/persons` | GET | List persons with pagination, search, filter (`verification_status`, `country`, `company`, `has_intent`). Supports `exclude_invalid` filter value (NOT IN 'invalid','risky'). Returns latest affiliation per person. |
 | `/api/persons/stats` | GET | Dashboard counts: total, verified, invalid, unverified, with_intent |
 | `/api/persons/:id` | GET | Full person detail with all affiliations, intents, engagement summary, Zoho pushes |
 | `/api/persons/:id/affiliations` | GET | Person's affiliation list |
@@ -603,6 +603,8 @@ Miners NEVER:
 - ✅ **Reports page** — org-wide summary (7 stat cards), campaign comparison table with per-campaign stats, domain breakdown table, bounce reasons bar chart. Sidebar link with BarChart3 icon. (commit: 42732bb)
 - ✅ **List Verification UI** — "Verify All Emails" button on lists detail with ShieldCheck icon, verification progress polling (5s), 4 stat cards, color-coded badges. "Verify a List" section on verification dashboard with list dropdown. Skips already-verified emails to prevent duplicate ZeroBounce credit usage. (commits: 9c75b7d, 1fece6e)
 - ✅ **Campaign Resolve Verification Mode** — resolve confirmation modal with verification_mode dropdown (exclude_invalid / verified_only), exclusion stats breakdown (invalid/risky/unverified/unsubscribed), recipients added count. Backend `verification_mode` column on campaigns table (migration 023). (commits: 83621d3, 5bbc55d)
+- ✅ **Lists page member counts fix** — rewrote GET /api/lists to use LEFT JOIN + GROUP BY instead of correlated subqueries. Uses COALESCE(persons, prospects) for verification status. Includes import_status/import_progress in response. Also fixed import-all `type` column reference that doesn't exist in schema.
+- ✅ **Contacts page default Exclude Invalid filter** — added `exclude_invalid` option to verification status dropdown (default). Backend `/api/persons` now supports `exclude_invalid` filter value (NOT IN 'invalid','risky').
 
 ### Next UI Tasks (Priority Order)
 

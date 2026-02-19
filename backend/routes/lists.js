@@ -588,16 +588,22 @@ router.get('/', authRequired, async (req, res) => {
 
     const result = await db.query(
       `
-      SELECT 
+      SELECT
         l.id,
         l.name,
         l.created_at,
-        (SELECT COUNT(*) FROM list_members WHERE list_id = l.id) AS total_leads,
-        (SELECT COUNT(*) FROM list_members lm 
-         JOIN prospects p ON p.id = lm.prospect_id 
-         WHERE lm.list_id = l.id AND p.verification_status = 'valid') AS verified_count
+        l.import_status,
+        l.import_progress,
+        COUNT(lm.id) AS total_leads,
+        COUNT(lm.id) FILTER (
+          WHERE COALESCE(pn.verification_status, p.verification_status, 'unknown') = 'valid'
+        ) AS verified_count
       FROM lists l
+      LEFT JOIN list_members lm ON lm.list_id = l.id
+      LEFT JOIN prospects p ON p.id = lm.prospect_id
+      LEFT JOIN persons pn ON pn.organizer_id = l.organizer_id AND LOWER(pn.email) = LOWER(p.email)
       WHERE l.organizer_id = $1
+      GROUP BY l.id, l.name, l.created_at, l.import_status, l.import_progress
       ORDER BY l.created_at DESC
       `,
       [organizerId]
@@ -613,7 +619,9 @@ router.get('/', authRequired, async (req, res) => {
           created_at: row.created_at,
           total_leads: total,
           verified_count: verified,
-          unverified_count: total - verified
+          unverified_count: total - verified,
+          import_status: row.import_status || null,
+          import_progress: row.import_progress || null
         };
       })
     });

@@ -43,9 +43,13 @@ router.get('/', authRequired, async (req, res) => {
     }
 
     if (verification_status && verification_status !== 'all') {
-      where.push(`p.verification_status = $${idx}`);
-      params.push(verification_status.trim());
-      idx++;
+      if (verification_status === 'exclude_invalid') {
+        where.push(`p.verification_status NOT IN ('invalid', 'risky')`);
+      } else {
+        where.push(`p.verification_status = $${idx}`);
+        params.push(verification_status.trim());
+        idx++;
+      }
     }
 
     if (country && country.trim()) {
