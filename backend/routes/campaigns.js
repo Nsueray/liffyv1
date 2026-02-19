@@ -118,10 +118,10 @@ router.get('/:id', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
 
     const result = await db.query(
-      `SELECT c.*, 
-              t.subject as template_subject, 
-              t.name as template_name, 
-              t.body_html, 
+      `SELECT c.*,
+              t.subject as template_subject,
+              t.name as template_name,
+              t.body_html,
               t.body_text,
               l.name as list_name,
               s.from_email as sender_email,
@@ -189,7 +189,7 @@ router.patch('/:id', authRequired, async (req, res) => {
   try {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
-    const { list_id, sender_id, include_risky } = req.body;
+    const { list_id, sender_id, include_risky, verification_mode } = req.body;
 
     const campRes = await db.query(
       `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
@@ -243,6 +243,15 @@ router.patch('/:id', authRequired, async (req, res) => {
     if (include_risky !== undefined) {
       updates.push(`include_risky = $${idx++}`);
       values.push(Boolean(include_risky));
+    }
+
+    if (verification_mode !== undefined) {
+      const allowedModes = ['exclude_invalid', 'verified_only'];
+      if (!allowedModes.includes(verification_mode)) {
+        return res.status(400).json({ error: `Invalid verification_mode. Must be one of: ${allowedModes.join(', ')}` });
+      }
+      updates.push(`verification_mode = $${idx++}`);
+      values.push(verification_mode);
     }
 
     if (updates.length === 0) {
@@ -323,10 +332,26 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
       });
     }
 
+    // Accept verification_mode from request body (overrides campaign default)
+    const bodyMode = req.body && req.body.verification_mode;
+    const allowedModes = ['exclude_invalid', 'verified_only'];
+    const verificationMode = allowedModes.includes(bodyMode) ? bodyMode : (campaign.verification_mode || 'exclude_invalid');
+
+    // Persist verification_mode to campaign if provided in body
+    if (bodyMode && allowedModes.includes(bodyMode)) {
+      await client.query(
+        `UPDATE campaigns SET verification_mode = $1 WHERE id = $2 AND organizer_id = $3`,
+        [verificationMode, campaignId, organizerId]
+      );
+    }
+
     // --- Phase 3: Canonical resolve (persons + affiliations preferred, prospects fallback) ---
     // Verification status: prefer persons.verification_status (canonical), fallback to prospects
     let verificationFilter;
-    if (campaign.include_risky) {
+    if (verificationMode === 'verified_only') {
+      // Only send to valid or catchall emails
+      verificationFilter = `COALESCE(pn.verification_status, p.verification_status, 'unknown') IN ('valid', 'catchall')`;
+    } else if (campaign.include_risky) {
       verificationFilter = `COALESCE(pn.verification_status, p.verification_status, 'unknown') != 'invalid'`;
     } else {
       verificationFilter = `COALESCE(pn.verification_status, p.verification_status, 'unknown') NOT IN ('invalid', 'risky')`;
@@ -406,7 +431,7 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
     const excludedInvalid = parseInt(invalidCountRes.rows[0].count, 10) || 0;
 
     let excludedRisky = 0;
-    if (!campaign.include_risky) {
+    if (verificationMode !== 'verified_only' && !campaign.include_risky) {
       const riskyCountRes = await client.query(
         `SELECT COUNT(*) AS count
          FROM list_members lm
@@ -418,6 +443,21 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
         [campaign.list_id, organizerId]
       );
       excludedRisky = parseInt(riskyCountRes.rows[0].count, 10) || 0;
+    }
+
+    let excludedUnverified = 0;
+    if (verificationMode === 'verified_only') {
+      const unverifiedCountRes = await client.query(
+        `SELECT COUNT(*) AS count
+         FROM list_members lm
+         INNER JOIN prospects p ON p.id = lm.prospect_id
+         LEFT JOIN persons pn ON LOWER(pn.email) = LOWER(p.email) AND pn.organizer_id = $2
+         WHERE lm.list_id = $1
+           AND lm.organizer_id = $2
+           AND COALESCE(pn.verification_status, p.verification_status, 'unknown') NOT IN ('valid', 'catchall', 'invalid')`,
+        [campaign.list_id, organizerId]
+      );
+      excludedUnverified = parseInt(unverifiedCountRes.rows[0].count, 10) || 0;
     }
 
     const unsubCountRes = await client.query(
@@ -510,10 +550,12 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
       success: true,
       campaign: updatedCampaign,
       recipient_count: insertedCount,
+      verification_mode: verificationMode,
       stats: {
         total_in_list: totalInList,
         excluded_invalid: excludedInvalid,
         excluded_risky: excludedRisky,
+        excluded_unverified: excludedUnverified,
         excluded_unsubscribed: excludedUnsubscribed,
         eligible: eligibleProspects.length,
         inserted: insertedCount
