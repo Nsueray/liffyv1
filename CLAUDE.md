@@ -257,6 +257,34 @@ SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → 
 Preview uses a local `processTemplate()` that mirrors the one in `campaignSend.js`.
 Default sample: `{ first_name: "John", last_name: "Doe", company: "Acme Corp", ... }`. `{{unsubscribe_url}}` resolves to `"#"` in preview.
 
+### Plain Text → HTML Auto-Convert (`backend/routes/campaignSend.js`)
+
+`convertPlainTextToHtml(text)` runs after `processTemplate()`, before `processEmailCompliance()`.
+
+**Logic:**
+- Strips `{{placeholder}}`s, then checks for any HTML tag (`<tag...>`)
+- If HTML found → returns text unchanged (already HTML)
+- If no HTML → splits on double newlines into `<p>` paragraphs, single `\n` → `<br>`
+- Wraps in `<div>` with inline styles: `font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.6; color: #333`
+
+**Flow in send-batch:**
+```
+processTemplate(body_html) → convertPlainTextToHtml() → processEmailCompliance() → sendEmail()
+```
+
+This ensures plain-text templates typed without HTML tags still render as properly styled email.
+
+### Rich Text Template Editor (`liffy-ui/app/templates/page.tsx`)
+
+Native `contentEditable` div with lightweight toolbar — no external rich text libraries.
+
+**Toolbar buttons:** Bold, Italic, Underline, Font Size (Small/Normal/Large), Insert Link, Clear Formatting
+**Implementation:** `document.execCommand()` for all formatting commands
+**Placeholder insertion:** Clickable chips below editor insert `{{first_name}}`, `{{company_name}}`, etc. at cursor via `insertText`
+**Save:** `innerHTML` from contentEditable div sent as `body_html` to API
+**Edit:** Existing `body_html` loaded into contentEditable div when modal opens
+**Empty state:** CSS `::before` placeholder via `data-placeholder` attribute
+
 ### CSV Upload to Lists (`backend/routes/lists.js`)
 
 | Endpoint | Method | Description |
@@ -605,6 +633,7 @@ Miners NEVER:
 - ✅ **Campaign Resolve Verification Mode** — resolve confirmation modal with verification_mode dropdown (exclude_invalid / verified_only), exclusion stats breakdown (invalid/risky/unverified/unsubscribed), recipients added count. Backend `verification_mode` column on campaigns table (migration 023). (commits: 83621d3, 5bbc55d)
 - ✅ **Lists page member counts fix** — rewrote GET /api/lists to use LEFT JOIN + GROUP BY instead of correlated subqueries. Uses COALESCE(persons, prospects) for verification status. Includes import_status/import_progress in response. Also fixed import-all `type` column reference that doesn't exist in schema.
 - ✅ **Contacts page default Exclude Invalid filter** — added `exclude_invalid` option to verification status dropdown (default). Backend `/api/persons` now supports `exclude_invalid` filter value (NOT IN 'invalid','risky').
+- ✅ **Rich Text Template Editor + Plain Text Auto-Convert** — contentEditable editor with toolbar (Bold/Italic/Underline/Font Size/Link/Clear), clickable placeholder chips, no external libs. Backend `convertPlainTextToHtml()` in campaignSend.js auto-wraps plain text in styled `<p>` tags (Arial 14px, line-height 1.6, #333). Runs after processTemplate, before compliance pipeline. (commits: 652c1c8, 307dba3)
 
 ### Next UI Tasks (Priority Order)
 
