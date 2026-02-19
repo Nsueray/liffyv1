@@ -341,7 +341,7 @@ resolve → status='ready' → schedule → status='scheduled' → (campaignSche
 | `/api/verification/verify-single` | POST | Verify one email immediately. Dual-writes to `persons` + `prospects`. Body: `{ email }` |
 | `/api/verification/verify-list` | POST | Queue list or email array for verification. Skips already-verified emails (valid/invalid/catchall). Body: `{ list_id }` or `{ emails: [...] }`. Response: `{ queued, already_verified, already_in_queue, total }` |
 | `/api/verification/queue-status` | GET | Queue counts (pending/processing/completed/failed). Optional `?list_id=` filter |
-| `/api/verification/process-queue` | POST | Manual trigger for queue processing. Body: `{ batch_size }` (default 50, max 200) |
+| `/api/verification/process-queue` | POST | Manual trigger for queue processing. Body: `{ batch_size }` (default 100, max 200) |
 
 **Settings endpoints:**
 
@@ -359,7 +359,7 @@ resolve → status='ready' → schedule → status='scheduled' → (campaignSche
 | `unknown` | `unknown` | Send |
 | `invalid`, `spamtrap`, `abuse`, `do_not_mail` | `invalid` | Always exclude |
 
-**Worker:** `startVerificationProcessor()` runs every 30s, finds organizers with pending queue + ZeroBounce key, processes batches of 50. Rate-limited at ~20 calls/sec.
+**Worker:** `startVerificationProcessor()` runs every **15s**, finds organizers with pending queue + ZeroBounce key, processes batches of **100**. API calls run in **parallel chunks of 10** via `Promise.all` (600ms pause between chunks, ~16 calls/sec — safely under ZeroBounce 20/sec limit). Throughput: ~80-100 emails/min.
 
 **CSV Upload auto-queue:** After `POST /api/lists/upload-csv` commit, if organizer has ZeroBounce key, emails are auto-queued. Response includes `verification_queued` count.
 
@@ -634,6 +634,7 @@ Miners NEVER:
 - ✅ **Lists page member counts fix** — rewrote GET /api/lists to use LEFT JOIN + GROUP BY instead of correlated subqueries. Uses COALESCE(persons, prospects) for verification status. Includes import_status/import_progress in response. Also fixed import-all `type` column reference that doesn't exist in schema.
 - ✅ **Contacts page default Exclude Invalid filter** — added `exclude_invalid` option to verification status dropdown (default). Backend `/api/persons` now supports `exclude_invalid` filter value (NOT IN 'invalid','risky').
 - ✅ **Rich Text Template Editor + Plain Text Auto-Convert** — contentEditable editor with toolbar (Bold/Italic/Underline/Font Size/Link/Clear), clickable placeholder chips, no external libs. Backend `convertPlainTextToHtml()` in campaignSend.js auto-wraps plain text in styled `<p>` tags (Arial 14px, line-height 1.6, #333). Runs after processTemplate, before compliance pipeline. (commits: 652c1c8, 307dba3)
+- ✅ **Verification Worker Speed Optimization** — batch size 50→100, poll interval 30s→15s, sequential API calls → parallel chunks of 10 via `Promise.all` (600ms inter-chunk pause). Throughput ~18/min → ~80-100/min. (commit: d7f471b)
 
 ### Next UI Tasks (Priority Order)
 
