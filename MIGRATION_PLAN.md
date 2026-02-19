@@ -14,6 +14,7 @@
 | **Dual-write** | All import paths (CSV upload, import-all, leads/import) write to BOTH `prospects` (legacy) AND `persons`+`affiliations` (canonical) |
 | **list_members → prospect_id** | `list_members.prospect_id` references `prospects.id`. Campaign resolve starts from `list_members JOIN prospects` |
 | **COALESCE hacks** | Campaign resolve uses `COALESCE(persons.X, prospects.X)` for name, company, verification_status |
+| **campaign_recipients has no person_id** | `campaign_recipients.prospect_id` references `prospects.id` but has no direct `person_id` FK to canonical `persons` |
 | **campaign_recipients mutable columns** | Webhooks update `delivered_at`, `opened_at`, `clicked_at`, `bounced_at`, `open_count`, `click_count` on campaign_recipients (alongside canonical `campaign_events` INSERT) |
 | **verification dual-write** | Verification worker updates BOTH `persons.verification_status` AND `prospects.verification_status` |
 
@@ -29,10 +30,16 @@
 
 ```
 campaign resolve: list_members → prospects → persons (LEFT JOIN) → affiliations (LATERAL)
+campaign dedup:   campaign_recipients.prospect_id (no person_id column)
 list detail:      list_members → prospects → persons (LEFT JOIN for name COALESCE)
 verification:     verification_queue.prospect_id → prospects (dual-write status)
 zoho push-list:   list_members → prospects → persons (resolve person_ids)
+webhooks:         campaign_recipients.prospect_id lookup + mutable column updates
 ```
+
+### Known Gap: urlMiner.js
+
+`backend/services/urlMiner.js` writes to `prospects` but does NOT dual-write to `persons`+`affiliations`. This is the only import path missing canonical writes. However, import-all (which is run after mining) does create persons via dual-write. Verify that all urlMiner-created prospects get a corresponding person during import-all before relying on this assumption.
 
 ---
 
@@ -43,6 +50,7 @@ zoho push-list:   list_members → prospects → persons (resolve person_ids)
 | Pattern | Description |
 |---------|-------------|
 | **Single-write** | All import paths write ONLY to `persons` + `affiliations`. No `prospects` table writes. |
+| **campaign_recipients.person_id** | Direct FK to `persons.id`. Set at resolve time + webhook time. |
 | **list_members → person_id** | `list_members.person_id` references `persons.id`. Campaign resolve starts from `list_members JOIN persons` |
 | **No COALESCE hacks** | Campaign resolve reads directly from `persons` + `affiliations`. No fallback to `prospects`. |
 | **campaign_events only** | Engagement data lives exclusively in `campaign_events`. Mutable columns on `campaign_recipients` frozen (no more webhook updates). |
@@ -53,22 +61,167 @@ zoho push-list:   list_members → prospects → persons (resolve person_ids)
 ### Final Table Relationships
 
 ```
-campaign resolve: list_members → persons → affiliations (LATERAL)
-list detail:      list_members → persons → affiliations (LATERAL)
-verification:     verification_queue.person_id → persons (single-write status)
-zoho push-list:   list_members → persons → affiliations
+campaign resolve:  list_members → persons → affiliations (LATERAL)
+campaign dedup:    campaign_recipients.person_id (direct FK)
+campaign events:   campaign_events.person_id (direct FK)
+list detail:       list_members → persons → affiliations (LATERAL)
+verification:      verification_queue.person_id → persons (single-write status)
+zoho push-list:    list_members → persons → affiliations
 ```
+
+---
+
+## Step 0: campaign_recipients.person_id
+
+> **Goal:** Add `person_id` column to `campaign_recipients` so engagement data links directly to canonical `persons` without going through legacy `prospects`.
+> **Risk:** LOW — purely additive, no existing behavior changes.
+
+### 0.1 Migration SQL
+
+```sql
+-- Migration 024: add_campaign_recipients_person_id.sql
+
+-- 1. Add person_id column (nullable)
+ALTER TABLE campaign_recipients
+  ADD COLUMN IF NOT EXISTS person_id UUID REFERENCES persons(id) ON DELETE SET NULL;
+
+-- 2. Index for lookups
+CREATE INDEX IF NOT EXISTS idx_campaign_recipients_person_id
+  ON campaign_recipients (person_id);
+```
+
+### 0.2 Backfill Script
+
+**File:** `backend/scripts/backfill_campaign_recipients_person_id.js`
+
+```
+Logic:
+  1. SELECT cr.id, cr.email, cr.organizer_id
+     FROM campaign_recipients cr
+     WHERE cr.person_id IS NULL
+
+  2. For each row:
+     - Look up persons WHERE organizer_id = cr.organizer_id AND LOWER(email) = LOWER(cr.email)
+     - If found: UPDATE campaign_recipients SET person_id = persons.id WHERE id = cr.id
+     - If NOT found: SKIP (person may not exist for very old recipients)
+
+  3. Process in batches of 1000, single transaction per batch
+  4. Support --dry-run flag
+  5. Report: { total, mapped, skipped, failed }
+```
+
+**Expected behavior:**
+- Most recipients will map (persons created during Phase 3 dual-write)
+- Recipients from pre-Phase 3 campaigns may not have matching persons — these remain NULL (acceptable)
+- Idempotent: safe to run multiple times
+
+### 0.3 Code Changes
+
+#### `backend/routes/campaigns.js` — Campaign Resolve
+
+When inserting into `campaign_recipients`, also write `person_id`:
+
+**Before:**
+```sql
+INSERT INTO campaign_recipients (organizer_id, campaign_id, email, name, meta, prospect_id)
+VALUES ($1, $2, $3, $4, $5, $6)
+```
+
+**After:**
+```sql
+INSERT INTO campaign_recipients (organizer_id, campaign_id, email, name, meta, prospect_id, person_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+```
+
+`person_id` is already available from the resolve query (the `pn.id AS person_id` column).
+
+#### `backend/routes/webhooks.js` — Webhook Processing
+
+When processing webhook events that look up `campaign_recipients`, set `person_id` if NULL:
+
+```javascript
+// After finding campaign_recipient by email+campaign_id:
+if (!recipient.person_id) {
+  const personRes = await client.query(
+    `SELECT id FROM persons WHERE organizer_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+    [recipient.organizer_id, recipient.email]
+  );
+  if (personRes.rows.length > 0) {
+    await client.query(
+      'UPDATE campaign_recipients SET person_id = $1 WHERE id = $2',
+      [personRes.rows[0].id, recipient.id]
+    );
+  }
+}
+```
+
+This gradually fills `person_id` for old recipients as webhook events arrive.
+
+#### `backend/routes/campaigns.js` — Duplicate Avoidance (Prepare for Step 1)
+
+Currently dedup uses `prospect_id`:
+```sql
+AND NOT EXISTS (
+  SELECT 1 FROM campaign_recipients cr
+  WHERE cr.campaign_id = $3 AND cr.prospect_id = p.id
+)
+```
+
+After Step 0, can optionally switch to email-based dedup (more robust):
+```sql
+AND NOT EXISTS (
+  SELECT 1 FROM campaign_recipients cr
+  WHERE cr.campaign_id = $3 AND LOWER(cr.email) = LOWER(p.email)
+)
+```
+
+Or defer this to Step 1 when `person_id` is available on both sides.
+
+### 0.4 Rollback Plan
+
+1. Column is nullable — old code works without it
+2. Rollback SQL: `ALTER TABLE campaign_recipients DROP COLUMN IF EXISTS person_id;`
+3. No existing behavior changes — purely additive
+
+### 0.5 Test Checklist
+
+- [ ] Backfill script populates person_id for existing campaign_recipients
+- [ ] Campaign resolve writes person_id when inserting new recipients
+- [ ] Webhook events set person_id on recipients that were missing it
+- [ ] campaign_events.person_id and campaign_recipients.person_id match for same email
+- [ ] Old recipients without matching persons remain person_id = NULL (no errors)
+- [ ] Analytics, reports, send-batch all work unchanged
 
 ---
 
 ## Step 1: list_members Migration (prospect_id → person_id)
 
 > **Goal:** Add `person_id` column to `list_members`, backfill from prospects→persons email mapping, migrate all queries to use `person_id` instead of `prospect_id`.
+> **Prerequisite:** Step 0 deployed (campaign_recipients.person_id available for dedup).
 
-### 1.1 Migration SQL
+### 1.1 Pre-Requisite: urlMiner.js Verification
+
+`backend/services/urlMiner.js` writes to `prospects` but does NOT dual-write to `persons`. Before Step 1:
+
+**Option A (Recommended):** Verify that import-all (`processImportBatch`) always runs after URL mining and creates the corresponding person. If so, no code change needed — the backfill script will find the person via email lookup.
+
+**Option B:** Add `persons` UPSERT to `urlMiner.js` (same pattern as other import paths). This is required if URL mining results are ever used without going through import-all.
+
+**Verify with query:**
+```sql
+SELECT COUNT(*) FROM prospects p
+WHERE p.source_type = 'url'
+  AND NOT EXISTS (
+    SELECT 1 FROM persons pn
+    WHERE pn.organizer_id = p.organizer_id AND LOWER(pn.email) = LOWER(p.email)
+  );
+```
+If count > 0, these prospects need persons created during backfill.
+
+### 1.2 Migration SQL
 
 ```sql
--- Migration 024: add_list_members_person_id.sql
+-- Migration 025: add_list_members_person_id.sql
 
 -- 1. Add person_id column (nullable initially)
 ALTER TABLE list_members
@@ -84,33 +237,59 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_list_members_list_person
   WHERE person_id IS NOT NULL;
 ```
 
-### 1.2 Backfill Script
+### 1.3 Backfill Script
 
 **File:** `backend/scripts/backfill_list_members_person_id.js`
 
 ```
 Logic:
-  1. SELECT lm.id, lm.prospect_id, p.email, p.organizer_id
+  1. SELECT lm.id, lm.prospect_id, p.email, p.organizer_id, p.name, p.company,
+            p.country, p.verification_status, p.source_type, p.source_ref
      FROM list_members lm
      JOIN prospects p ON p.id = lm.prospect_id
      WHERE lm.person_id IS NULL
 
   2. For each row:
-     - Look up persons WHERE organizer_id = p.organizer_id AND LOWER(email) = LOWER(p.email)
-     - If found: UPDATE list_members SET person_id = persons.id WHERE id = lm.id
-     - If NOT found: CREATE person from prospect data, then SET person_id
+     a. Look up persons WHERE organizer_id = p.organizer_id AND LOWER(email) = LOWER(p.email)
+     b. If found:
+        - UPDATE list_members SET person_id = persons.id WHERE id = lm.id
+     c. If NOT found:
+        - Parse name from prospects.name:
+          - Split on whitespace: first token → first_name, rest → last_name
+          - Single word → first_name only, last_name = NULL
+          - NULL/empty → both NULL
+        - INSERT INTO persons (organizer_id, email, first_name, last_name, verification_status)
+          VALUES (p.organizer_id, LOWER(p.email), first_name, last_name, p.verification_status)
+          ON CONFLICT DO NOTHING
+          RETURNING id
+        - If conflict (concurrent insert): SELECT id from persons by email
+        - UPDATE list_members SET person_id = persons.id WHERE id = lm.id
 
   3. Process in batches of 500, single transaction per batch
   4. Support --dry-run flag
-  5. Report: { total, mapped, created, failed }
+  5. Report: { total, mapped_existing, created_new, failed }
 ```
 
-**Expected behavior:**
-- Most rows will map directly (dual-write has been active since Phase 3)
-- Rows from before Phase 3 (no corresponding person) get a new person created
-- Idempotent: safe to run multiple times
+**Name parse strategy:**
+```javascript
+function parseName(fullName) {
+  if (!fullName || !fullName.trim()) return { first_name: null, last_name: null };
+  const parts = fullName.trim().split(/\s+/);
+  return {
+    first_name: parts[0] || null,
+    last_name: parts.length > 1 ? parts.slice(1).join(' ') : null
+  };
+}
+```
 
-### 1.3 Query Migration — Affected Routes/Files
+**Edge cases:**
+- `"John Doe"` → `first_name: "John"`, `last_name: "Doe"`
+- `"John"` → `first_name: "John"`, `last_name: null`
+- `"John van der Berg"` → `first_name: "John"`, `last_name: "van der Berg"`
+- `null` / `""` → `first_name: null`, `last_name: null`
+- Existing person found → SKIP name parse (existing data is authoritative)
+
+### 1.4 Query Migration — Affected Routes/Files
 
 After backfill, all queries switch from `prospect_id` to `person_id`:
 
@@ -144,9 +323,7 @@ LEFT JOIN LATERAL (
 #### `backend/routes/campaigns.js` — Duplicate Avoidance
 
 **Before:** `WHERE cr.prospect_id = p.id`
-**After:** Need to update `campaign_recipients` to store `person_id` or match by email
-
-> **Note:** `campaign_recipients.prospect_id` still references `prospects.id`. This column is NOT changed in Step 1 — it becomes orphaned but is only used for dedup within a single campaign. Alternative: dedup by `LOWER(email)` instead of `prospect_id`.
+**After:** `WHERE cr.person_id = pn.id` (person_id available on campaign_recipients from Step 0)
 
 #### `backend/routes/lists.js` — List Detail (GET /api/lists/:id)
 
@@ -226,20 +403,25 @@ FROM list_members lm JOIN persons pn ON pn.id = lm.person_id
 
 These endpoints (`POST /api/prospects/bulk`, `GET /api/prospects`) still use `prospects` directly. They will be deprecated but not changed in this step.
 
-### 1.4 Rollback Plan
+### 1.5 Rollback Plan
 
 1. All queries can be reverted to use `prospect_id` (column is NOT dropped)
 2. `person_id` column is nullable — old code works without it
 3. No data is deleted — `prospect_id` values remain intact
 4. Rollback SQL: `ALTER TABLE list_members DROP COLUMN IF EXISTS person_id;`
 
-### 1.5 Test Checklist
+### 1.6 Test Checklist
 
 - [ ] Backfill script maps all existing list_members to person_id (0 NULLs remaining)
-- [ ] Backfill creates persons for any unmapped prospects
+- [ ] Backfill creates persons for any unmapped prospects (with correct name parse)
+- [ ] Name parse: "John Doe" → first_name="John", last_name="Doe"
+- [ ] Name parse: "John" → first_name="John", last_name=NULL
+- [ ] Name parse: NULL → first_name=NULL, last_name=NULL
+- [ ] Existing person found → name NOT overwritten
 - [ ] Campaign resolve returns same recipients before/after (compare email sets)
 - [ ] Campaign resolve verification filtering works (exclude_invalid, verified_only)
 - [ ] Campaign resolve unsubscribe exclusion works
+- [ ] Campaign resolve dedup uses person_id (from Step 0)
 - [ ] List detail page shows correct names, companies, verification badges
 - [ ] List member counts match before/after on lists index page
 - [ ] CSV upload creates list_member with person_id populated
@@ -257,11 +439,33 @@ These endpoints (`POST /api/prospects/bulk`, `GET /api/prospects`) still use `pr
 > **Goal:** Stop writing to `prospects` table from all import paths. `persons`+`affiliations` become the sole write target.
 > **Prerequisite:** Step 1 complete and verified in production.
 
-### 2.1 No Migration SQL Required
+### 2.1 Pre-Requisite: urlMiner.js Fix
+
+Before removing prospects writes, `urlMiner.js` MUST have `persons` UPSERT added (if not done in Step 1 pre-req):
+
+```javascript
+// After mining results saved, UPSERT to persons
+const personRes = await client.query(`
+  INSERT INTO persons (organizer_id, email, first_name, last_name)
+  VALUES ($1, $2, $3, $4)
+  ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
+    first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
+    last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
+    updated_at = NOW()
+  RETURNING id
+`, [organizerId, email, firstName, lastName]);
+
+// Affiliations UPSERT (if company present, skip @ and |)
+if (company && !company.includes('@') && !company.includes('|')) {
+  // ... standard affiliations UPSERT
+}
+```
+
+### 2.2 No Migration SQL Required
 
 No schema changes needed. This is a code-only change — removing legacy INSERT/UPDATE to `prospects` from all write paths.
 
-### 2.2 Affected Routes/Files — Remove Legacy Writes
+### 2.3 Affected Routes/Files — Remove Legacy Writes
 
 #### `backend/routes/lists.js` — CSV Upload (Inline + Background)
 
@@ -327,12 +531,10 @@ No schema changes needed. This is a code-only change — removing legacy INSERT/
 - `INSERT INTO prospects (...)` (create new)
 - `INSERT INTO list_members (..., prospect_id)` (legacy FK)
 
-**Add:**
-- `persons` UPSERT (currently missing — urlMiner has NO dual-write)
+**Replace with (from 2.1 pre-req):**
+- `persons` UPSERT
 - `affiliations` UPSERT
 - `list_members` INSERT with `person_id`
-
-> **Note:** `urlMiner.js` is the one write path that currently writes to `prospects` WITHOUT dual-writing to `persons`. This must be fixed before removal.
 
 #### `backend/routes/prospects.js` — Legacy Prospects API
 
@@ -343,7 +545,7 @@ No schema changes needed. This is a code-only change — removing legacy INSERT/
 
 **Action:** Remove routes from `server.js`, keep file for reference.
 
-### 2.3 Leads API Migration
+### 2.4 Leads API Migration
 
 `GET /api/leads` and tag endpoints currently read from `prospects` table directly.
 
@@ -353,14 +555,14 @@ No schema changes needed. This is a code-only change — removing legacy INSERT/
 
 **Recommended:** Rewrite `GET /api/leads` to query `persons` + `affiliations` with same filters. This is essentially the same as `GET /api/persons` — consider deprecating `/api/leads` in favor of `/api/persons`.
 
-### 2.4 Rollback Plan
+### 2.5 Rollback Plan
 
 1. Re-enable dual-write code (git revert)
 2. No schema changes to revert
 3. `prospects` table data is frozen at point of removal (not deleted)
 4. Any new imports during rollback window won't be in `prospects` — backfill from `persons` if needed
 
-### 2.5 Test Checklist
+### 2.6 Test Checklist
 
 - [ ] CSV upload creates person + affiliation + list_member (no prospect row)
 - [ ] Import-all creates person + affiliation + list_member (no prospect row)
@@ -377,15 +579,48 @@ No schema changes needed. This is a code-only change — removing legacy INSERT/
 
 ---
 
-## Step 3: campaign_events as Canonical Engagement
+## Step 3: campaign_events Backfill + Freeze
 
-> **Goal:** Stop updating mutable columns on `campaign_recipients` from webhooks. `campaign_events` becomes the sole engagement data source. All reporting reads from `campaign_events` only.
-> **Prerequisite:** Step 2 complete. All reporting endpoints already have `campaign_events` fallback (currently active as primary).
+> **Goal:** Backfill historical engagement data into `campaign_events`, then stop updating mutable columns on `campaign_recipients` from webhooks. `campaign_events` becomes the sole engagement data source.
+> **Prerequisite:** Step 2 complete. Backfill MUST run before freeze to prevent analytics data loss for old campaigns.
 
-### 3.1 Migration SQL
+### 3.1 Backfill Script (MUST run before freeze)
+
+**File:** `backend/scripts/backfill_campaign_events.js`
+
+> **Critical:** Without this backfill, old campaigns (sent before `campaign_events` was wired into webhooks) will show empty analytics after the `campaign_recipients` fallback is removed.
+
+```
+Logic:
+  For each campaign_recipient with engagement timestamps:
+
+  1. sent_at → INSERT campaign_events (event_type='sent', occurred_at=sent_at)
+  2. delivered_at → INSERT campaign_events (event_type='delivered', occurred_at=delivered_at)
+  3. opened_at → INSERT campaign_events (event_type='open', occurred_at=opened_at)
+     - If open_count > 1: insert additional 'open' events at opened_at + N seconds
+       (approximate, since exact timestamps are lost)
+  4. clicked_at → INSERT campaign_events (event_type='click', occurred_at=clicked_at)
+     - If click_count > 1: same approximation pattern
+  5. bounced_at → INSERT campaign_events (event_type='bounce', occurred_at=bounced_at)
+     - Include last_error as reason
+
+  For each event:
+  - Set person_id from campaign_recipients.person_id (populated in Step 0)
+  - Set recipient_id = campaign_recipients.id
+  - Use provider_event_id = 'backfill_' || campaign_recipients.id || '_' || event_type
+    (prevents duplicate inserts via UNIQUE index on provider_event_id)
+
+  Process in batches of 500 recipients per transaction.
+  Support --dry-run flag.
+  Report: { recipients_processed, events_created, already_exists, errors }
+```
+
+**Dedup safety:** The `idx_campaign_events_provider_dedup` UNIQUE index prevents duplicate events. Using a deterministic `provider_event_id` makes the backfill idempotent.
+
+### 3.2 Migration SQL
 
 ```sql
--- Migration 025: freeze_campaign_recipients_columns.sql
+-- Migration 026: freeze_campaign_recipients_columns.sql
 
 -- Add comment documenting frozen columns (no schema change needed)
 COMMENT ON COLUMN campaign_recipients.delivered_at IS 'FROZEN — historical only. New data in campaign_events.';
@@ -399,7 +634,7 @@ COMMENT ON COLUMN campaign_recipients.click_count IS 'FROZEN — historical only
 -- The webhook handler stops updating them (code change).
 ```
 
-### 3.2 Affected Routes/Files
+### 3.3 Affected Routes/Files
 
 #### `backend/routes/webhooks.js` — Stop Updating Mutable Columns
 
@@ -434,13 +669,13 @@ Currently reads from `campaign_events` with `campaign_recipients` fallback.
 
 **After:** Remove `campaign_recipients` timestamp fallback. All report data from `campaign_events`.
 
-> **Note:** The `campaign_recipients` fallback was added because `campaign_events` backfill hadn't been run. By Step 3, either the backfill has been run or all new campaigns use `campaign_events` exclusively. Old campaigns without backfilled events will show empty analytics — acceptable trade-off.
+> **Note:** The backfill script (3.1) MUST be run before this step. After backfill, all historical campaigns have their events in `campaign_events`, making the `campaign_recipients` fallback unnecessary.
 
 #### `backend/routes/campaignSend.js` — No Changes
 
 Already writes to `campaign_events` only. No mutable column writes.
 
-### 3.3 Performance Index (Recommended)
+### 3.4 Performance Indexes (Recommended)
 
 ```sql
 -- Add composite indexes for common campaign_events queries
@@ -456,15 +691,18 @@ CREATE INDEX IF NOT EXISTS idx_campaign_events_org_occurred
 
 These are from the Technical Debt backlog in CLAUDE.md.
 
-### 3.4 Rollback Plan
+### 3.5 Rollback Plan
 
 1. Re-enable mutable column updates in webhooks.js (git revert)
 2. Re-enable `campaign_recipients` fallback in analytics/reports
 3. No data loss — `campaign_events` rows are immutable and always written
 4. Gap: events received during freeze period won't have mutable column values (but `campaign_events` has them)
 
-### 3.5 Test Checklist
+### 3.6 Test Checklist
 
+- [ ] Backfill script creates events for all historical recipients with timestamps
+- [ ] Backfill is idempotent (re-running produces 0 new events)
+- [ ] Old campaign analytics show correct data from backfilled `campaign_events`
 - [ ] Webhook `delivered` event: creates `campaign_events` row, does NOT update `delivered_at` on campaign_recipients
 - [ ] Webhook `open` event: creates `campaign_events` row, does NOT update `opened_at`/`open_count`
 - [ ] Webhook `click` event: creates `campaign_events` row, does NOT update `clicked_at`/`click_count`
@@ -474,31 +712,73 @@ These are from the Technical Debt backlog in CLAUDE.md.
 - [ ] Person detail engagement summary uses `campaign_events`
 - [ ] Logs endpoint uses `campaign_events` (already does)
 - [ ] Campaign detail recipients table still shows status correctly
-- [ ] Old campaigns (pre-events) show empty analytics gracefully (no errors)
+- [ ] Old campaigns (pre-backfill) show correct analytics after backfill
 
 ---
 
 ## Step 4: Cleanup — Archive & Drop
 
 > **Goal:** Rename `prospects` to `prospects_archive`, drop `email_logs`, clean up dead code.
-> **Prerequisite:** Steps 1–3 complete and stable in production for at least 2 weeks.
+> **Prerequisite:** Steps 0–3 complete and stable in production for at least 2 weeks.
 
-### 4.1 Migration SQL
+### 4.1 Pre-Migration Safety Checks
+
+**Run BEFORE migration to verify readiness:**
 
 ```sql
--- Migration 026: archive_legacy_tables.sql
+-- 1. Verify all list_members have person_id (from Step 1 backfill)
+SELECT COUNT(*) AS missing FROM list_members WHERE person_id IS NULL;
+-- Expected: 0
+
+-- 2. Verify campaign_events backfill coverage (from Step 3)
+SELECT COUNT(*) AS without_events
+FROM campaign_recipients cr
+WHERE cr.status != 'pending'
+  AND NOT EXISTS (
+    SELECT 1 FROM campaign_events ce
+    WHERE ce.recipient_id = cr.id
+  );
+-- Expected: 0 (or acceptably low)
+
+-- 3. Verify no recent prospects writes (from Step 2)
+SELECT COUNT(*) FROM prospects WHERE created_at > NOW() - INTERVAL '2 weeks';
+-- Expected: 0
+```
+
+If any check fails, DO NOT proceed. Fix the underlying issue first.
+
+### 4.2 Migration SQL
+
+```sql
+-- Migration 027: archive_legacy_tables.sql
+
+-- ═══════════════════════════════════════════
+-- SAFETY: Run pre-migration checks first!
+-- See Step 4.1 in MIGRATION_PLAN.md
+-- ═══════════════════════════════════════════
 
 -- 1. Rename prospects to archive
 ALTER TABLE prospects RENAME TO prospects_archive;
 
--- 2. Update foreign key on list_members (drop old, keep person_id)
+-- 2. Drop foreign key on list_members (references defunct prospects)
 ALTER TABLE list_members DROP CONSTRAINT IF EXISTS list_members_prospect_id_fkey;
 
--- 3. Rename prospect_id column for clarity (optional)
+-- 3. Rename prospect_id column for clarity
 ALTER TABLE list_members RENAME COLUMN prospect_id TO prospect_id_legacy;
 
--- 4. Make person_id NOT NULL (all rows should be backfilled from Step 1)
+-- 4. Enforce person_id NOT NULL (safe — verified by CHECK first)
+--    Step A: Add CHECK constraint (validates without exclusive lock)
+ALTER TABLE list_members ADD CONSTRAINT chk_list_members_person_id_not_null
+  CHECK (person_id IS NOT NULL) NOT VALID;
+
+--    Step B: Validate the constraint (fails if any NULL exists)
+ALTER TABLE list_members VALIDATE CONSTRAINT chk_list_members_person_id_not_null;
+
+--    Step C: Now safe to add NOT NULL (instant, constraint already validated)
 ALTER TABLE list_members ALTER COLUMN person_id SET NOT NULL;
+
+--    Step D: Drop the CHECK (NOT NULL is sufficient)
+ALTER TABLE list_members DROP CONSTRAINT chk_list_members_person_id_not_null;
 
 -- 5. Drop campaign_recipients.prospect_id FK (references defunct prospects)
 ALTER TABLE campaign_recipients DROP CONSTRAINT IF EXISTS campaign_recipients_prospect_id_fkey;
@@ -520,7 +800,7 @@ DROP INDEX IF EXISTS idx_prospects_verification_status;
 -- 9. Remove email_logs model (dead code deletion in codebase, not SQL)
 ```
 
-### 4.2 Affected Files — Dead Code Removal
+### 4.3 Affected Files — Dead Code Removal
 
 | File | Action |
 |------|--------|
@@ -531,12 +811,12 @@ DROP INDEX IF EXISTS idx_prospects_verification_status;
 | `backend/server.js` | REMOVE `app.use('/api/prospects', ...)` route registration |
 | `backend/server.js` | REMOVE `app.use('/api/leads', ...)` if deprecated in favor of `/api/persons` |
 
-### 4.3 Column Cleanup Summary
+### 4.4 Column Cleanup Summary
 
 | Table | Column | Action |
 |-------|--------|--------|
 | `list_members` | `prospect_id` | RENAME to `prospect_id_legacy` |
-| `list_members` | `person_id` | SET NOT NULL |
+| `list_members` | `person_id` | SET NOT NULL (via CHECK → VALIDATE → NOT NULL pattern) |
 | `campaign_recipients` | `prospect_id` | RENAME to `prospect_id_legacy` |
 | `campaign_recipients` | `delivered_at` | RETAIN (historical data, frozen since Step 3) |
 | `campaign_recipients` | `opened_at` | RETAIN (historical data, frozen) |
@@ -548,15 +828,17 @@ DROP INDEX IF EXISTS idx_prospects_verification_status;
 
 > Frozen columns on `campaign_recipients` are NOT dropped — they contain valid historical data from before Step 3. They will never be updated again.
 
-### 4.4 Rollback Plan
+### 4.5 Rollback Plan
 
 1. `ALTER TABLE prospects_archive RENAME TO prospects;` — restores the table
 2. `ALTER TABLE list_members RENAME COLUMN prospect_id_legacy TO prospect_id;` — restores column name
 3. `email_logs` DROP is irreversible — but table has zero active references and can be recreated from migration 003 if needed
 4. Dead code files can be restored from git history
 
-### 4.5 Test Checklist
+### 4.6 Test Checklist
 
+- [ ] Pre-migration checks pass (0 NULL person_ids, 0 missing events, 0 recent prospects writes)
+- [ ] CHECK constraint validates successfully before NOT NULL is applied
 - [ ] All import paths work without prospects table
 - [ ] Campaign resolve works with person_id only
 - [ ] List detail works with person_id only
@@ -576,23 +858,29 @@ DROP INDEX IF EXISTS idx_prospects_verification_status;
 
 | Step | Scope | Risk | Estimated Effort |
 |------|-------|------|------------------|
+| **Step 0** | campaign_recipients + person_id | LOW — additive only | Migration + backfill + 2 files |
 | **Step 1** | list_members + person_id | LOW — additive only, no data loss | Migration + backfill + 10 files |
-| **Step 2** | Remove dual-write | MEDIUM — stop writing to legacy | 7 files (remove code) |
-| **Step 3** | Freeze mutable columns | LOW — campaign_events already primary | 3 files (webhooks, analytics, reports) |
+| **Step 2** | Remove dual-write | MEDIUM — stop writing to legacy | 7 files (remove code) + urlMiner fix |
+| **Step 3** | Backfill events + freeze columns | LOW — campaign_events already primary | Backfill script + 3 files |
 | **Step 4** | Archive + cleanup | LOW — all dependencies removed | Migration + delete dead files |
 
 ### Deploy Order
 
 ```
-Step 1 → Deploy → Verify 1 week → Step 2 → Deploy → Verify 1 week → Step 3 → Deploy → Verify 2 weeks → Step 4
+Step 0 → Deploy → Verify 3 days
+  → Step 1 → Deploy → Verify 1 week
+    → Step 2 → Deploy → Verify 1 week
+      → Step 3 → Run backfill → Deploy freeze → Verify 2 weeks
+        → Step 4
 ```
 
 ### Pre-Requisites Checklist
 
-- [ ] Backfill script for list_members.person_id written and tested
+- [ ] Backfill script for campaign_recipients.person_id written and tested
+- [ ] Backfill script for list_members.person_id written and tested (with name parse)
+- [ ] Backfill script for campaign_events written and tested (with dedup)
+- [ ] urlMiner.js dual-write verified or added (Step 2 pre-req)
 - [ ] All existing list_members rows have corresponding persons (verify query)
-- [ ] urlMiner.js dual-write added (currently missing — only writes to prospects)
-- [ ] campaign_events backfill run (or accepted that old campaigns show empty analytics)
 - [ ] Production monitoring for 500 errors on affected endpoints
 - [ ] Database backup before each step
 
@@ -600,10 +888,16 @@ Step 1 → Deploy → Verify 1 week → Step 2 → Deploy → Verify 1 week → 
 
 ## Files Changed Per Step (Summary)
 
+### Step 0 (4 files)
+- `migrations/024_add_campaign_recipients_person_id.sql` — NEW
+- `scripts/backfill_campaign_recipients_person_id.js` — NEW
+- `routes/campaigns.js` — resolve writes person_id to campaign_recipients
+- `routes/webhooks.js` — set person_id on recipients missing it
+
 ### Step 1 (11 files)
-- `migrations/024_add_list_members_person_id.sql` — NEW
-- `scripts/backfill_list_members_person_id.js` — NEW
-- `routes/campaigns.js` — resolve query rewrite
+- `migrations/025_add_list_members_person_id.sql` — NEW
+- `scripts/backfill_list_members_person_id.js` — NEW (with name parse)
+- `routes/campaigns.js` — resolve query rewrite + dedup via person_id
 - `routes/lists.js` — detail, counts, CSV upload, add-manual, import-bulk, delete
 - `routes/miningResults.js` — import-all batch processor
 - `routes/leads.js` — lead import with list creation
@@ -617,17 +911,18 @@ Step 1 → Deploy → Verify 1 week → Step 2 → Deploy → Verify 1 week → 
 - `routes/leads.js` — remove prospects INSERT/UPDATE/SELECT (or rewrite reads)
 - `services/verificationService.js` — remove prospects lookup + status write
 - `routes/verification.js` — remove prospects status write
-- `services/urlMiner.js` — remove prospects INSERT
+- `services/urlMiner.js` — remove prospects INSERT (replaced in Step 1)
 - `routes/prospects.js` — deprecate (remove from server.js)
 
-### Step 3 (3+ files)
+### Step 3 (4+ files)
+- `scripts/backfill_campaign_events.js` — NEW (MUST run before freeze)
 - `routes/webhooks.js` — remove mutable column updates
 - `routes/campaigns.js` — remove campaign_recipients analytics fallback
 - `routes/reports.js` — remove campaign_recipients reports fallback
-- `migrations/025_freeze_campaign_recipients_columns.sql` — NEW (comments only)
+- `migrations/026_freeze_campaign_recipients_columns.sql` — NEW (comments only)
 
 ### Step 4 (5+ files)
-- `migrations/026_archive_legacy_tables.sql` — NEW
+- `migrations/027_archive_legacy_tables.sql` — NEW (with CHECK → NOT NULL pattern)
 - `routes/prospects.js` — DELETE
 - `models/emailLogs.js` — DELETE
 - `routes/testEmail.js` — remove email_logs INSERT
