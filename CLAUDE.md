@@ -91,7 +91,7 @@ Engagement is stored as events, not scores.
 
 ---
 
-## Database — Current State (20 tables, 22 migrations)
+## Database — Current State (20 tables, 23 migrations)
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -139,7 +139,7 @@ Phase 4 — Remove legacy tables (only when fully migrated and tested).
 
 **Current phase: Late Phase 3 (approaching Phase 4)**
 
-All migrations (001–022) applied in production. 20 tables active.
+All migrations (001–023) applied in production. 20 tables active.
 `AGGREGATION_PERSIST=true` set on Render — mining pipeline writes to `persons` + `affiliations`.
 All import paths (CSV upload, import-all, leads/import) dual-write to both legacy and canonical tables.
 Campaign resolve prefers canonical data with legacy fallback.
@@ -311,7 +311,7 @@ resolve → status='ready' → schedule → status='scheduled' → (campaignSche
 |----------|--------|-------------|
 | `/api/verification/credits` | GET | Check ZeroBounce credit balance |
 | `/api/verification/verify-single` | POST | Verify one email immediately. Dual-writes to `persons` + `prospects`. Body: `{ email }` |
-| `/api/verification/verify-list` | POST | Queue list or email array for verification. Body: `{ list_id }` or `{ emails: [...] }` |
+| `/api/verification/verify-list` | POST | Queue list or email array for verification. Skips already-verified emails (valid/invalid/catchall). Body: `{ list_id }` or `{ emails: [...] }`. Response: `{ queued, already_verified, already_in_queue, total }` |
 | `/api/verification/queue-status` | GET | Queue counts (pending/processing/completed/failed). Optional `?list_id=` filter |
 | `/api/verification/process-queue` | POST | Manual trigger for queue processing. Body: `{ batch_size }` (default 50, max 200) |
 
@@ -429,6 +429,18 @@ Frontend-facing intent signals. Enables lead vs prospect distinction in UI.
 - **Verification:** `COALESCE(persons.verification_status, prospects.verification_status)`
 - **Meta enrichment:** `campaign_recipients.meta` includes `first_name`, `last_name`, `city`, `website`, `phone`, `person_id` from canonical tables
 
+**Verification Mode** (migration 023, column `campaigns.verification_mode`):
+
+| Mode | Filter | Use Case |
+|------|--------|----------|
+| `exclude_invalid` (default) | Excludes `invalid` + `risky` (unless `include_risky=true`) | Send to all, skip bad emails |
+| `verified_only` | Only `valid` + `catchall` pass | Conservative — only send to verified emails |
+
+- Resolve accepts `verification_mode` in request body, persists to campaign
+- PATCH also accepts `verification_mode` for pre-configuration
+- Response includes `verification_mode` + `excluded_unverified` stat (for `verified_only` mode)
+- Frontend shows resolve confirmation modal with mode dropdown + exclusion stats breakdown
+
 Legacy `list_members → prospects` path still drives resolution (lists still use prospect_id). Canonical data enriches rather than replaces.
 
 ---
@@ -465,7 +477,7 @@ persons + affiliations → mapPersonToZoho() → Zoho CRM v7 API (batch 100/requ
 
 ---
 
-## Migrations (22 files)
+## Migrations (23 files)
 
 | # | File | Tables |
 |---|------|--------|
@@ -490,6 +502,7 @@ persons + affiliations → mapPersonToZoho() → Zoho CRM v7 API (batch 100/requ
 | 020 | `add_zoho_crm_columns.sql` | ALTER `organizers`, `zoho_push_log` |
 | 021 | `prospect_intents_unique_constraint.sql` | UNIQUE INDEX on `prospect_intents` (dedup) |
 | 022 | `add_import_progress_columns.sql` | ALTER `mining_jobs`, ALTER `lists` (import_status, import_progress) |
+| 023 | `add_campaign_verification_mode.sql` | ALTER `campaigns` (verification_mode) |
 
 ---
 
@@ -588,6 +601,8 @@ Miners NEVER:
 - ✅ **Person Detail page** — full-page `/leads/[id]` with person header, verify button, affiliations, engagement summary, intent signals table, Zoho sync history, delete. Contacts table rows navigate to detail page. (commit: 8bede92)
 - ✅ **Dashboard** — real dashboard with 6 stat cards (contacts, campaigns, sent, open rate, bounce rate, prospects), quick actions, recent campaigns + mining jobs. Parallel API fetches with graceful fallback. (commit: 7835ec9)
 - ✅ **Reports page** — org-wide summary (7 stat cards), campaign comparison table with per-campaign stats, domain breakdown table, bounce reasons bar chart. Sidebar link with BarChart3 icon. (commit: 42732bb)
+- ✅ **List Verification UI** — "Verify All Emails" button on lists detail with ShieldCheck icon, verification progress polling (5s), 4 stat cards, color-coded badges. "Verify a List" section on verification dashboard with list dropdown. Skips already-verified emails to prevent duplicate ZeroBounce credit usage. (commits: 9c75b7d, 1fece6e)
+- ✅ **Campaign Resolve Verification Mode** — resolve confirmation modal with verification_mode dropdown (exclude_invalid / verified_only), exclusion stats breakdown (invalid/risky/unverified/unsubscribed), recipients added count. Backend `verification_mode` column on campaigns table (migration 023). (commits: 83621d3, 5bbc55d)
 
 ### Next UI Tasks (Priority Order)
 
