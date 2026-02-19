@@ -150,6 +150,11 @@ function extractNameAndCompany(lines, emailLineIndex) {
             continue;
         }
         
+        // Skip source/channel values — these are not person names
+        if (/\b(social media|web search|referral|email marketing|organic|paid|direct|cold call|trade show|exhibition|expo|fair|ads|seo|sem|ppc|inbound|outbound)\b/i.test(line)) {
+            continue;
+        }
+
         // Check if looks like a person name (2-4 words, alphabetic)
         if (/^[A-Za-z\u00C0-\u024F\s\.]+$/.test(line)) {
             const words = line.split(/\s+/).filter(w => w.length > 1);

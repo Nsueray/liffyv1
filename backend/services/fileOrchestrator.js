@@ -279,9 +279,17 @@ async function saveResultsToDb(job, contacts, stats) {
         for (const contact of contacts) {
             const emails = contact.email ? [contact.email] : [];
             totalEmails += emails.length;
-            
+
+            // Build enriched raw JSON — preserve _extra fields, source
+            const rawObj = { ...contact };
+            if (contact._extra) {
+                rawObj.extra_fields = contact._extra;
+            }
+            delete rawObj._extra;
+            delete rawObj.confidence;
+
             await client.query(`
-                INSERT INTO mining_results 
+                INSERT INTO mining_results
                 (job_id, organizer_id, source_url, company_name, contact_name, job_title,
                  phone, country, city, address, website, emails, confidence_score, raw)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
@@ -299,9 +307,9 @@ async function saveResultsToDb(job, contacts, stats) {
                 contact.website || null,
                 emails,
                 contact.confidence || null,
-                JSON.stringify(contact)
+                JSON.stringify(rawObj)
             ]);
-            
+
             savedCount++;
         }
         

@@ -61,37 +61,59 @@ function mineSheet(sheet) {
 
 /**
  * Mine sheet with known headers
+ * Captures unmapped columns into contact._extra so no data is lost
  */
 function mineWithHeaders(sheet) {
     const contacts = [];
     const { columnMap } = sheet.headers;
-    
+    const rawHeaders = sheet.headers.rawHeaders || [];
+    const knownCols = new Set(Object.values(columnMap));
+
     for (const row of sheet.rows) {
         if (!Array.isArray(row)) continue;
-        
+
         const contact = {};
         let hasData = false;
-        
+
         // Extract each mapped field
         for (const [field, colIndex] of Object.entries(columnMap)) {
             const cellValue = row[colIndex];
-            
+
             if (cellValue !== undefined && cellValue !== null) {
                 const value = String(cellValue).trim();
-                
+
                 if (value) {
                     contact[field] = cleanCellValue(field, value);
                     hasData = true;
                 }
             }
         }
-        
+
+        // Capture unmapped columns into _extra (e.g. "Lead Source")
+        const extra = {};
+        for (let i = 0; i < row.length; i++) {
+            if (knownCols.has(i)) continue;
+            const cellValue = row[i];
+            if (cellValue !== undefined && cellValue !== null) {
+                const value = String(cellValue).trim();
+                if (value) {
+                    const header = rawHeaders[i]
+                        ? String(rawHeaders[i]).trim().toLowerCase().replace(/\s+/g, '_')
+                        : `column_${i}`;
+                    extra[header] = value;
+                }
+            }
+        }
+        if (Object.keys(extra).length > 0) {
+            contact._extra = extra;
+        }
+
         // Only include if we have email
         if (contact.email && isValidEmail(contact.email)) {
             contacts.push(contact);
         }
     }
-    
+
     return contacts;
 }
 
@@ -192,41 +214,49 @@ function cleanCellValue(field, value) {
 
 /**
  * Try to detect field type from value content
+ * Priority: phone → url → country → company → source → name
+ * Company and source MUST be checked before name to prevent
+ * "Acme Corp" or "Social Media Ads" being misidentified as person names
  */
 function detectFieldFromValue(value) {
     if (!value) return null;
-    
+
     const lower = value.toLowerCase();
-    
-    // Phone patterns
+
+    // 1. Phone patterns
     if (/^[\d\s\-\+\(\)]{8,20}$/.test(value)) {
         return 'phone';
     }
-    
-    // URL patterns
+
+    // 2. URL patterns
     if (/^(https?:\/\/|www\.)/i.test(value) || /\.(com|org|net|io|app)$/i.test(value)) {
         return 'website';
     }
-    
-    // Country detection (common countries)
+
+    // 3. Country detection (common countries)
     const countries = ['turkey', 'germany', 'france', 'usa', 'uk', 'china', 'india', 'spain', 'italy'];
     if (countries.some(c => lower === c || lower.includes(c))) {
         return 'country';
     }
-    
-    // If it looks like a person name (2-3 words, no special chars)
+
+    // 4. Company indicators (BEFORE name — "Acme Corp" must not be a name)
+    if (/\b(ltd|inc|corp|llc|gmbh|ag|co\.|company|limited|group|plc|sa|srl|bv|nv)\b/i.test(value)) {
+        return 'company';
+    }
+
+    // 5. Source/channel indicators (BEFORE name — "Social Media Ads" must not be a name)
+    if (/\b(social media|web search|referral|email marketing|organic|paid|direct|cold call|trade show|exhibition|expo|fair|ads|seo|sem|ppc|inbound|outbound)\b/i.test(lower)) {
+        return 'source';
+    }
+
+    // 6. Person name (2-4 alpha words — only after company+source ruled out)
     if (/^[A-Za-z\u00C0-\u024F\s]{2,50}$/.test(value)) {
         const words = value.trim().split(/\s+/);
         if (words.length >= 2 && words.length <= 4) {
             return 'name';
         }
     }
-    
-    // If it contains company indicators
-    if (/\b(ltd|inc|corp|llc|gmbh|ag|co\.|company|limited)\b/i.test(value)) {
-        return 'company';
-    }
-    
+
     return null;
 }
 

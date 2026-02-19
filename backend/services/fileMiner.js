@@ -653,6 +653,12 @@ function calculateConfidence(contact) {
     return Math.min(100, score);
 }
 
+// Word boundary match helper — prevents "ad" matching inside "lead"
+function _wordMatch(text, keyword) {
+    const words = text.split(/[\s_\-]+/);
+    return words.includes(keyword);
+}
+
 // ============================================
 // 10. EXCEL STRUCTURED MINING
 // ============================================
@@ -669,32 +675,34 @@ function mineExcelStructured(sheets) {
         // Try to detect header row
         let headerRow = null;
         let headerIndex = -1;
-        
+
         for (let i = 0; i < Math.min(5, rows.length); i++) {
             const row = rows[i].map(c => String(c).toLowerCase());
             const hasEmail = row.some(c => c.includes('email') || c.includes('e-mail'));
-            const hasName = row.some(c => c.includes('name') || c.includes('contact'));
-            
+            const hasName = row.some(c => _wordMatch(c, 'name') || _wordMatch(c, 'contact'));
+
             if (hasEmail || hasName) {
                 headerRow = rows[i].map(c => String(c).toLowerCase().trim());
                 headerIndex = i;
                 break;
             }
         }
-        
-        // Map columns
+
+        // Map columns — source checked before name to prevent "lead source" → name
         const colMap = {};
         if (headerRow) {
             headerRow.forEach((header, idx) => {
+                const words = header.split(/[\s_\-]+/);
                 if (header.includes('email') || header.includes('e-mail')) colMap.email = idx;
-                else if (header.includes('company') || header.includes('organization') || header.includes('firm')) colMap.company = idx;
-                else if (header.includes('name') || header.includes('contact')) colMap.name = idx;
-                else if (header.includes('phone') || header.includes('tel') || header.includes('mobile')) colMap.phone = idx;
-                else if (header.includes('country')) colMap.country = idx;
-                else if (header.includes('city')) colMap.city = idx;
-                else if (header.includes('website') || header.includes('url')) colMap.website = idx;
-                else if (header.includes('title') || header.includes('position')) colMap.title = idx;
-                else if (header.includes('address')) colMap.address = idx;
+                else if (words.includes('company') || words.includes('organization') || words.includes('firm') || words.includes('firma')) colMap.company = idx;
+                else if (words.includes('source') || header.includes('lead source') || words.includes('kaynak') || words.includes('kanal') || words.includes('channel')) colMap.source = idx;
+                else if (words.includes('name') || words.includes('contact') || words.includes('isim') || words.includes('ad')) colMap.name = idx;
+                else if (words.includes('phone') || words.includes('tel') || words.includes('mobile') || words.includes('telefon')) colMap.phone = idx;
+                else if (words.includes('country') || words.includes('ülke')) colMap.country = idx;
+                else if (words.includes('city') || words.includes('şehir')) colMap.city = idx;
+                else if (words.includes('website') || words.includes('url') || words.includes('web')) colMap.website = idx;
+                else if (words.includes('title') || words.includes('position') || words.includes('role')) colMap.title = idx;
+                else if (words.includes('address') || words.includes('adres')) colMap.address = idx;
             });
         }
         
@@ -743,6 +751,7 @@ function mineExcelStructured(sheets) {
                 website: colMap.website !== undefined ? String(row[colMap.website] || '').trim() : extractWebsite(rowText, emailLower),
                 title: colMap.title !== undefined ? String(row[colMap.title] || '').trim() : null,
                 address: colMap.address !== undefined ? String(row[colMap.address] || '').trim() : null,
+                source: colMap.source !== undefined ? String(row[colMap.source] || '').trim() : null,
             };
             
             // Clean empty strings to null

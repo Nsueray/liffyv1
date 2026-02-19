@@ -162,6 +162,20 @@ function parseCSVLine(line, delimiter = ',') {
 }
 
 /**
+ * Check if a cell text matches a keyword using word-boundary logic.
+ * Multi-word keywords (containing space/underscore/hyphen) use substring match.
+ * Single-word keywords require exact word match to prevent
+ * false positives like "ad" matching inside "lead".
+ */
+function cellMatchesKeyword(cell, kw) {
+    if (kw.includes(' ') || kw.includes('_') || kw.includes('-')) {
+        return cell.includes(kw);
+    }
+    const cellWords = cell.split(/[\s_\-]+/);
+    return cellWords.includes(kw);
+}
+
+/**
  * Detect header row and column mapping
  */
 function detectHeaders(rows) {
@@ -170,10 +184,12 @@ function detectHeaders(rows) {
     }
 
     // Common header keywords (multi-language)
+    // Order matters: source BEFORE name to prevent "lead source" matching "name" via "ad" substring
     const headerKeywords = {
         email: ['email', 'e-mail', 'mail', 'e-posta', 'eposta', 'correo', 'courriel', 'البريد'],
         company: ['company', 'organization', 'organisation', 'firm', 'firma', 'şirket', 'kuruluş', 'société', 'entreprise', 'empresa', 'unternehmen', 'azienda', 'شركة', '公司'],
-        name: ['name', 'contact', 'person', 'isim', 'ad', 'kişi', 'nom', 'prénom', 'nombre', 'name', 'nome', 'اسم', '姓名'],
+        source: ['source', 'lead source', 'lead_source', 'kaynak', 'kanal', 'channel', 'origin', 'referral source', 'acquisition'],
+        name: ['name', 'contact', 'person', 'isim', 'ad', 'kişi', 'nom', 'prénom', 'nombre', 'nome', 'اسم', '姓名', 'full name', 'fullname', 'contact name'],
         phone: ['phone', 'tel', 'telephone', 'mobile', 'cell', 'gsm', 'telefon', 'cep', 'téléphone', 'teléfono', 'telefono', 'هاتف', '电话'],
         country: ['country', 'nation', 'ülke', 'pays', 'país', 'land', 'paese', 'بلد', '国家'],
         city: ['city', 'şehir', 'il', 'ville', 'ciudad', 'stadt', 'città', 'مدينة', '城市'],
@@ -186,14 +202,14 @@ function detectHeaders(rows) {
     for (let i = 0; i < Math.min(5, rows.length); i++) {
         const row = rows[i];
         if (!Array.isArray(row)) continue;
-        
+
         const rowLower = row.map(cell => String(cell).toLowerCase().trim());
         let matchCount = 0;
         const columnMap = {};
-        
+
         rowLower.forEach((cell, colIndex) => {
             for (const [field, keywords] of Object.entries(headerKeywords)) {
-                if (keywords.some(kw => cell.includes(kw))) {
+                if (keywords.some(kw => cellMatchesKeyword(cell, kw))) {
                     if (!columnMap[field]) {
                         columnMap[field] = colIndex;
                         matchCount++;
@@ -202,7 +218,7 @@ function detectHeaders(rows) {
                 }
             }
         });
-        
+
         // If we found at least email or 2+ other fields, this is likely the header
         if (columnMap.email !== undefined || matchCount >= 2) {
             return {

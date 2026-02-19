@@ -227,6 +227,45 @@ Job URL (e.g. ?page=1)
 
 ---
 
+## File Mining Pipeline (Excel/CSV/PDF/Word)
+
+File mining uses `fileOrchestrator.js` (v2.0) — a multi-phase pipeline:
+
+```
+Upload → worker picks up pending job → miningService.processMiningJob()
+  → fileOrchestrator.orchestrate(job)
+    → Phase 1: Extraction (excelExtractor / pdfExtractor / wordExtractor)
+    → Phase 2: Mining (structuredMiner + tableMiner + unstructuredMiner)
+    → Phase 3: Deduplication (merge by email, score-based field selection)
+    → Phase 4: Validation
+    → Phase 5: Quality check
+    → Phase 6: Save to mining_results
+```
+
+**Files:**
+- `backend/services/fileOrchestrator.js` — main orchestration + DB save
+- `backend/services/extractors/excelExtractor.js` — Excel/CSV parse, header detection, `cellMatchesKeyword()` word-boundary matching
+- `backend/services/miners/tableMiner.js` — column-based mining (with headers) + content-based guessing (without headers)
+- `backend/services/miners/structuredMiner.js` — label:value text parsing
+- `backend/services/miners/unstructuredMiner.js` — regex around emails
+- `backend/services/validators/deduplicator.js` — merge + score
+- `backend/services/fileMiner.js` — LEGACY (only used by documentMiner for PDF delegation)
+
+**Header detection** (`excelExtractor.detectHeaders()`):
+- Scans first 5 rows for header keywords (multi-language: EN, TR, FR, DE, ES, IT, NL, PT, AR, RU, ZH, JA, KO)
+- Uses `cellMatchesKeyword()` with **word-boundary matching** — prevents `"ad"` matching inside `"lead"`
+- Multi-word keywords (e.g. `"lead source"`) use substring match; single-word keywords require exact word match
+- `source` field checked BEFORE `name` field in iteration order to prevent "Lead Source" → name mapping
+- Mapped fields: `email`, `company`, `source`, `name`, `phone`, `country`, `city`, `address`, `website`, `title`
+
+**Content-based field detection** (`tableMiner.detectFieldFromValue()`):
+- Priority order: phone → URL → country → **company** → **source** → name
+- Company indicators (`corp`, `ltd`, `gmbh`, etc.) checked BEFORE generic name pattern
+- Source/channel values (`social media`, `web search`, `trade show`, etc.) checked BEFORE name pattern
+- Unmapped columns captured in `contact._extra` → stored as `extra_fields` in raw JSON
+
+---
+
 ## Webhook Event Flow
 
 SendGrid webhook (`backend/routes/webhooks.js`) processes events through 3 layers:
@@ -641,6 +680,7 @@ Miners NEVER:
 - ✅ **Verification Worker Fix + Staleness Recovery** — worker wasn't producing logs after restart because 349 items stuck in `processing` status blocked the `pending`-only query. Added staleness recovery (resets `processing` with `processed_at IS NULL` → `pending` each cycle), startup log, per-batch logging, stack traces in error catches, `.catch()` on async processor. (commit: 9e4141b)
 - ✅ **List Verification Counts Fix** — 3-way count grouping: verified (`valid`+`catchall`), invalid (`invalid`), unverified (`unknown`+NULL). Previously `catchall` was unverified and `invalid` was lumped into unverified causing totals > 100%. Detail endpoint now JOINs `persons` for canonical status. All 4 list endpoints consistent. (commit: e603f12)
 - ✅ **Lists Index Page Counts Fix** — GET /api/lists was returning 0 for all counts due to 4-table LEFT JOIN + GROUP BY issue. Split into two queries: list metadata + member counts (grouped by `lm.list_id` from `list_members`), merged in JS via map lookup. (commit: 2c76143)
+- ✅ **File Mining Column Mapping Fix** — Excel/CSV column mapping was broken: `contact_name` got "Social Media Ads" (Lead Source values) instead of actual names. Root causes: (1) `cell.includes("ad")` matched "le**ad** source" → name field (word-boundary fix via `cellMatchesKeyword()`), (2) `detectFieldFromValue()` checked name pattern before company indicators ("Acme Corp" → name instead of company), (3) no `source`/`lead_source` field mapping existed. Fix: word-boundary matching, priority reorder (company → source → name), `source` keyword mapping, unmapped columns preserved in `_extra` → `extra_fields` in raw JSON. 5 files changed: excelExtractor, tableMiner, unstructuredMiner, fileOrchestrator, fileMiner.
 
 ### Next UI Tasks (Priority Order)
 
@@ -662,6 +702,7 @@ Miners NEVER:
 - ~~**Verification worker silent after restart**~~ — FIXED: stuck `processing` items blocked pending-only query. Staleness recovery added (commit: 9e4141b)
 - ~~**List verification counts don't add up**~~ — FIXED: 3-way grouping (verified/invalid/unverified), `catchall` counted as verified, `invalid_count` separate field (commit: e603f12)
 - ~~**Lists index page all counts 0**~~ — FIXED: split into two queries, counts from `list_members` directly (commit: 2c76143)
+- ~~**File mining column mapping broken**~~ — FIXED: word-boundary matching, source field mapping, priority reorder (company → source → name), unmapped columns to _extra
 
 ### Immediate Next Tasks (New Session)
 
