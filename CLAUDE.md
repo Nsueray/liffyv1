@@ -558,17 +558,17 @@ Miners NEVER:
 - ✅ **Backend fix:** `persons/:id` SQL — `event_at → occurred_at`, `recipient_email → email` (commits: 28e0f69, 068f7ba)
 - ✅ **Campaign Analytics Bug Fix** — analytics endpoint fallback to `campaign_recipients` when `campaign_events` empty. Summary, timeline, bounce breakdown all have fallback. Response includes `data_source` field. (commit: 564caf5)
 - ✅ **Prospects (Intents) page** — full page with stats cards, clickable intent type breakdown chips, filters (search/type/source), data table with confidence bars, pagination, loading/empty/error states (commit: 9ed12e9)
+- ✅ **Campaign Analytics UI** — full analytics page with rate cards, timeline chart (Recharts), top links, bounce breakdown, recipients table with status filter. Integrated with `GET /api/campaigns/:id/analytics` endpoint.
+- ✅ **Verification Dashboard** — queue status cards, credit balance, single email verify, batch process trigger, queue results table. Route: `/verification`
 
 ### Next UI Tasks (Priority Order)
 
 | Priority | Task | Backend Endpoints |
 |----------|------|-------------------|
-| P0 #3 | Campaign Analytics UI — rate cards, timeline chart, top links, bounce breakdown (backend fix done, frontend needed) | `GET /api/campaigns/:id/analytics` |
-| P1 #5 | Verification Dashboard — queue status, credit balance, batch verify | `GET /api/verification/queue-status`, `/credits` |
-| P1 #6 | Person Detail page — full-page detail (expand current slide-over) | `GET /api/persons/:id` |
-| P2 #7 | Zoho CRM Push UI — push button, module select, push history | `POST /api/zoho/push`, `GET /push-history` |
-| P2 #8 | Dashboard — stub → real dashboard with org-wide stats | `GET /api/reports/organizer/overview` |
-| P2 #9 | Reports page — campaign comparison, domain breakdown | `GET /api/reports/campaign/:id` |
+| P1 #5 | Person Detail page — full-page detail (expand current slide-over) | `GET /api/persons/:id` |
+| P2 #6 | Zoho CRM Push UI — push button, module select, push history | `POST /api/zoho/push`, `GET /push-history` |
+| P2 #7 | Dashboard — stub → real dashboard with org-wide stats | `GET /api/reports/organizer/overview` |
+| P2 #8 | Reports page — campaign comparison, domain breakdown | `GET /api/reports/campaign/:id` |
 
 ### Known Issues
 
@@ -580,13 +580,14 @@ Miners NEVER:
 
 ### Immediate Next Tasks (New Session)
 
-1. ~~**Migration 021 çalıştır**~~ ✅ SQL gösterildi, psql ile manuel çalıştırılacak
+1. ~~**Migration 021 çalıştır**~~ ✅ psql ile çalıştırıldı, production'da aktif
 2. ~~**Campaign Analytics Bug**~~ ✅ Fixed — fallback to `campaign_recipients` (commit: 564caf5)
 3. ~~**Prospects (Intents) sayfası**~~ ✅ Built — full page with stats, filters, table (commit: 9ed12e9)
+4. ~~**Campaign Analytics UI**~~ ✅ Built — rate cards, timeline chart, top links, bounce breakdown, recipients table
+5. ~~**Verification Dashboard**~~ ✅ Built — queue status, credit balance, single verify, batch process, queue table
 
-4. **Campaign Analytics UI** — P0 #3, frontend'te analytics sayfasını `/api/campaigns/:id/analytics` endpoint'iyle bağla (backend fix done)
-5. **Verification Dashboard** — P1 #5, queue status, credit balance, batch verify UI
-6. **Person Detail page** — P1 #6, slide-over'ı full-page detail'e genişlet
+6. **Person Detail page** — P1 #5, slide-over'ı full-page detail'e genişlet
+7. **Zoho CRM Push UI** — P2 #6, push button, module select, push history
 
 ---
 
