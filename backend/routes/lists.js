@@ -596,8 +596,11 @@ router.get('/', authRequired, async (req, res) => {
         l.import_progress,
         COUNT(lm.id) AS total_leads,
         COUNT(lm.id) FILTER (
-          WHERE COALESCE(pn.verification_status, p.verification_status, 'unknown') = 'valid'
-        ) AS verified_count
+          WHERE COALESCE(pn.verification_status, p.verification_status, 'unknown') IN ('valid', 'catchall')
+        ) AS verified_count,
+        COUNT(lm.id) FILTER (
+          WHERE COALESCE(pn.verification_status, p.verification_status, 'unknown') = 'invalid'
+        ) AS invalid_count
       FROM lists l
       LEFT JOIN list_members lm ON lm.list_id = l.id
       LEFT JOIN prospects p ON p.id = lm.prospect_id
@@ -613,13 +616,15 @@ router.get('/', authRequired, async (req, res) => {
       lists: result.rows.map(row => {
         const total = parseInt(row.total_leads, 10) || 0;
         const verified = parseInt(row.verified_count, 10) || 0;
+        const invalid = parseInt(row.invalid_count, 10) || 0;
         return {
           id: row.id,
           name: row.name,
           created_at: row.created_at,
           total_leads: total,
           verified_count: verified,
-          unverified_count: total - verified,
+          invalid_count: invalid,
+          unverified_count: total - verified - invalid,
           import_status: row.import_status || null,
           import_progress: row.import_progress || null
         };
@@ -815,15 +820,24 @@ router.post('/create-with-filters', authRequired, async (req, res) => {
     );
     const totalLeads = parseInt(countResult.rows[0].count, 10) || 0;
 
-    const verifiedResult = await db.query(
+    const statsResult = await db.query(
       `
-      SELECT COUNT(*) FROM list_members lm
+      SELECT
+        COUNT(*) FILTER (
+          WHERE COALESCE(pn.verification_status, p.verification_status, 'unknown') IN ('valid', 'catchall')
+        ) AS verified_count,
+        COUNT(*) FILTER (
+          WHERE COALESCE(pn.verification_status, p.verification_status, 'unknown') = 'invalid'
+        ) AS invalid_count
+      FROM list_members lm
       JOIN prospects p ON p.id = lm.prospect_id
-      WHERE lm.list_id = $1 AND p.verification_status = 'valid'
+      LEFT JOIN persons pn ON pn.organizer_id = $2 AND LOWER(pn.email) = LOWER(p.email)
+      WHERE lm.list_id = $1
       `,
-      [newList.id]
+      [newList.id, organizerId]
     );
-    const verifiedCount = parseInt(verifiedResult.rows[0].count, 10) || 0;
+    const verifiedCount = parseInt(statsResult.rows[0].verified_count, 10) || 0;
+    const invalidCount = parseInt(statsResult.rows[0].invalid_count, 10) || 0;
 
     res.status(201).json({
       id: newList.id,
@@ -831,7 +845,8 @@ router.post('/create-with-filters', authRequired, async (req, res) => {
       created_at: newList.created_at,
       total_leads: totalLeads,
       verified_count: verifiedCount,
-      unverified_count: totalLeads - verifiedCount
+      invalid_count: invalidCount,
+      unverified_count: totalLeads - verifiedCount - invalidCount
     });
   } catch (err) {
     console.error('POST /api/lists/create-with-filters error:', err);
@@ -873,6 +888,7 @@ router.post('/', authRequired, async (req, res) => {
       created_at: newList.created_at,
       total_leads: 0,
       verified_count: 0,
+      invalid_count: 0,
       unverified_count: 0
     });
   } catch (err) {
@@ -900,26 +916,29 @@ router.get('/:id', authRequired, async (req, res) => {
 
     const membersResult = await db.query(
       `
-      SELECT 
+      SELECT
         p.id,
         p.email,
         p.name,
         p.company,
         p.country,
-        p.verification_status,
+        COALESCE(pn.verification_status, p.verification_status, 'unknown') AS verification_status,
         p.source_type,
         p.tags,
         p.created_at
       FROM list_members lm
       JOIN prospects p ON p.id = lm.prospect_id
+      LEFT JOIN persons pn ON pn.organizer_id = $2 AND LOWER(pn.email) = LOWER(p.email)
       WHERE lm.list_id = $1
       ORDER BY p.created_at DESC
       `,
-      [listId]
+      [listId, organizerId]
     );
 
     const totalLeads = membersResult.rows.length;
-    const verifiedCount = membersResult.rows.filter(r => r.verification_status === 'valid').length;
+    const verifiedCount = membersResult.rows.filter(r => r.verification_status === 'valid' || r.verification_status === 'catchall').length;
+    const invalidCount = membersResult.rows.filter(r => r.verification_status === 'invalid').length;
+    const unverifiedCount = totalLeads - verifiedCount - invalidCount;
 
     const response = {
       id: list.id,
@@ -927,7 +946,8 @@ router.get('/:id', authRequired, async (req, res) => {
       created_at: list.created_at,
       total_leads: totalLeads,
       verified_count: verifiedCount,
-      unverified_count: totalLeads - verifiedCount,
+      invalid_count: invalidCount,
+      unverified_count: unverifiedCount,
       members: membersResult.rows.map(row => ({
         ...row,
         tags: row.tags || []
@@ -1186,6 +1206,7 @@ router.post('/create-empty', authRequired, async (req, res) => {
       created_at: result.rows[0].created_at,
       total_leads: 0,
       verified_count: 0,
+      invalid_count: 0,
       unverified_count: 0
     });
   } catch (err) {
