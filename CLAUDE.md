@@ -710,7 +710,7 @@ Miners NEVER:
 - ~~**Contacts page company column showing pipe-separated junk**~~ — FIXED: `GET /api/persons` LATERAL JOIN now excludes `@` rows and SPLIT_PARTs pipe data. All write paths also block `|` in company_name. Cleanup script run — 611 records cleaned.
 - **Name field shows company name for some records** (minor) — Excel imports where name column was empty picked up company name as first_name. Legacy data, not recurring.
 - **"Web Search" appearing as name/company in a few records** (minor) — stale data from early mining runs, not recurring.
-- **"Exclude Invalid" default filter lost on Contacts page** — dropdown shows "All Statuses" instead of defaulting to `exclude_invalid`. Frontend regression.
+- ~~**"Exclude Invalid" default filter lost on Contacts page**~~ — FIXED: `useState('exclude_invalid')` default, `clearFilters` resets to `exclude_invalid`, `hasActiveFilters` treats it as default. (commit: a861502 in liffy-ui)
 - **Import preview `total_with_email` count bug** — import-all preview may report wrong count
 
 ### Immediate Next Tasks (New Session)
@@ -719,7 +719,6 @@ Miners NEVER:
 2. ~~**Canonical Migration Plan**~~ — ✅ DONE: `MIGRATION_PLAN.md` — 4-step legacy removal roadmap (list_members person_id, dual-write removal, campaign_events canonical, archive+cleanup)
 3. **Zoho CRM Push UI** — P2 #6, push button on Contacts page, module select, push history
 4. **Import preview `total_with_email` bug fix** — investigate and fix count discrepancy
-5. **"Exclude Invalid" default filter fix** — Contacts page dropdown should default to `exclude_invalid`, not "All Statuses"
 
 ---
 
