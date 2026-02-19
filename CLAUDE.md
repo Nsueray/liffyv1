@@ -715,7 +715,7 @@ Miners NEVER:
 
 ### Immediate Next Tasks (New Session)
 
-1. **DB Schema Guide** — document all tables with columns, relationships, and which UI pages use them
+1. ~~**DB Schema Guide**~~ — ✅ DONE: `DB_SCHEMA.md` — 20 tables, all columns, relationships, UI page mapping, data flow diagrams, migration history
 2. **Zoho CRM Push UI** — P2 #6, push button on Contacts page, module select, push history
 3. **Import preview `total_with_email` bug fix** — investigate and fix count discrepancy
 4. **"Exclude Invalid" default filter fix** — Contacts page dropdown should default to `exclude_invalid`, not "All Statuses"
