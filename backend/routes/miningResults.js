@@ -498,8 +498,8 @@ async function processImportBatch(client, batchRows, organizerId, jobId, tagsArr
       personsUpserted++;
       const personId = personResult.rows[0].id;
 
-      // Canonical: affiliations table UPSERT (if company present and not an email address)
-      if (mr.company_name && !mr.company_name.includes('@')) {
+      // Canonical: affiliations table UPSERT (skip email addresses and pipe-separated junk)
+      if (mr.company_name && !mr.company_name.includes('@') && !mr.company_name.includes('|')) {
         await client.query(
           `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, city, website, phone, source_type, source_ref)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'mining', $9)

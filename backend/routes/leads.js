@@ -298,8 +298,8 @@ router.post('/import', authRequired, async (req, res) => {
         personsUpserted++;
         const personId = personResult.rows[0].id;
 
-        // --- CANONICAL: affiliations table UPSERT (if company present and not an email address) ---
-        if (lead.company && !lead.company.includes('@')) {
+        // --- CANONICAL: affiliations table UPSERT (skip email addresses and pipe-separated junk) ---
+        if (lead.company && !lead.company.includes('@') && !lead.company.includes('|')) {
           await client.query(
             `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, city, website, phone, source_type, source_ref)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)

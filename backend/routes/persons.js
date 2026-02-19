@@ -86,6 +86,7 @@ router.get('/', authRequired, async (req, res) => {
          SELECT company_name, position, country_code, city, website, phone
          FROM affiliations
          WHERE person_id = p.id AND organizer_id = p.organizer_id
+           AND (company_name IS NULL OR company_name NOT LIKE '%@%')
          ORDER BY created_at DESC LIMIT 1
        ) a ON true
        WHERE ${whereClause}`,
@@ -104,7 +105,10 @@ router.get('/', authRequired, async (req, res) => {
          p.verified_at,
          p.created_at,
          p.updated_at,
-         a.company_name,
+         CASE
+           WHEN a.company_name LIKE '%|%' THEN NULLIF(TRIM(SPLIT_PART(a.company_name, '|', 1)), '')
+           ELSE a.company_name
+         END AS company_name,
          a.position,
          a.country_code,
          a.city,
@@ -119,6 +123,7 @@ router.get('/', authRequired, async (req, res) => {
          SELECT company_name, position, country_code, city, website, phone
          FROM affiliations
          WHERE person_id = p.id AND organizer_id = p.organizer_id
+           AND (company_name IS NULL OR company_name NOT LIKE '%@%')
          ORDER BY created_at DESC LIMIT 1
        ) a ON true
        WHERE ${whereClause}
@@ -196,9 +201,15 @@ router.get('/:id', authRequired, async (req, res) => {
 
     const person = personRes.rows[0];
 
-    // Get all affiliations
+    // Get all affiliations (clean pipe-separated and email company names)
     const affRes = await db.query(
-      `SELECT id, company_name, position, country_code, city, website, phone, source_type, source_ref, created_at
+      `SELECT id,
+         CASE
+           WHEN company_name LIKE '%|%' THEN NULLIF(TRIM(SPLIT_PART(company_name, '|', 1)), '')
+           WHEN company_name LIKE '%@%' THEN NULL
+           ELSE company_name
+         END AS company_name,
+         position, country_code, city, website, phone, source_type, source_ref, created_at
        FROM affiliations
        WHERE person_id = $1 AND organizer_id = $2
        ORDER BY created_at DESC`,
@@ -265,7 +276,13 @@ router.get('/:id/affiliations', authRequired, async (req, res) => {
     }
 
     const affRes = await db.query(
-      `SELECT id, company_name, position, country_code, city, website, phone, source_type, source_ref, created_at
+      `SELECT id,
+         CASE
+           WHEN company_name LIKE '%|%' THEN NULLIF(TRIM(SPLIT_PART(company_name, '|', 1)), '')
+           WHEN company_name LIKE '%@%' THEN NULL
+           ELSE company_name
+         END AS company_name,
+         position, country_code, city, website, phone, source_type, source_ref, created_at
        FROM affiliations
        WHERE person_id = $1 AND organizer_id = $2
        ORDER BY created_at DESC`,

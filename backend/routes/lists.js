@@ -253,8 +253,8 @@ async function processCSVRowsInBackground(validRows, organizerId, listId, tags) 
             personsUpserted++;
             const personId = personResult.rows[0].id;
 
-            // Canonical: affiliations table UPSERT
-            if (row.company) {
+            // Canonical: affiliations table UPSERT (skip email addresses and pipe-separated junk)
+            if (row.company && !row.company.includes('@') && !row.company.includes('|')) {
               await client.query(
                 `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, website, phone, source_type, source_ref)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, 'import', 'CSV upload')
@@ -498,8 +498,8 @@ router.post('/upload-csv', authRequired, upload.single('file'), async (req, res)
           personsUpserted++;
           const personId = personResult.rows[0].id;
 
-          // Canonical: affiliations table UPSERT (skip if company is an email address)
-          if (row.company && !row.company.includes('@')) {
+          // Canonical: affiliations table UPSERT (skip email addresses and pipe-separated junk)
+          if (row.company && !row.company.includes('@') && !row.company.includes('|')) {
             await client.query(
               `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, website, phone, source_type, source_ref)
                VALUES ($1, $2, $3, $4, $5, $6, $7, 'import', 'CSV upload')

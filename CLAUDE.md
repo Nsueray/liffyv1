@@ -682,6 +682,7 @@ Miners NEVER:
 - ✅ **Lists Index Page Counts Fix** — GET /api/lists was returning 0 for all counts due to 4-table LEFT JOIN + GROUP BY issue. Split into two queries: list metadata + member counts (grouped by `lm.list_id` from `list_members`), merged in JS via map lookup. (commit: 2c76143)
 - ✅ **File Mining Column Mapping Fix** — Excel/CSV column mapping was broken: `contact_name` got "Social Media Ads" (Lead Source values) instead of actual names. Root causes: (1) `cell.includes("ad")` matched "le**ad** source" → name field (word-boundary fix via `cellMatchesKeyword()`), (2) `detectFieldFromValue()` checked name pattern before company indicators ("Acme Corp" → name instead of company), (3) no `source`/`lead_source` field mapping existed. Fix: word-boundary matching, priority reorder (company → source → name), `source` keyword mapping, unmapped columns preserved in `_extra` → `extra_fields` in raw JSON. 5 files changed: excelExtractor, tableMiner, unstructuredMiner, fileOrchestrator, fileMiner.
 - ✅ **List Detail + Contacts Name Display Fix** — List detail page showed wrong names (e.g. "Social Media Ads") because SQL read `prospects.name` instead of canonical `persons.first_name + last_name`. Fixed `GET /api/lists/:id` to COALESCE persons names over prospects. Also blocked email addresses from being written as `affiliations.company_name` across all 4 write paths (import-all, aggregation trigger, CSV upload, leads import) with `@` check.
+- ✅ **Contacts Page Company Column Fix** — Company column showed pipe-separated junk (e.g. "Name | No company | email | Country") from corrupted `affiliations.company_name`. Fixed: (1) LATERAL JOIN excludes `@` rows, (2) CASE/SPLIT_PART extracts first segment from pipe data, (3) all write paths block `|` in company_name, (4) cleanup script `backend/scripts/cleanup_affiliations.js` for existing data.
 
 ### Next UI Tasks (Priority Order)
 
@@ -706,6 +707,7 @@ Miners NEVER:
 - ~~**File mining column mapping broken**~~ — FIXED: word-boundary matching, source field mapping, priority reorder (company → source → name), unmapped columns to _extra
 - ~~**List detail + Contacts page name column wrong**~~ — FIXED: list detail `GET /api/lists/:id` now COALESCEs `persons.first_name + last_name` over `prospects.name`. Contacts page already correct (reads from `persons` directly).
 - ~~**Email addresses written as company_name in affiliations**~~ — FIXED: all write paths (import-all, aggregation trigger, CSV upload, leads import) now check for `@` before writing to `affiliations.company_name`.
+- ~~**Contacts page company column showing pipe-separated junk**~~ — FIXED: `GET /api/persons` LATERAL JOIN now excludes `@` rows and SPLIT_PARTs pipe data. All write paths also block `|` in company_name. Cleanup script: `backend/scripts/cleanup_affiliations.js` (run with `--dry-run` first). Also fixed background CSV upload path that was missing the `@` guard from prior commit.
 
 ### Immediate Next Tasks (New Session)
 
