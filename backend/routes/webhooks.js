@@ -291,6 +291,7 @@ async function recordProspectIntent(recipient, email, eventType, eventTime) {
         organizer_id, person_id, campaign_id,
         intent_type, source, occurred_at
       ) VALUES ($1, $2, $3, $4, 'webhook', $5)
+      ON CONFLICT (organizer_id, person_id, COALESCE(campaign_id::text, ''), intent_type) DO NOTHING
     `, [
       recipient.organizer_id,
       personId,

@@ -182,9 +182,14 @@ router.post('/', authRequired, async (req, res) => {
       `INSERT INTO prospect_intents
          (organizer_id, person_id, campaign_id, intent_type, source, notes, confidence, created_by_user_id)
        VALUES ($1, $2, $3, $4, 'manual', $5, $6, $7)
+       ON CONFLICT (organizer_id, person_id, COALESCE(campaign_id::text, ''), intent_type) DO NOTHING
        RETURNING id, intent_type, source, notes, confidence, occurred_at, created_at`,
       [organizerId, person_id, campaign_id || null, intent_type, notes || null, parsedConfidence, userId]
     );
+
+    if (insertRes.rows.length === 0) {
+      return res.status(409).json({ error: 'Duplicate intent — this person already has this intent type for this campaign.' });
+    }
 
     res.status(201).json({ intent: insertRes.rows[0] });
   } catch (err) {
