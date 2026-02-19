@@ -559,7 +559,8 @@ Miners NEVER:
 - ✅ **Campaign Analytics Bug Fix** — analytics endpoint fallback to `campaign_recipients` when `campaign_events` empty. Summary, timeline, bounce breakdown all have fallback. Response includes `data_source` field. (commit: 564caf5)
 - ✅ **Prospects (Intents) page** — full page with stats cards, clickable intent type breakdown chips, filters (search/type/source), data table with confidence bars, pagination, loading/empty/error states (commit: 9ed12e9)
 - ✅ **Campaign Analytics UI** — full analytics page with rate cards, timeline chart (Recharts), top links, bounce breakdown, recipients table with status filter. Integrated with `GET /api/campaigns/:id/analytics` endpoint.
-- ✅ **Verification Dashboard** — queue status cards, credit balance, single email verify, batch process trigger, queue results table. Route: `/verification`
+- ✅ **Verification Dashboard** — queue status cards, credit balance, single email verify, batch process trigger, queue progress bar. Route: `/verification` (commit: 77174ed)
+- ✅ **Unsubscribe compliance pipeline** — `processEmailCompliance` + RFC 8058 `List-Unsubscribe` headers wired into `campaignSend.js`. Mandatory footer injection + physical address append. (commit: f1b1636)
 
 ### Next UI Tasks (Priority Order)
 
@@ -577,6 +578,7 @@ Miners NEVER:
 - `/api/stats` polled every 30s — may add log noise in production
 - `campaign_events` backfill not yet run in production — analytics uses `campaign_recipients` fallback until backfill runs
 - Prospects page search is client-side only (backend `/api/intents` doesn't support text search param)
+- ~~Unsubscribe footer optional (user-initiated only)~~ — FIXED: compliance pipeline now mandatory in campaignSend (f1b1636)
 
 ### Immediate Next Tasks (New Session)
 
