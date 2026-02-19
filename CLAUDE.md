@@ -561,12 +561,12 @@ Miners NEVER:
 - ✅ **Campaign Analytics UI** — full analytics page with rate cards, timeline chart (Recharts), top links, bounce breakdown, recipients table with status filter. Integrated with `GET /api/campaigns/:id/analytics` endpoint.
 - ✅ **Verification Dashboard** — queue status cards, credit balance, single email verify, batch process trigger, queue progress bar. Route: `/verification` (commit: 77174ed)
 - ✅ **Unsubscribe compliance pipeline** — `processEmailCompliance` + RFC 8058 `List-Unsubscribe` headers wired into `campaignSend.js`. Mandatory footer injection + physical address append. (commit: f1b1636)
+- ✅ **Person Detail page** — full-page `/leads/[id]` with person header, verify button, affiliations, engagement summary, intent signals table, Zoho sync history, delete. Contacts table rows navigate to detail page. (commit: 8bede92)
 
 ### Next UI Tasks (Priority Order)
 
 | Priority | Task | Backend Endpoints |
 |----------|------|-------------------|
-| P1 #5 | Person Detail page — full-page detail (expand current slide-over) | `GET /api/persons/:id` |
 | P2 #6 | Zoho CRM Push UI — push button, module select, push history | `POST /api/zoho/push`, `GET /push-history` |
 | P2 #7 | Dashboard — stub → real dashboard with org-wide stats | `GET /api/reports/organizer/overview` |
 | P2 #8 | Reports page — campaign comparison, domain breakdown | `GET /api/reports/campaign/:id` |
@@ -588,8 +588,10 @@ Miners NEVER:
 4. ~~**Campaign Analytics UI**~~ ✅ Built — rate cards, timeline chart, top links, bounce breakdown, recipients table
 5. ~~**Verification Dashboard**~~ ✅ Built — queue status, credit balance, single verify, batch process, queue table
 
-6. **Person Detail page** — P1 #5, slide-over'ı full-page detail'e genişlet
+6. ~~**Person Detail page**~~ ✅ Built — full-page /leads/[id] with all sections (commit: 8bede92)
+
 7. **Zoho CRM Push UI** — P2 #6, push button, module select, push history
+8. **Dashboard** — P2 #7, org-wide stats with real data
 
 ---
 
