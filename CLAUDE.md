@@ -465,6 +465,7 @@ persons + affiliations → mapPersonToZoho() → Zoho CRM v7 API (batch 100/requ
 | 018 | `create_campaign_events.sql` | `campaign_events` |
 | 019 | `add_verification_columns.sql` | ALTER `organizers`, ALTER `persons`, `verification_queue` |
 | 020 | `add_zoho_crm_columns.sql` | ALTER `organizers`, `zoho_push_log` |
+| 021 | `prospect_intents_unique_constraint.sql` | UNIQUE INDEX on `prospect_intents` (dedup) |
 
 ---
 
@@ -601,3 +602,36 @@ No partial snippets, no "rest stays the same" shortcuts.
 - Do NOT delete legacy tables — they stay until Phase 4
 - Do NOT assume tables exist that aren't listed in "Current State" above
 - Do NOT create new tables without checking this document first
+
+---
+
+## Email Extraction Policy — B2B Context
+
+Role-based business emails (info@, contact@, sales@, office@, etc.) **ARE** valid discovery targets.
+We are a B2B exhibitor discovery platform. Generic CRM-style filtering is intentionally disabled.
+
+**Only system-level non-human emails are filtered:** noreply, no-reply, mailer-daemon, postmaster, hostmaster, abuse, spam, webmaster, test, example domains.
+
+This is intentional and must NOT be reverted without explicit instruction.
+
+---
+
+## Technical Debt & Stability Sprint Backlog
+
+1. Pagination fallback must respect `max_pages` (no hardcoded 5-page fallback)
+2. Pagination logic must be unified (single service for SuperMiner + miningService)
+3. Avoid double normalization in SuperMiner canonical aggregation
+4. Add performance indexes to `campaign_events` (`organizer_id+campaign_id+event_type`, `organizer_id+person_id`, `organizer_id+occurred_at`)
+5. Add pagination metrics to `mining_job_logs` (`pages_detected`, `pages_mined`, `duplicates_detected`)
+
+---
+
+## Phase 4 — Legacy Removal Roadmap
+
+Legacy removal must be **incremental and reversible**.
+
+1. Stop writing to `prospects` table (remove dual-write in import paths)
+2. Migrate `list_members` to reference `persons` instead of `prospects`
+3. Remove dual-write in CSV upload, import-all, leads/import
+4. Drop `prospects` table (only after full migration verification)
+5. Remove legacy resolve fallback in campaign resolve
