@@ -193,6 +193,8 @@ async function processOneItem(client, apiKey, item, organizerId) {
 const PARALLEL_CHUNK_SIZE = 10;
 
 async function processQueue(organizerId, batchSize = 100) {
+  console.log(`[Verification] processQueue called for organizer ${organizerId}, batchSize=${batchSize}`);
+
   // Get API key for this organizer
   const orgRes = await db.query(
     `SELECT zerobounce_api_key FROM organizers WHERE id = $1`,

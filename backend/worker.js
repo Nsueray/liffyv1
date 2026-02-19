@@ -306,9 +306,23 @@ async function startCampaignSender() {
    ========================================================= */
 async function startVerificationProcessor() {
   const { processQueue } = require("./services/verificationService");
+  console.log("[Verification] Verification worker started — polling every " + (VERIFICATION_PROCESSOR_INTERVAL_MS / 1000) + "s");
 
   while (true) {
     try {
+      // Staleness recovery: reset items stuck in 'processing' that never completed back to 'pending'
+      // Safe because processing is synchronous within each worker cycle — any unfinished items are from a prior crash
+      const staleRes = await db.query(`
+        UPDATE verification_queue
+        SET status = 'pending'
+        WHERE status = 'processing'
+          AND processed_at IS NULL
+        RETURNING id
+      `);
+      if (staleRes.rowCount > 0) {
+        console.log(`[Verification] Reset ${staleRes.rowCount} stale processing items back to pending`);
+      }
+
       // Find organizers with a ZeroBounce key and pending queue items
       const orgRes = await db.query(`
         SELECT DISTINCT o.id
@@ -321,15 +335,13 @@ async function startVerificationProcessor() {
       for (const org of orgRes.rows) {
         try {
           const result = await processQueue(org.id, 100);
-          if (result.processed > 0) {
-            console.log(`[Verification] Processed ${result.processed} emails for organizer ${org.id}`);
-          }
+          console.log(`[Verification] Batch processed: ${result.processed} verified, ${result.results.length} total for organizer ${org.id}`);
         } catch (orgErr) {
-          console.error(`[Verification] Error for organizer ${org.id}:`, orgErr.message);
+          console.error(`[Verification] Error for organizer ${org.id}:`, orgErr.message, orgErr.stack);
         }
       }
     } catch (err) {
-      console.error("❌ Verification processor error:", err.message);
+      console.error("[Verification] Processor error:", err.message, err.stack);
     }
     await sleep(VERIFICATION_PROCESSOR_INTERVAL_MS);
   }
@@ -344,7 +356,9 @@ async function startWorker() {
   await initSuperMiner();
   startCampaignScheduler();
   startCampaignSender();
-  startVerificationProcessor();
+  startVerificationProcessor().catch(err => {
+    console.error("[Verification] FATAL: Verification processor crashed:", err.message, err.stack);
+  });
 
   while (true) {
     await processNextJob();
