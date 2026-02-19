@@ -365,14 +365,14 @@ resolve → status='ready' → schedule → status='scheduled' → (campaignSche
 
 ---
 
-## Reports & Logs (Migrated to `campaign_events`)
+## Reports & Logs (Migrated to `campaign_events` with `campaign_recipients` fallback)
 
-Both reporting endpoints now read exclusively from `campaign_events` (canonical). The legacy `email_logs` table is no longer read or written.
+All reporting endpoints use `campaign_events` (canonical) as primary source. When `campaign_events` is empty (pre-backfill), both `/api/reports/campaign/:id` and `/api/reports/organizer/overview` fall back to `campaign_recipients` timestamps (`sent_at`, `delivered_at`, `opened_at`, `clicked_at`, `bounced_at`). Response includes `data_source` field (`campaign_events` or `campaign_recipients`).
 
 | Endpoint | Method | Source | Description |
 |----------|--------|--------|-------------|
-| `/api/reports/campaign/:id` | GET | `campaign_events` | Campaign report: event counts, timeline (per day), domain breakdown, bounce reasons |
-| `/api/reports/organizer/overview` | GET | `campaign_events` | Org-wide report: campaign stats, recipient stats, event counts, timeline, domains, bounces |
+| `/api/reports/campaign/:id` | GET | `campaign_events` → `campaign_recipients` fallback | Campaign report: event counts, timeline (per day), domain breakdown, bounce reasons |
+| `/api/reports/organizer/overview` | GET | `campaign_events` → `campaign_recipients` fallback | Org-wide report: campaign stats, recipient stats, event counts, timeline, domains, bounces |
 | `/api/logs` | GET | `campaign_events` | Paginated event log with `campaign_id` and `event_type` filters |
 | `/api/logs/:id` | GET | `campaign_events` | Single event detail |
 
@@ -635,6 +635,7 @@ Miners NEVER:
 - ✅ **Contacts page default Exclude Invalid filter** — added `exclude_invalid` option to verification status dropdown (default). Backend `/api/persons` now supports `exclude_invalid` filter value (NOT IN 'invalid','risky').
 - ✅ **Rich Text Template Editor + Plain Text Auto-Convert** — contentEditable editor with toolbar (Bold/Italic/Underline/Font Size/Link/Clear), clickable placeholder chips, no external libs. Backend `convertPlainTextToHtml()` in campaignSend.js auto-wraps plain text in styled `<p>` tags (Arial 14px, line-height 1.6, #333). Runs after processTemplate, before compliance pipeline. (commits: 652c1c8, 307dba3)
 - ✅ **Verification Worker Speed Optimization** — batch size 50→100, poll interval 30s→15s, sequential API calls → parallel chunks of 10 via `Promise.all` (600ms inter-chunk pause). Throughput ~18/min → ~80-100/min. (commit: d7f471b)
+- ✅ **Reports/Dashboard Backfill Fix** — both `/api/reports/campaign/:id` and `/api/reports/organizer/overview` now fall back to `campaign_recipients` timestamps when `campaign_events` is empty. Covers event stats, timeline, domain breakdown, bounce reasons. Response includes `data_source` field. (commit: 814cce2)
 
 ### Next UI Tasks (Priority Order)
 
@@ -644,22 +645,21 @@ Miners NEVER:
 
 ### Known Issues
 
-- **Reports + Dashboard org-wide stats show 0** — `GET /api/reports/organizer/overview` reads from `campaign_events` table which has NOT been backfilled in production. Per-campaign analytics (`GET /api/campaigns/:id/analytics`) has `campaign_recipients` fallback but org-wide reports endpoint does NOT. Fix: add `campaign_recipients` fallback to reports endpoint (same pattern as `campaigns.js` analytics).
-- **Campaign Comparison table per-campaign stats all 0** — same root cause: `campaign_events` not backfilled, `/:id/stats` reads from `campaign_recipients` (works), but org-level event counts are empty.
+- ~~**Reports + Dashboard org-wide stats show 0**~~ — FIXED: both reports endpoints now fall back to `campaign_recipients` when `campaign_events` is empty (commit: 814cce2)
+- ~~**Campaign Comparison table per-campaign stats all 0**~~ — FIXED: same fix, `/api/reports/campaign/:id` also has fallback now
 - `/api/stats` 401 Unauthorized still repeating in console — sidebar polls every 30s, auth header was added but issue persists
 - ZeroBounce account not yet configured — settings UI untested against live API
 - Prospects page search is client-side only (backend `/api/intents` doesn't support text search param)
 - ~~Unsubscribe footer optional (user-initiated only)~~ — FIXED: compliance pipeline now mandatory in campaignSend (f1b1636)
-- ~~`campaign_events` backfill not yet run~~ — still not run, but per-campaign analytics has fallback. Org-wide reports still need fix.
+- ~~`campaign_events` backfill not yet run~~ — FIXED: all endpoints (analytics + reports) now have `campaign_recipients` fallback. Backfill optional.
 - ~~Import-all 30s timeout on 3000+ records~~ — FIXED: background batch processing with 200-record batches (commit: 450a34c)
 - **Frontend import-all polling not yet implemented** — backend returns 202 + `import_status`/`import_progress`, but liffy-ui needs to poll `GET /api/mining/jobs/:id` and show progress bar
 
 ### Immediate Next Tasks (New Session)
 
-1. **Reports/Dashboard backfill fix** — add `campaign_recipients` fallback to `GET /api/reports/organizer/overview` endpoint (same pattern as `campaigns.js` analytics fallback at line ~848). This will make Dashboard stats + Reports page show real data even without `campaign_events` backfill.
-2. **/api/stats 401 fix** — sidebar polling still returns 401, investigate and fix
-3. **Zoho CRM Push UI** — P2 #6, push button on Contacts page, module select, push history
-4. **Import-all progress UI** — frontend polling for import_status + progress bar (backend ready, frontend needs implementation)
+1. **/api/stats 401 fix** — sidebar polling still returns 401, investigate and fix
+2. **Zoho CRM Push UI** — P2 #6, push button on Contacts page, module select, push history
+3. **Import-all progress UI** — frontend polling for import_status + progress bar (backend ready, frontend needs implementation)
 
 ---
 
