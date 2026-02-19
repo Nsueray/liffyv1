@@ -135,7 +135,7 @@ New code should prefer canonical tables when available.
 Phase 1 — Add canonical tables (persons, affiliations). Backfill from mining_results. ✅ DONE
 Phase 2 — Add intent + event tables (prospect_intents, campaign_events). Wire up webhook + send. ✅ DONE
 Phase 3 — New features use canonical tables. All import paths dual-write. Campaign resolve uses canonical with legacy fallback. ✅ DONE
-Phase 4 — Remove legacy tables (only when fully migrated and tested).
+Phase 4 — Remove legacy tables (5 steps). Full plan in `MIGRATION_PLAN.md`.
 
 **Current phase: Late Phase 3 (approaching Phase 4)**
 
@@ -144,10 +144,19 @@ All migrations (001–023) applied in production. 20 tables active.
 All import paths (CSV upload, import-all, leads/import) dual-write to both legacy and canonical tables.
 Campaign resolve prefers canonical data with legacy fallback.
 
+**Phase 4 steps** (see `MIGRATION_PLAN.md` for full details):
+- Step 0: Add `campaign_recipients.person_id` (migration 024)
+- Step 1: Add `list_members.person_id`, migrate queries (migration 025)
+- Step 2: Remove dual-write to `prospects` from all import paths
+- Step 3: Backfill `campaign_events` + freeze `campaign_recipients` mutable columns (migration 026)
+- Step 4: Archive `prospects` → `prospects_archive`, drop `email_logs` (migration 027)
+
 **Remaining legacy dependencies:**
 - `email_logs` — DEPRECATED. No longer written (last INSERT in `campaignSend.js` removed) or read. Zero active references. Retained for historical data only.
 - `prospects` — still written to by all import paths (dual-write), read by leads.js + prospects.js + list endpoints
 - `lists` + `list_members` — still used by campaign resolve (via prospect_id), CSV upload, list management
+- `campaign_recipients.prospect_id` — references `prospects.id`, no `person_id` column yet
+- `urlMiner.js` — writes to `prospects` only (no dual-write to persons)
 
 ---
 
@@ -716,7 +725,7 @@ Miners NEVER:
 ### Immediate Next Tasks (New Session)
 
 1. ~~**DB Schema Guide**~~ — ✅ DONE: `DB_SCHEMA.md` — 20 tables, all columns, relationships, UI page mapping, data flow diagrams, migration history
-2. ~~**Canonical Migration Plan**~~ — ✅ DONE: `MIGRATION_PLAN.md` — 4-step legacy removal roadmap (list_members person_id, dual-write removal, campaign_events canonical, archive+cleanup)
+2. ~~**Canonical Migration Plan**~~ — ✅ DONE: `MIGRATION_PLAN.md` — 5-step legacy removal roadmap (Step 0: campaign_recipients person_id, Step 1: list_members person_id, Step 2: dual-write removal, Step 3: campaign_events backfill+freeze, Step 4: archive+cleanup). Updated with ChatGPT review feedback: name parse strategy, backfill scripts, CHECK→NOT NULL safety, urlMiner gap noted.
 3. **Zoho CRM Push UI** — P2 #6, push button on Contacts page, module select, push history
 4. **Import preview `total_with_email` bug fix** — investigate and fix count discrepancy
 
