@@ -128,7 +128,7 @@ async function persistCandidates(jobId, organizerId, candidates, metadata) {
       // 2. UPSERT affiliations
       const affiliations = candidate.affiliations || [];
       for (const aff of affiliations) {
-        const hasCompany = aff.company_name && aff.company_name.trim().length > 0;
+        const hasCompany = aff.company_name && aff.company_name.trim().length > 0 && !aff.company_name.includes('@');
         const companyName = hasCompany ? aff.company_name.trim() : null;
 
         // Build source_type and source_ref from extraction_meta

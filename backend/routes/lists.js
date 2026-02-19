@@ -498,8 +498,8 @@ router.post('/upload-csv', authRequired, upload.single('file'), async (req, res)
           personsUpserted++;
           const personId = personResult.rows[0].id;
 
-          // Canonical: affiliations table UPSERT
-          if (row.company) {
+          // Canonical: affiliations table UPSERT (skip if company is an email address)
+          if (row.company && !row.company.includes('@')) {
             await client.query(
               `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, website, phone, source_type, source_ref)
                VALUES ($1, $2, $3, $4, $5, $6, $7, 'import', 'CSV upload')
@@ -927,7 +927,10 @@ router.get('/:id', authRequired, async (req, res) => {
       SELECT
         p.id,
         p.email,
-        p.name,
+        COALESCE(
+          NULLIF(TRIM(CONCAT(COALESCE(pn.first_name, ''), ' ', COALESCE(pn.last_name, ''))), ''),
+          p.name
+        ) AS name,
         p.company,
         p.country,
         COALESCE(pn.verification_status, p.verification_status, 'unknown') AS verification_status,

@@ -681,6 +681,7 @@ Miners NEVER:
 - ✅ **List Verification Counts Fix** — 3-way count grouping: verified (`valid`+`catchall`), invalid (`invalid`), unverified (`unknown`+NULL). Previously `catchall` was unverified and `invalid` was lumped into unverified causing totals > 100%. Detail endpoint now JOINs `persons` for canonical status. All 4 list endpoints consistent. (commit: e603f12)
 - ✅ **Lists Index Page Counts Fix** — GET /api/lists was returning 0 for all counts due to 4-table LEFT JOIN + GROUP BY issue. Split into two queries: list metadata + member counts (grouped by `lm.list_id` from `list_members`), merged in JS via map lookup. (commit: 2c76143)
 - ✅ **File Mining Column Mapping Fix** — Excel/CSV column mapping was broken: `contact_name` got "Social Media Ads" (Lead Source values) instead of actual names. Root causes: (1) `cell.includes("ad")` matched "le**ad** source" → name field (word-boundary fix via `cellMatchesKeyword()`), (2) `detectFieldFromValue()` checked name pattern before company indicators ("Acme Corp" → name instead of company), (3) no `source`/`lead_source` field mapping existed. Fix: word-boundary matching, priority reorder (company → source → name), `source` keyword mapping, unmapped columns preserved in `_extra` → `extra_fields` in raw JSON. 5 files changed: excelExtractor, tableMiner, unstructuredMiner, fileOrchestrator, fileMiner.
+- ✅ **List Detail + Contacts Name Display Fix** — List detail page showed wrong names (e.g. "Social Media Ads") because SQL read `prospects.name` instead of canonical `persons.first_name + last_name`. Fixed `GET /api/lists/:id` to COALESCE persons names over prospects. Also blocked email addresses from being written as `affiliations.company_name` across all 4 write paths (import-all, aggregation trigger, CSV upload, leads import) with `@` check.
 
 ### Next UI Tasks (Priority Order)
 
@@ -703,12 +704,15 @@ Miners NEVER:
 - ~~**List verification counts don't add up**~~ — FIXED: 3-way grouping (verified/invalid/unverified), `catchall` counted as verified, `invalid_count` separate field (commit: e603f12)
 - ~~**Lists index page all counts 0**~~ — FIXED: split into two queries, counts from `list_members` directly (commit: 2c76143)
 - ~~**File mining column mapping broken**~~ — FIXED: word-boundary matching, source field mapping, priority reorder (company → source → name), unmapped columns to _extra
+- ~~**List detail + Contacts page name column wrong**~~ — FIXED: list detail `GET /api/lists/:id` now COALESCEs `persons.first_name + last_name` over `prospects.name`. Contacts page already correct (reads from `persons` directly).
+- ~~**Email addresses written as company_name in affiliations**~~ — FIXED: all write paths (import-all, aggregation trigger, CSV upload, leads import) now check for `@` before writing to `affiliations.company_name`.
 
 ### Immediate Next Tasks (New Session)
 
 1. **/api/stats 401 fix** — sidebar polling still returns 401, investigate and fix
 2. **Zoho CRM Push UI** — P2 #6, push button on Contacts page, module select, push history
 3. **Import-all progress UI** — frontend polling for import_status + progress bar (backend ready, frontend needs implementation)
+4. **DB Schema Guide** — document all tables with columns, relationships, and which UI pages use them
 
 ---
 
