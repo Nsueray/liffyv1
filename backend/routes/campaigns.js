@@ -820,7 +820,7 @@ router.get('/:id/analytics', authRequired, async (req, res) => {
 
     const campaign = campRes.rows[0];
 
-    // 1. Summary: event_type counts
+    // 1. Summary: event_type counts (campaign_events with campaign_recipients fallback)
     const summaryRes = await db.query(
       `SELECT event_type, COUNT(*) as count
        FROM campaign_events
@@ -832,13 +832,44 @@ router.get('/:id/analytics', authRequired, async (req, res) => {
     const counts = {};
     summaryRes.rows.forEach(r => { counts[r.event_type] = parseInt(r.count, 10); });
 
-    const sent = counts.sent || 0;
-    const delivered = counts.delivered || 0;
-    const opens = counts.open || 0;
-    const clicks = counts.click || 0;
-    const bounces = counts.bounce || 0;
-    const spamReports = counts.spam_report || 0;
-    const unsubscribes = counts.unsubscribe || 0;
+    let sent = counts.sent || 0;
+    let delivered = counts.delivered || 0;
+    let opens = counts.open || 0;
+    let clicks = counts.click || 0;
+    let bounces = counts.bounce || 0;
+    let spamReports = counts.spam_report || 0;
+    let unsubscribes = counts.unsubscribe || 0;
+    let replies = counts.reply || 0;
+    let dropped = counts.dropped || 0;
+    let deferred = counts.deferred || 0;
+    let dataSource = 'campaign_events';
+
+    // Fallback: if campaign_events is empty, aggregate from campaign_recipients
+    if (summaryRes.rows.length === 0) {
+      const fallbackRes = await db.query(
+        `SELECT
+           COUNT(*) FILTER (WHERE status IN ('sent','delivered','opened','clicked','bounced')) as sent,
+           COUNT(*) FILTER (WHERE status = 'delivered') as delivered,
+           COUNT(*) FILTER (WHERE status = 'opened') as opened,
+           COUNT(*) FILTER (WHERE status = 'clicked') as clicked,
+           COUNT(*) FILTER (WHERE status = 'bounced') as bounced,
+           COUNT(*) FILTER (WHERE opened_at IS NOT NULL) as opened_any,
+           COUNT(*) FILTER (WHERE clicked_at IS NOT NULL) as clicked_any,
+           COUNT(*) FILTER (WHERE bounced_at IS NOT NULL) as bounced_any,
+           COUNT(*) FILTER (WHERE delivered_at IS NOT NULL) as delivered_any
+         FROM campaign_recipients
+         WHERE campaign_id = $1 AND organizer_id = $2`,
+        [campaignId, organizerId]
+      );
+      const fb = fallbackRes.rows[0];
+      sent = parseInt(fb.sent) || 0;
+      // Use the broader timestamp-based counts for engagement metrics
+      delivered = Math.max(parseInt(fb.delivered) || 0, parseInt(fb.delivered_any) || 0);
+      opens = Math.max(parseInt(fb.opened) || 0, parseInt(fb.opened_any) || 0);
+      clicks = Math.max(parseInt(fb.clicked) || 0, parseInt(fb.clicked_any) || 0);
+      bounces = Math.max(parseInt(fb.bounced) || 0, parseInt(fb.bounced_any) || 0);
+      dataSource = 'campaign_recipients';
+    }
 
     const base = sent || 1; // avoid division by zero
     const summary = {
@@ -849,30 +880,53 @@ router.get('/:id/analytics', authRequired, async (req, res) => {
       bounces,
       spam_reports: spamReports,
       unsubscribes,
-      replies: counts.reply || 0,
-      dropped: counts.dropped || 0,
-      deferred: counts.deferred || 0,
+      replies,
+      dropped,
+      deferred,
       delivery_rate: +(delivered / base * 100).toFixed(2),
       open_rate: +(opens / base * 100).toFixed(2),
       click_rate: +(opens > 0 ? clicks / opens * 100 : 0).toFixed(2),
       bounce_rate: +(bounces / base * 100).toFixed(2),
       spam_rate: +(spamReports / base * 100).toFixed(2),
-      unsubscribe_rate: +(unsubscribes / base * 100).toFixed(2)
+      unsubscribe_rate: +(unsubscribes / base * 100).toFixed(2),
+      data_source: dataSource
     };
 
     // 2. Timeline: bucketized by hour or day
     const bucket = req.query.bucket === 'hour' ? 'hour' : 'day';
-    const timelineRes = await db.query(
-      `SELECT
-         date_trunc($3, occurred_at) as period,
-         event_type,
-         COUNT(*) as count
-       FROM campaign_events
-       WHERE campaign_id = $1 AND organizer_id = $2
-       GROUP BY period, event_type
-       ORDER BY period ASC`,
-      [campaignId, organizerId, bucket]
-    );
+    let timelineRes;
+
+    if (dataSource === 'campaign_events') {
+      timelineRes = await db.query(
+        `SELECT
+           date_trunc($3, occurred_at) as period,
+           event_type,
+           COUNT(*) as count
+         FROM campaign_events
+         WHERE campaign_id = $1 AND organizer_id = $2
+         GROUP BY period, event_type
+         ORDER BY period ASC`,
+        [campaignId, organizerId, bucket]
+      );
+    } else {
+      // Fallback: build timeline from campaign_recipients timestamps
+      timelineRes = await db.query(
+        `SELECT period, event_type, COUNT(*) as count FROM (
+           SELECT date_trunc($3, sent_at) as period, 'sent' as event_type FROM campaign_recipients WHERE campaign_id = $1 AND organizer_id = $2 AND sent_at IS NOT NULL
+           UNION ALL
+           SELECT date_trunc($3, delivered_at), 'delivered' FROM campaign_recipients WHERE campaign_id = $1 AND organizer_id = $2 AND delivered_at IS NOT NULL
+           UNION ALL
+           SELECT date_trunc($3, opened_at), 'open' FROM campaign_recipients WHERE campaign_id = $1 AND organizer_id = $2 AND opened_at IS NOT NULL
+           UNION ALL
+           SELECT date_trunc($3, clicked_at), 'click' FROM campaign_recipients WHERE campaign_id = $1 AND organizer_id = $2 AND clicked_at IS NOT NULL
+           UNION ALL
+           SELECT date_trunc($3, bounced_at), 'bounce' FROM campaign_recipients WHERE campaign_id = $1 AND organizer_id = $2 AND bounced_at IS NOT NULL
+         ) sub
+         GROUP BY period, event_type
+         ORDER BY period ASC`,
+        [campaignId, organizerId, bucket]
+      );
+    }
 
     // Pivot timeline: group by period, with event counts
     const timelineMap = new Map();
@@ -903,14 +957,27 @@ router.get('/:id/analytics', authRequired, async (req, res) => {
     }));
 
     // 4. Bounce Breakdown: hard vs soft vs unknown
-    const bounceRes = await db.query(
-      `SELECT reason, COUNT(*) as count
-       FROM campaign_events
-       WHERE campaign_id = $1 AND organizer_id = $2
-         AND event_type = 'bounce'
-       GROUP BY reason`,
-      [campaignId, organizerId]
-    );
+    let bounceRes;
+    if (dataSource === 'campaign_events') {
+      bounceRes = await db.query(
+        `SELECT reason, COUNT(*) as count
+         FROM campaign_events
+         WHERE campaign_id = $1 AND organizer_id = $2
+           AND event_type = 'bounce'
+         GROUP BY reason`,
+        [campaignId, organizerId]
+      );
+    } else {
+      // Fallback: use last_error from campaign_recipients
+      bounceRes = await db.query(
+        `SELECT last_error as reason, COUNT(*) as count
+         FROM campaign_recipients
+         WHERE campaign_id = $1 AND organizer_id = $2
+           AND bounced_at IS NOT NULL
+         GROUP BY last_error`,
+        [campaignId, organizerId]
+      );
+    }
 
     let hardBounces = 0;
     let softBounces = 0;
