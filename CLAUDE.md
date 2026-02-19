@@ -720,14 +720,14 @@ Miners NEVER:
 - **Name field shows company name for some records** (minor) — Excel imports where name column was empty picked up company name as first_name. Legacy data, not recurring.
 - **"Web Search" appearing as name/company in a few records** (minor) — stale data from early mining runs, not recurring.
 - ~~**"Exclude Invalid" default filter lost on Contacts page**~~ — FIXED: `useState('exclude_invalid')` default, `clearFilters` resets to `exclude_invalid`, `hasActiveFilters` treats it as default. (commit: a861502 in liffy-ui)
-- **Import preview `total_with_email` count bug** — import-all preview may report wrong count
+- ~~**Import preview `total_with_email` count bug**~~ — FIXED: frontend was accessing `data.stats.total_with_email` from 202 background response that doesn't include stats. Now uses already-fetched `importPreview` data. (commit: db641b2 in liffy-ui)
 
 ### Immediate Next Tasks (New Session)
 
 1. ~~**DB Schema Guide**~~ — ✅ DONE: `DB_SCHEMA.md` — 20 tables, all columns, relationships, UI page mapping, data flow diagrams, migration history
 2. ~~**Canonical Migration Plan**~~ — ✅ DONE: `MIGRATION_PLAN.md` — 5-step legacy removal roadmap (Step 0: campaign_recipients person_id, Step 1: list_members person_id, Step 2: dual-write removal, Step 3: campaign_events backfill+freeze, Step 4: archive+cleanup). Updated with ChatGPT review feedback: name parse strategy, backfill scripts, CHECK→NOT NULL safety, urlMiner gap noted.
 3. **Zoho CRM Push UI** — P2 #6, push button on Contacts page, module select, push history
-4. **Import preview `total_with_email` bug fix** — investigate and fix count discrepancy
+4. ~~**Import preview `total_with_email` bug fix**~~ — ✅ DONE: frontend used 202 response stats (doesn't exist), now uses importPreview data
 
 ---
 
