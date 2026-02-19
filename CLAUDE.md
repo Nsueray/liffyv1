@@ -91,7 +91,7 @@ Engagement is stored as events, not scores.
 
 ---
 
-## Database — Current State (20 tables)
+## Database — Current State (20 tables, 22 migrations)
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -139,7 +139,7 @@ Phase 4 — Remove legacy tables (only when fully migrated and tested).
 
 **Current phase: Late Phase 3 (approaching Phase 4)**
 
-All migrations (001–020) applied in production. 20 tables active.
+All migrations (001–022) applied in production. 20 tables active.
 `AGGREGATION_PERSIST=true` set on Render — mining pipeline writes to `persons` + `affiliations`.
 All import paths (CSV upload, import-all, leads/import) dual-write to both legacy and canonical tables.
 Campaign resolve prefers canonical data with legacy fallback.
@@ -268,6 +268,13 @@ Default sample: `{ first_name: "John", last_name: "Doe", company: "Acme Corp", .
 - **Dual-write (Phase 3 pattern):**
   - Legacy: `prospects` (check-then-insert/update) + `list_members`
   - Canonical: `persons` UPSERT + `affiliations` UPSERT (if company present)
+- **Background processing for large files** (>= 500 rows):
+  - Returns **202 Accepted** immediately with `{ status: "processing", list_id, ... }`
+  - Rows processed in background in batches of 200 with per-batch transactions
+  - Progress tracked in `lists.import_status` + `lists.import_progress` (JSONB)
+  - Frontend polls `GET /api/lists/:id` for `import_status` (`processing` → `completed`/`failed`)
+  - Auto-queue verification runs after background completion
+- Small files (< 500 rows) still process inline (single transaction, returns 201)
 - Response includes `canonical_sync: { persons_upserted, affiliations_upserted }`
 - Route registered BEFORE `/:id` routes to avoid Express parameter collision
 
@@ -368,16 +375,32 @@ Frontend-facing canonical persons + affiliations endpoints. Replaces legacy `pro
 
 ---
 
-## Import Dual-Write (Phase 3)
+## Import Dual-Write (Phase 3) — Background Batch Processing
 
-All import paths now dual-write to canonical tables:
+All import paths now dual-write to canonical tables. Large imports use **background batch processing** to avoid Render's 30s request timeout.
 
-| Import Path | File | Legacy Write | Canonical Write |
-|-------------|------|--------------|-----------------|
-| CSV Upload | `routes/lists.js` | `prospects` + `list_members` | `persons` UPSERT + `affiliations` UPSERT |
-| Import All (mining) | `routes/miningResults.js` | `prospects` + `list_members` | `persons` UPSERT + `affiliations` UPSERT |
-| Lead Import | `routes/leads.js` | `prospects` + `list_members` | `persons` UPSERT + `affiliations` UPSERT |
-| Aggregation Trigger | `services/aggregationTrigger.js` | — | `persons` + `affiliations` (canonical only) |
+| Import Path | File | Legacy Write | Canonical Write | Background? |
+|-------------|------|--------------|-----------------|-------------|
+| CSV Upload | `routes/lists.js` | `prospects` + `list_members` | `persons` UPSERT + `affiliations` UPSERT | >= 500 rows |
+| Import All (mining) | `routes/miningResults.js` | `prospects` + `list_members` | `persons` UPSERT + `affiliations` UPSERT | Always |
+| Lead Import | `routes/leads.js` | `prospects` + `list_members` | `persons` UPSERT + `affiliations` UPSERT | No |
+| Aggregation Trigger | `services/aggregationTrigger.js` | — | `persons` + `affiliations` (canonical only) | No |
+
+**Background import flow (import-all + large CSV):**
+```
+POST request → validate + count → return 202 Accepted → setImmediate()
+  → fetch batch (200 rows) → BEGIN transaction → process rows → COMMIT
+  → update progress in mining_jobs.import_progress / lists.import_progress
+  → repeat until done → set import_status = 'completed'
+```
+
+**Tracking columns** (migration 022):
+- `mining_jobs.import_status` — `NULL` | `processing` | `completed` | `failed`
+- `mining_jobs.import_progress` — JSONB: `{ imported, skipped, duplicates, total, persons_upserted, affiliations_upserted, started_at, completed_at, errors }`
+- `lists.import_status` — same values (for CSV upload)
+- `lists.import_progress` — same structure
+
+**Crash recovery:** If `import_status = 'processing'` for > 5 minutes, the next import-all call treats it as stale and allows restart. Already-imported records (status = 'imported') are skipped.
 
 All import responses include `canonical_sync: { persons_upserted, affiliations_upserted }`.
 
@@ -442,7 +465,7 @@ persons + affiliations → mapPersonToZoho() → Zoho CRM v7 API (batch 100/requ
 
 ---
 
-## Migrations (20 files)
+## Migrations (22 files)
 
 | # | File | Tables |
 |---|------|--------|
@@ -466,6 +489,7 @@ persons + affiliations → mapPersonToZoho() → Zoho CRM v7 API (batch 100/requ
 | 019 | `add_verification_columns.sql` | ALTER `organizers`, ALTER `persons`, `verification_queue` |
 | 020 | `add_zoho_crm_columns.sql` | ALTER `organizers`, `zoho_push_log` |
 | 021 | `prospect_intents_unique_constraint.sql` | UNIQUE INDEX on `prospect_intents` (dedup) |
+| 022 | `add_import_progress_columns.sql` | ALTER `mining_jobs`, ALTER `lists` (import_status, import_progress) |
 
 ---
 
@@ -580,12 +604,15 @@ Miners NEVER:
 - Prospects page search is client-side only (backend `/api/intents` doesn't support text search param)
 - ~~Unsubscribe footer optional (user-initiated only)~~ — FIXED: compliance pipeline now mandatory in campaignSend (f1b1636)
 - ~~`campaign_events` backfill not yet run~~ — still not run, but per-campaign analytics has fallback. Org-wide reports still need fix.
+- ~~Import-all 30s timeout on 3000+ records~~ — FIXED: background batch processing with 200-record batches (commit: 450a34c)
+- **Frontend import-all polling not yet implemented** — backend returns 202 + `import_status`/`import_progress`, but liffy-ui needs to poll `GET /api/mining/jobs/:id` and show progress bar
 
 ### Immediate Next Tasks (New Session)
 
 1. **Reports/Dashboard backfill fix** — add `campaign_recipients` fallback to `GET /api/reports/organizer/overview` endpoint (same pattern as `campaigns.js` analytics fallback at line ~848). This will make Dashboard stats + Reports page show real data even without `campaign_events` backfill.
 2. **/api/stats 401 fix** — sidebar polling still returns 401, investigate and fix
 3. **Zoho CRM Push UI** — P2 #6, push button on Contacts page, module select, push history
+4. **Import-all progress UI** — frontend polling for import_status + progress bar (backend ready, frontend needs implementation)
 
 ---
 
