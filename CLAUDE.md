@@ -540,6 +540,39 @@ Miners NEVER:
 7. ~~**Scraping module improvements** — pagination support for multi-page sites~~ ✅ DONE
 8. ~~**Phase 3 migration** — import-all dual-write, campaign resolve canonical, persons API, intents API~~ ✅ DONE
 9. ~~**Remove nodemailer** — dropped from package.json~~ ✅ DONE
+10. **Frontend UI build** — liffy-ui (Next.js) pages for canonical APIs ← CURRENT
+
+---
+
+## UI Build Progress (liffy-ui — Next.js 16 + Tailwind + Radix UI)
+
+**Frontend repo:** `Nsueray/liffy-ui` → Render: liffy.app
+**Backend repo:** `Nsueray/liffyv1` → Render: api.liffy.app
+
+### Completed UI Tasks
+
+- ✅ **Settings: ZeroBounce + Zoho CRM** — API key input with show/hide, credit balance check, Zoho OAuth2 credentials with validation + disconnect (commit: 75c575f)
+- ✅ **Contacts page (Leads → Persons migration)** — canonical `/api/persons` endpoint, stats cards (Total/Verified/Unverified/Prospects), search + 4 filters, contact detail slide-over panel with affiliations/engagement/intents/Zoho history (commit: b35562a)
+- ✅ **Sidebar: Leads → Contacts** rename + breadcrumb/title fix
+- ✅ **Backend fix:** `persons/:id` SQL — `event_at → occurred_at`, `recipient_email → email` (commits: 28e0f69, 068f7ba)
+
+### Next UI Tasks (Priority Order)
+
+| Priority | Task | Backend Endpoints |
+|----------|------|-------------------|
+| P0 #3 | Campaign Analytics — rate cards, timeline chart, top links, bounce breakdown | `GET /api/campaigns/:id/analytics` |
+| P1 #4 | Prospects (Intents) — stub → real page with intent list, filters, stats | `GET /api/intents`, `/stats` |
+| P1 #5 | Verification Dashboard — queue status, credit balance, batch verify | `GET /api/verification/queue-status`, `/credits` |
+| P1 #6 | Person Detail page — full-page detail (expand current slide-over) | `GET /api/persons/:id` |
+| P2 #7 | Zoho CRM Push UI — push button, module select, push history | `POST /api/zoho/push`, `GET /push-history` |
+| P2 #8 | Dashboard — stub → real dashboard with org-wide stats | `GET /api/reports/organizer/overview` |
+| P2 #9 | Reports page — campaign comparison, domain breakdown | `GET /api/reports/campaign/:id` |
+
+### Known Issues
+
+- Sidebar `/api/stats` endpoint returns 401 if no auth token (fixed: auth header added)
+- ZeroBounce account not yet configured — settings UI untested against live API
+- `/api/stats` polled every 30s — may add log noise in production
 
 ---
 
