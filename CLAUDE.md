@@ -305,6 +305,32 @@ SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → 
 Preview uses a local `processTemplate()` that mirrors the one in `campaignSend.js`.
 Default sample: `{ first_name: "John", last_name: "Doe", company: "Acme Corp", ... }`. `{{unsubscribe_url}}` resolves to `"#"` in preview.
 
+### Template Placeholder Fallback (`backend/routes/campaignSend.js`, `emailTemplates.js`)
+
+Both `processTemplate()` functions (campaignSend + emailTemplates preview) support:
+
+**Computed field — `{{display_name}}`:**
+- `first_name` varsa → first_name
+- `first_name` yoksa, `company_name` varsa → company_name
+- Hiçbiri yoksa → `"Valued Partner"`
+
+**Pipe fallback syntax — `{{field1|field2|"literal"}}`:**
+- Segments are tried left-to-right, first non-empty value wins
+- Field names: `first_name`, `last_name`, `name`, `company_name`, `company`, `display_name`, `email`, `country`, `position`, `website`, `tag`
+- Quoted strings (`"..."` or `'...'`) are literal fallbacks
+- Pipe expressions are processed BEFORE simple placeholders
+
+**Examples:**
+| Template | Data | Output |
+|----------|------|--------|
+| `Dear {{display_name}},` | `{first_name: "John"}` | `Dear John,` |
+| `Dear {{display_name}},` | `{company_name: "Acme"}` | `Dear Acme,` |
+| `Dear {{display_name}},` | `{}` | `Dear Valued Partner,` |
+| `{{first_name\|company_name\|"Partner"}}` | `{company_name: "Acme"}` | `Acme` |
+| `{{first_name\|company_name\|"Partner"}}` | `{}` | `Partner` |
+
+**Frontend:** Template editor has `{{display_name}}` as first placeholder chip (green, with tooltip). Tip text below chips explains pipe fallback syntax.
+
 ### Plain Text → HTML Auto-Convert (`backend/routes/campaignSend.js`)
 
 `convertPlainTextToHtml(text)` runs after `processTemplate()`, before `processEmailCompliance()`.
@@ -328,7 +354,7 @@ Native `contentEditable` div with lightweight toolbar — no external rich text 
 
 **Toolbar buttons:** Bold, Italic, Underline, Font Size (Small/Normal/Large), Insert Link, Clear Formatting
 **Implementation:** `document.execCommand()` for all formatting commands
-**Placeholder insertion:** Clickable chips below editor insert `{{first_name}}`, `{{company_name}}`, etc. at cursor via `insertText`
+**Placeholder insertion:** Clickable chips below editor insert `{{display_name}}`, `{{first_name}}`, `{{company_name}}`, etc. at cursor via `insertText`. `{{display_name}}` chip is green with tooltip. Tip text explains pipe fallback syntax.
 **Save:** `innerHTML` from contentEditable div sent as `body_html` to API
 **Edit:** Existing `body_html` loaded into contentEditable div when modal opens
 **Empty state:** CSS `::before` placeholder via `data-placeholder` attribute
@@ -692,6 +718,10 @@ Miners NEVER:
 - ✅ **File Mining Column Mapping Fix** — Excel/CSV column mapping was broken: `contact_name` got "Social Media Ads" (Lead Source values) instead of actual names. Root causes: (1) `cell.includes("ad")` matched "le**ad** source" → name field (word-boundary fix via `cellMatchesKeyword()`), (2) `detectFieldFromValue()` checked name pattern before company indicators ("Acme Corp" → name instead of company), (3) no `source`/`lead_source` field mapping existed. Fix: word-boundary matching, priority reorder (company → source → name), `source` keyword mapping, unmapped columns preserved in `_extra` → `extra_fields` in raw JSON. 5 files changed: excelExtractor, tableMiner, unstructuredMiner, fileOrchestrator, fileMiner.
 - ✅ **List Detail + Contacts Name Display Fix** — List detail page showed wrong names (e.g. "Social Media Ads") because SQL read `prospects.name` instead of canonical `persons.first_name + last_name`. Fixed `GET /api/lists/:id` to COALESCE persons names over prospects. Also blocked email addresses from being written as `affiliations.company_name` across all 4 write paths (import-all, aggregation trigger, CSV upload, leads import) with `@` check.
 - ✅ **Contacts Page Company Column Fix** — Company column showed pipe-separated junk (e.g. "Name | No company | email | Country") from corrupted `affiliations.company_name`. Fixed: (1) LATERAL JOIN excludes `@` rows, (2) CASE/SPLIT_PART extracts first segment from pipe data, (3) all write paths block `|` in company_name, (4) cleanup script `backend/scripts/cleanup_affiliations.js` for existing data. **Cleanup run:** 611 records cleaned in production.
+- ✅ **Import Preview Fix** — "Cannot read properties of undefined (reading 'total_with_email')" crash when clicking Import All. Backend POST returns 202 without `stats` object; frontend now uses already-fetched `importPreview` data. (commit: db641b2 in liffy-ui)
+- ✅ **Lists Index Counts Shadow Route Fix** — GET /api/lists returned raw columns without counts because `prospects.js` had 4 legacy `/api/lists/*` routes mounted before `listsRouter` in server.js. Removed shadow routes from prospects.js. (commit: 86684be)
+- ✅ **Console Page Hidden** — Mining job console page (`/mining/jobs/[id]/console`) was non-functional: `mining_job_logs` table never written to, `/logs` endpoint missing, no WebSocket/SSE, no pause/resume/cancel. Removed "View Live Console" link from job detail page, redirected results back button to `/mining/jobs`. Page file kept for future implementation. (commit: 9d0581d in liffy-ui)
+- ✅ **Template Placeholder Fallback** — `{{display_name}}` computed field (first_name → company_name → "Valued Partner") + pipe fallback syntax `{{field1|field2|"literal"}}`. Both `processTemplate()` functions updated. Frontend: green chip + tooltip + tip text. (commits: 3d286f5, 357b685 in liffy-ui)
 
 ### Next UI Tasks (Priority Order)
 
@@ -721,13 +751,19 @@ Miners NEVER:
 - **"Web Search" appearing as name/company in a few records** (minor) — stale data from early mining runs, not recurring.
 - ~~**"Exclude Invalid" default filter lost on Contacts page**~~ — FIXED: `useState('exclude_invalid')` default, `clearFilters` resets to `exclude_invalid`, `hasActiveFilters` treats it as default. (commit: a861502 in liffy-ui)
 - ~~**Import preview `total_with_email` count bug**~~ — FIXED: frontend was accessing `data.stats.total_with_email` from 202 background response that doesn't include stats. Now uses already-fetched `importPreview` data. (commit: db641b2 in liffy-ui)
+- **Mining console page hidden** — page exists at `/mining/jobs/[id]/console/page.tsx` but all navigation links removed. Requires: log writing in mining services, `/logs` endpoint, job control endpoints (pause/resume/cancel). Future feature.
 
 ### Immediate Next Tasks (New Session)
 
-1. ~~**DB Schema Guide**~~ — ✅ DONE: `DB_SCHEMA.md` — 20 tables, all columns, relationships, UI page mapping, data flow diagrams, migration history
-2. ~~**Canonical Migration Plan**~~ — ✅ DONE: `MIGRATION_PLAN.md` — 5-step legacy removal roadmap (Step 0: campaign_recipients person_id, Step 1: list_members person_id, Step 2: dual-write removal, Step 3: campaign_events backfill+freeze, Step 4: archive+cleanup). Updated with ChatGPT review feedback: name parse strategy, backfill scripts, CHECK→NOT NULL safety, urlMiner gap noted.
+1. ~~**DB Schema Guide**~~ — ✅ DONE
+2. ~~**Canonical Migration Plan**~~ — ✅ DONE
 3. **Zoho CRM Push UI** — P2 #6, push button on Contacts page, module select, push history
-4. ~~**Import preview `total_with_email` bug fix**~~ — ✅ DONE: frontend used 202 response stats (doesn't exist), now uses importPreview data
+4. ~~**Import preview `total_with_email` bug fix**~~ — ✅ DONE
+5. ~~**Lists index counts shadow route fix**~~ — ✅ DONE: removed 4 legacy routes from prospects.js
+6. ~~**Console page hide**~~ — ✅ DONE: removed navigation links, kept page for future
+7. ~~**Template placeholder fallback**~~ — ✅ DONE: display_name + pipe syntax
+8. **Frontend import-all polling** — show progress bar for background import-all
+9. **Mining console page** (future) — implement log writing + /logs endpoint + job control
 
 ---
 
