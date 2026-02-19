@@ -213,7 +213,7 @@ router.get('/:id', authRequired, async (req, res) => {
 
     // Get campaign events summary
     const eventsRes = await db.query(
-      `SELECT event_type, COUNT(*) AS count, MAX(event_at) AS last_at
+      `SELECT event_type, COUNT(*) AS count, MAX(occurred_at) AS last_at
        FROM campaign_events
        WHERE recipient_email = $1 AND organizer_id = $2
        GROUP BY event_type
