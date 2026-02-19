@@ -145,14 +145,38 @@ router.post('/verify-list', authRequired, async (req, res) => {
     }
 
     if (emailList.length === 0) {
-      return res.json({ queued: 0, skipped: 0, total: 0 });
+      return res.json({ queued: 0, already_verified: 0, already_in_queue: 0, total: 0 });
     }
 
-    const result = await queueEmails(organizer_id, emailList, list_id ? 'list' : 'manual');
+    // Filter out already-verified emails (valid, invalid, catchall) from persons table
+    // Only queue emails where verification_status IS NULL or 'unknown'
+    const normalizedEmails = emailList.map(e => e.toLowerCase().trim());
+    const verifiedRes = await db.query(
+      `SELECT LOWER(email) AS email, verification_status
+       FROM persons
+       WHERE organizer_id = $1
+         AND LOWER(email) = ANY($2)
+         AND verification_status IN ('valid', 'invalid', 'catchall')`,
+      [organizer_id, normalizedEmails]
+    );
+    const alreadyVerifiedSet = new Set(verifiedRes.rows.map(r => r.email));
+    const already_verified = alreadyVerifiedSet.size;
+
+    // Only queue emails that need verification
+    const emailsToVerify = emailList.filter(
+      e => !alreadyVerifiedSet.has(e.toLowerCase().trim())
+    );
+
+    if (emailsToVerify.length === 0) {
+      return res.json({ queued: 0, already_verified, already_in_queue: 0, total: emailList.length });
+    }
+
+    const result = await queueEmails(organizer_id, emailsToVerify, list_id ? 'list' : 'manual');
 
     res.json({
       queued: result.queued,
-      skipped: result.skipped,
+      already_verified,
+      already_in_queue: result.skipped,
       total: emailList.length
     });
   } catch (err) {
