@@ -305,9 +305,12 @@ SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → 
 Preview uses a local `processTemplate()` that mirrors the one in `campaignSend.js`.
 Default sample: `{ first_name: "John", last_name: "Doe", company: "Acme Corp", ... }`. `{{unsubscribe_url}}` resolves to `"#"` in preview.
 
-### Template Placeholder Fallback (`backend/routes/campaignSend.js`, `emailTemplates.js`)
+### Template Placeholder Fallback (`backend/utils/templateProcessor.js`)
 
-Both `processTemplate()` functions (campaignSend + emailTemplates preview) support:
+Single source of truth: `backend/utils/templateProcessor.js` exports `processTemplate()` + `convertPlainTextToHtml()`.
+Imported by: `campaignSend.js`, `worker.js`, `emailTemplates.js`.
+
+Supports:
 
 **Computed field — `{{display_name}}`:**
 - `first_name` varsa → first_name
@@ -722,6 +725,8 @@ Miners NEVER:
 - ✅ **Lists Index Counts Shadow Route Fix** — GET /api/lists returned raw columns without counts because `prospects.js` had 4 legacy `/api/lists/*` routes mounted before `listsRouter` in server.js. Removed shadow routes from prospects.js. (commit: 86684be)
 - ✅ **Console Page Hidden** — Mining job console page (`/mining/jobs/[id]/console`) was non-functional: `mining_job_logs` table never written to, `/logs` endpoint missing, no WebSocket/SSE, no pause/resume/cancel. Removed "View Live Console" link from job detail page, redirected results back button to `/mining/jobs`. Page file kept for future implementation. (commit: 9d0581d in liffy-ui)
 - ✅ **Template Placeholder Fallback** — `{{display_name}}` computed field (first_name → company_name → "Valued Partner") + pipe fallback syntax `{{field1|field2|"literal"}}`. Both `processTemplate()` functions updated. Frontend: green chip + tooltip + tip text. (commits: 3d286f5, 357b685 in liffy-ui)
+- ✅ **processTemplate Unification (CRITICAL)** — worker.js had outdated processTemplate (no meta.first_name, no display_name, no pipe syntax). Production sends ALL emails through worker → placeholders not replaced. Extracted to `backend/utils/templateProcessor.js` as single source of truth, imported by campaignSend.js + worker.js + emailTemplates.js. Also added missing `convertPlainTextToHtml` to worker send flow. (commit: fa916e5)
+- ✅ **Templates Page Action Buttons Fix** — Preview/Edit/Delete buttons invisible due to `overflow-hidden` on table container + `whitespace-nowrap` on Subject column. Changed to `overflow-x-auto`, Subject gets `max-w-xs truncate`. (commit: f50b8ed in liffy-ui)
 
 ### Next UI Tasks (Priority Order)
 
