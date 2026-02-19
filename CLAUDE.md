@@ -573,28 +573,19 @@ Miners NEVER:
 
 ### Known Issues
 
-- Sidebar `/api/stats` endpoint returns 401 if no auth token (fixed: auth header added)
+- **Reports + Dashboard org-wide stats show 0** — `GET /api/reports/organizer/overview` reads from `campaign_events` table which has NOT been backfilled in production. Per-campaign analytics (`GET /api/campaigns/:id/analytics`) has `campaign_recipients` fallback but org-wide reports endpoint does NOT. Fix: add `campaign_recipients` fallback to reports endpoint (same pattern as `campaigns.js` analytics).
+- **Campaign Comparison table per-campaign stats all 0** — same root cause: `campaign_events` not backfilled, `/:id/stats` reads from `campaign_recipients` (works), but org-level event counts are empty.
+- `/api/stats` 401 Unauthorized still repeating in console — sidebar polls every 30s, auth header was added but issue persists
 - ZeroBounce account not yet configured — settings UI untested against live API
-- `/api/stats` polled every 30s — may add log noise in production
-- `campaign_events` backfill not yet run in production — analytics uses `campaign_recipients` fallback until backfill runs
 - Prospects page search is client-side only (backend `/api/intents` doesn't support text search param)
 - ~~Unsubscribe footer optional (user-initiated only)~~ — FIXED: compliance pipeline now mandatory in campaignSend (f1b1636)
+- ~~`campaign_events` backfill not yet run~~ — still not run, but per-campaign analytics has fallback. Org-wide reports still need fix.
 
 ### Immediate Next Tasks (New Session)
 
-1. ~~**Migration 021 çalıştır**~~ ✅ psql ile çalıştırıldı, production'da aktif
-2. ~~**Campaign Analytics Bug**~~ ✅ Fixed — fallback to `campaign_recipients` (commit: 564caf5)
-3. ~~**Prospects (Intents) sayfası**~~ ✅ Built — full page with stats, filters, table (commit: 9ed12e9)
-4. ~~**Campaign Analytics UI**~~ ✅ Built — rate cards, timeline chart, top links, bounce breakdown, recipients table
-5. ~~**Verification Dashboard**~~ ✅ Built — queue status, credit balance, single verify, batch process, queue table
-
-6. ~~**Person Detail page**~~ ✅ Built — full-page /leads/[id] with all sections (commit: 8bede92)
-
-7. ~~**Dashboard**~~ ✅ Built — real dashboard with stats, recent activity, quick actions (commit: 7835ec9)
-
-8. ~~**Reports page**~~ ✅ Built — org overview, campaign comparison, domain breakdown, bounce reasons (commit: 42732bb)
-
-9. **Zoho CRM Push UI** — P2 #6, push button, module select, push history
+1. **Reports/Dashboard backfill fix** — add `campaign_recipients` fallback to `GET /api/reports/organizer/overview` endpoint (same pattern as `campaigns.js` analytics fallback at line ~848). This will make Dashboard stats + Reports page show real data even without `campaign_events` backfill.
+2. **/api/stats 401 fix** — sidebar polling still returns 401, investigate and fix
+3. **Zoho CRM Push UI** — P2 #6, push button on Contacts page, module select, push history
 
 ---
 
