@@ -712,7 +712,7 @@ Miners NEVER:
 - **Frontend import-all polling not yet implemented** — backend returns 202 + `import_status`/`import_progress`, but liffy-ui needs to poll `GET /api/mining/jobs/:id` and show progress bar
 - ~~**Verification worker silent after restart**~~ — FIXED: stuck `processing` items blocked pending-only query. Staleness recovery added (commit: 9e4141b)
 - ~~**List verification counts don't add up**~~ — FIXED: 3-way grouping (verified/invalid/unverified), `catchall` counted as verified, `invalid_count` separate field (commit: e603f12)
-- ~~**Lists index page all counts 0**~~ — FIXED: split into two queries, counts from `list_members` directly (commit: 2c76143)
+- ~~**Lists index page all counts 0**~~ — FIXED (twice): (1) split into two queries (commit: 2c76143), (2) removed 4 legacy shadow routes from `prospects.js` that intercepted `/api/lists` before `listsRouter` (commit: 86684be)
 - ~~**File mining column mapping broken**~~ — FIXED: word-boundary matching, source field mapping, priority reorder (company → source → name), unmapped columns to _extra
 - ~~**List detail + Contacts page name column wrong**~~ — FIXED: list detail `GET /api/lists/:id` now COALESCEs `persons.first_name + last_name` over `prospects.name`. Contacts page already correct (reads from `persons` directly).
 - ~~**Email addresses written as company_name in affiliations**~~ — FIXED: all write paths (import-all, aggregation trigger, CSV upload, leads import) now check for `@` before writing to `affiliations.company_name`.
