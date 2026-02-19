@@ -640,6 +640,7 @@ Miners NEVER:
 - ✅ **Reports/Dashboard Backfill Fix** — both `/api/reports/campaign/:id` and `/api/reports/organizer/overview` now fall back to `campaign_recipients` timestamps when `campaign_events` is empty. Covers event stats, timeline, domain breakdown, bounce reasons. Response includes `data_source` field. (commit: 814cce2)
 - ✅ **Verification Worker Fix + Staleness Recovery** — worker wasn't producing logs after restart because 349 items stuck in `processing` status blocked the `pending`-only query. Added staleness recovery (resets `processing` with `processed_at IS NULL` → `pending` each cycle), startup log, per-batch logging, stack traces in error catches, `.catch()` on async processor. (commit: 9e4141b)
 - ✅ **List Verification Counts Fix** — 3-way count grouping: verified (`valid`+`catchall`), invalid (`invalid`), unverified (`unknown`+NULL). Previously `catchall` was unverified and `invalid` was lumped into unverified causing totals > 100%. Detail endpoint now JOINs `persons` for canonical status. All 4 list endpoints consistent. (commit: e603f12)
+- ✅ **Lists Index Page Counts Fix** — GET /api/lists was returning 0 for all counts due to 4-table LEFT JOIN + GROUP BY issue. Split into two queries: list metadata + member counts (grouped by `lm.list_id` from `list_members`), merged in JS via map lookup. (commit: 2c76143)
 
 ### Next UI Tasks (Priority Order)
 
@@ -660,6 +661,7 @@ Miners NEVER:
 - **Frontend import-all polling not yet implemented** — backend returns 202 + `import_status`/`import_progress`, but liffy-ui needs to poll `GET /api/mining/jobs/:id` and show progress bar
 - ~~**Verification worker silent after restart**~~ — FIXED: stuck `processing` items blocked pending-only query. Staleness recovery added (commit: 9e4141b)
 - ~~**List verification counts don't add up**~~ — FIXED: 3-way grouping (verified/invalid/unverified), `catchall` counted as verified, `invalid_count` separate field (commit: e603f12)
+- ~~**Lists index page all counts 0**~~ — FIXED: split into two queries, counts from `list_members` directly (commit: 2c76143)
 
 ### Immediate Next Tasks (New Session)
 
