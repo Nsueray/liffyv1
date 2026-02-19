@@ -160,6 +160,7 @@ router.delete('/:id', authRequired, async (req, res) => {
 /**
  * Process template placeholders with recipient data.
  * Mirrors the logic from campaignSend.js processTemplate.
+ * Supports pipe fallback syntax: {{field1|field2|"literal"}}
  */
 function processTemplate(text, data, extras = {}) {
   if (!text) return "";
@@ -168,23 +169,48 @@ function processTemplate(text, data, extras = {}) {
   const nameParts = fullName.trim().split(/\s+/);
   const firstName = data.first_name || nameParts[0] || "";
   const lastName = data.last_name || (nameParts.length > 1 ? nameParts.slice(1).join(' ') : "");
+  const companyName = data.company || data.company_name || "";
+  const displayName = firstName || companyName || "Valued Partner";
+
+  const fields = {
+    first_name: firstName,
+    last_name: lastName,
+    name: fullName || `${firstName} ${lastName}`.trim(),
+    company_name: companyName,
+    company: companyName,
+    display_name: displayName,
+    email: data.email || "",
+    country: data.country || "",
+    position: data.position || "",
+    website: data.website || "",
+    tag: data.tag || ""
+  };
 
   let processed = text;
 
-  processed = processed.replace(/{{first_name}}/gi, firstName);
-  processed = processed.replace(/{{last_name}}/gi, lastName);
-  processed = processed.replace(/{{name}}/gi, fullName || `${firstName} ${lastName}`.trim());
-  processed = processed.replace(/{{company_name}}/gi, data.company || "");
-  processed = processed.replace(/{{company}}/gi, data.company || "");
-  processed = processed.replace(/{{email}}/gi, data.email || "");
-  processed = processed.replace(/{{country}}/gi, data.country || "");
-  processed = processed.replace(/{{position}}/gi, data.position || "");
-  processed = processed.replace(/{{website}}/gi, data.website || "");
-  processed = processed.replace(/{{tag}}/gi, data.tag || "");
+  // Step 1: Pipe fallback syntax — {{field1|field2|"literal"}}
+  processed = processed.replace(/\{\{([^}]*\|[^}]*)\}\}/gi, (match, inner) => {
+    const segments = inner.split('|');
+    for (const seg of segments) {
+      const trimmed = seg.trim();
+      const literalMatch = trimmed.match(/^["'](.*)["']$/);
+      if (literalMatch) {
+        return literalMatch[1];
+      }
+      const val = fields[trimmed.toLowerCase()];
+      if (val) return val;
+    }
+    return "";
+  });
+
+  // Step 2: Simple placeholders
+  for (const [key, val] of Object.entries(fields)) {
+    processed = processed.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'gi'), val);
+  }
 
   if (extras.unsubscribe_url) {
-    processed = processed.replace(/{{unsubscribe_url}}/gi, extras.unsubscribe_url);
-    processed = processed.replace(/{{unsubscribe_link}}/gi, extras.unsubscribe_url);
+    processed = processed.replace(/\{\{unsubscribe_url\}\}/gi, extras.unsubscribe_url);
+    processed = processed.replace(/\{\{unsubscribe_link\}\}/gi, extras.unsubscribe_url);
   }
 
   return processed;

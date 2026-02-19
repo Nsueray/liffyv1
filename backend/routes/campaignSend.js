@@ -34,21 +34,25 @@ function authRequired(req, res, next) {
 
 /**
  * Helper: Şablon Değişkeni Değiştirici
- * 
+ *
  * Desteklenen Placeholder'lar:
  * {{first_name}}   -> İlk isim
- * {{last_name}}    -> Soyisim  
+ * {{last_name}}    -> Soyisim
  * {{company_name}} -> Şirket adı
+ * {{display_name}} -> Otomatik: first_name → company_name → "Valued Partner"
  * {{email}}        -> Email adresi
  * {{country}}      -> Ülke
  * {{position}}     -> Pozisyon/Ünvan
  * {{website}}      -> Website
  * {{tag}}          -> Tag (sektör vb.)
  * {{unsubscribe_url}} -> Unsubscribe link
+ *
+ * Pipe fallback syntax:
+ * {{field1|field2|"literal"}} -> İlk dolu değeri kullan, yoksa sonrakine geç
  */
 function processTemplate(text, recipient, extras = {}) {
   if (!text) return "";
-  
+
   // Recipient verilerini hazırla
   // Meta verisi JSONB olduğu için obje olarak gelebilir
   let meta = {};
@@ -80,29 +84,65 @@ function processTemplate(text, recipient, extras = {}) {
   const tag = Array.isArray(meta.tags) ? (meta.tags[0] || "") : (meta.tag || "");
   const email = recipient.email || "";
 
-  // Değiştirme işlemi (Case insensitive)
+  // Computed: display_name (first_name → company_name → "Valued Partner")
+  const displayName = firstName || companyName || "Valued Partner";
+
+  // Field lookup map for pipe fallback syntax
+  const fields = {
+    first_name: firstName,
+    last_name: lastName,
+    name: fullName,
+    company_name: companyName,
+    company: companyName,
+    display_name: displayName,
+    email,
+    country,
+    position,
+    website,
+    tag
+  };
+
   let processed = text;
-  
+
+  // Step 1: Pipe fallback syntax — {{field1|field2|"literal"}}
+  processed = processed.replace(/\{\{([^}]*\|[^}]*)\}\}/gi, (match, inner) => {
+    const segments = inner.split('|');
+    for (const seg of segments) {
+      const trimmed = seg.trim();
+      // Check for quoted literal: "text" or 'text'
+      const literalMatch = trimmed.match(/^["'](.*)["']$/);
+      if (literalMatch) {
+        return literalMatch[1];
+      }
+      // Check field lookup
+      const val = fields[trimmed.toLowerCase()];
+      if (val) return val;
+    }
+    return "";
+  });
+
+  // Step 2: Simple placeholder'lar (Case insensitive)
   // İsim placeholder'ları
-  processed = processed.replace(/{{first_name}}/gi, firstName);
-  processed = processed.replace(/{{last_name}}/gi, lastName);
-  processed = processed.replace(/{{name}}/gi, fullName); // Geriye uyumluluk
-  
+  processed = processed.replace(/\{\{first_name\}\}/gi, firstName);
+  processed = processed.replace(/\{\{last_name\}\}/gi, lastName);
+  processed = processed.replace(/\{\{name\}\}/gi, fullName);
+  processed = processed.replace(/\{\{display_name\}\}/gi, displayName);
+
   // Şirket
-  processed = processed.replace(/{{company_name}}/gi, companyName);
-  processed = processed.replace(/{{company}}/gi, companyName); // Geriye uyumluluk
-  
+  processed = processed.replace(/\{\{company_name\}\}/gi, companyName);
+  processed = processed.replace(/\{\{company\}\}/gi, companyName);
+
   // Diğer alanlar
-  processed = processed.replace(/{{email}}/gi, email);
-  processed = processed.replace(/{{country}}/gi, country);
-  processed = processed.replace(/{{position}}/gi, position);
-  processed = processed.replace(/{{website}}/gi, website);
-  processed = processed.replace(/{{tag}}/gi, tag);
+  processed = processed.replace(/\{\{email\}\}/gi, email);
+  processed = processed.replace(/\{\{country\}\}/gi, country);
+  processed = processed.replace(/\{\{position\}\}/gi, position);
+  processed = processed.replace(/\{\{website\}\}/gi, website);
+  processed = processed.replace(/\{\{tag\}\}/gi, tag);
 
   // Unsubscribe
   if (extras.unsubscribe_url) {
-    processed = processed.replace(/{{unsubscribe_url}}/gi, extras.unsubscribe_url);
-    processed = processed.replace(/{{unsubscribe_link}}/gi, extras.unsubscribe_url);
+    processed = processed.replace(/\{\{unsubscribe_url\}\}/gi, extras.unsubscribe_url);
+    processed = processed.replace(/\{\{unsubscribe_link\}\}/gi, extras.unsubscribe_url);
   }
 
   return processed;
