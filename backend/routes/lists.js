@@ -586,47 +586,55 @@ router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
 
-    const result = await db.query(
-      `
-      SELECT
-        l.id,
-        l.name,
-        l.created_at,
-        l.import_status,
-        l.import_progress,
-        COUNT(lm.id) AS total_leads,
-        COUNT(lm.id) FILTER (
-          WHERE COALESCE(pn.verification_status, p.verification_status, 'unknown') IN ('valid', 'catchall')
-        ) AS verified_count,
-        COUNT(lm.id) FILTER (
-          WHERE COALESCE(pn.verification_status, p.verification_status, 'unknown') = 'invalid'
-        ) AS invalid_count
-      FROM lists l
-      LEFT JOIN list_members lm ON lm.list_id = l.id
-      LEFT JOIN prospects p ON p.id = lm.prospect_id
-      LEFT JOIN persons pn ON pn.organizer_id = l.organizer_id AND LOWER(pn.email) = LOWER(p.email)
-      WHERE l.organizer_id = $1
-      GROUP BY l.id, l.name, l.created_at, l.import_status, l.import_progress
-      ORDER BY l.created_at DESC
-      `,
+    // Query 1: list metadata
+    const listsResult = await db.query(
+      `SELECT id, name, created_at, import_status, import_progress
+       FROM lists
+       WHERE organizer_id = $1
+       ORDER BY created_at DESC`,
       [organizerId]
     );
 
+    // Query 2: member counts per list (separate to avoid 4-table JOIN+GROUP BY issues)
+    const countsResult = await db.query(
+      `SELECT
+         lm.list_id,
+         COUNT(*) AS total_leads,
+         COUNT(*) FILTER (
+           WHERE COALESCE(pn.verification_status, p.verification_status, 'unknown') IN ('valid', 'catchall')
+         ) AS verified_count,
+         COUNT(*) FILTER (
+           WHERE COALESCE(pn.verification_status, p.verification_status, 'unknown') = 'invalid'
+         ) AS invalid_count
+       FROM list_members lm
+       LEFT JOIN prospects p ON p.id = lm.prospect_id
+       LEFT JOIN persons pn ON pn.organizer_id = lm.organizer_id AND LOWER(pn.email) = LOWER(p.email)
+       WHERE lm.organizer_id = $1
+       GROUP BY lm.list_id`,
+      [organizerId]
+    );
+
+    const countsMap = {};
+    for (const row of countsResult.rows) {
+      countsMap[row.list_id] = row;
+    }
+
     res.json({
-      lists: result.rows.map(row => {
-        const total = parseInt(row.total_leads, 10) || 0;
-        const verified = parseInt(row.verified_count, 10) || 0;
-        const invalid = parseInt(row.invalid_count, 10) || 0;
+      lists: listsResult.rows.map(list => {
+        const c = countsMap[list.id];
+        const total = c ? parseInt(c.total_leads, 10) : 0;
+        const verified = c ? parseInt(c.verified_count, 10) : 0;
+        const invalid = c ? parseInt(c.invalid_count, 10) : 0;
         return {
-          id: row.id,
-          name: row.name,
-          created_at: row.created_at,
+          id: list.id,
+          name: list.name,
+          created_at: list.created_at,
           total_leads: total,
           verified_count: verified,
           invalid_count: invalid,
           unverified_count: total - verified - invalid,
-          import_status: row.import_status || null,
-          import_progress: row.import_progress || null
+          import_status: list.import_status || null,
+          import_progress: list.import_progress || null
         };
       })
     });
