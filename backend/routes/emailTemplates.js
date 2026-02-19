@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db');
 const jwt = require('jsonwebtoken');
+const { processTemplate } = require('../utils/templateProcessor');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -157,65 +158,6 @@ router.delete('/:id', authRequired, async (req, res) => {
 // TEMPLATE PREVIEW & CLONE
 // ============================================
 
-/**
- * Process template placeholders with recipient data.
- * Mirrors the logic from campaignSend.js processTemplate.
- * Supports pipe fallback syntax: {{field1|field2|"literal"}}
- */
-function processTemplate(text, data, extras = {}) {
-  if (!text) return "";
-
-  const fullName = data.name || "";
-  const nameParts = fullName.trim().split(/\s+/);
-  const firstName = data.first_name || nameParts[0] || "";
-  const lastName = data.last_name || (nameParts.length > 1 ? nameParts.slice(1).join(' ') : "");
-  const companyName = data.company || data.company_name || "";
-  const displayName = firstName || companyName || "Valued Partner";
-
-  const fields = {
-    first_name: firstName,
-    last_name: lastName,
-    name: fullName || `${firstName} ${lastName}`.trim(),
-    company_name: companyName,
-    company: companyName,
-    display_name: displayName,
-    email: data.email || "",
-    country: data.country || "",
-    position: data.position || "",
-    website: data.website || "",
-    tag: data.tag || ""
-  };
-
-  let processed = text;
-
-  // Step 1: Pipe fallback syntax — {{field1|field2|"literal"}}
-  processed = processed.replace(/\{\{([^}]*\|[^}]*)\}\}/gi, (match, inner) => {
-    const segments = inner.split('|');
-    for (const seg of segments) {
-      const trimmed = seg.trim();
-      const literalMatch = trimmed.match(/^["'](.*)["']$/);
-      if (literalMatch) {
-        return literalMatch[1];
-      }
-      const val = fields[trimmed.toLowerCase()];
-      if (val) return val;
-    }
-    return "";
-  });
-
-  // Step 2: Simple placeholders
-  for (const [key, val] of Object.entries(fields)) {
-    processed = processed.replace(new RegExp(`\\{\\{${key}\\}\\}`, 'gi'), val);
-  }
-
-  if (extras.unsubscribe_url) {
-    processed = processed.replace(/\{\{unsubscribe_url\}\}/gi, extras.unsubscribe_url);
-    processed = processed.replace(/\{\{unsubscribe_link\}\}/gi, extras.unsubscribe_url);
-  }
-
-  return processed;
-}
-
 // POST /api/email-templates/:id/preview
 router.post('/:id/preview', authRequired, async (req, res) => {
   try {
@@ -235,7 +177,7 @@ router.post('/:id/preview', authRequired, async (req, res) => {
 
     const template = result.rows[0];
 
-    const sampleData = req.body.sample_data || {
+    const rawSample = req.body.sample_data || {
       first_name: "John",
       last_name: "Doe",
       name: "John Doe",
@@ -247,13 +189,20 @@ router.post('/:id/preview', authRequired, async (req, res) => {
       tag: "Sample"
     };
 
+    // Wrap flat sample data as a recipient-like object for shared processTemplate
+    const recipient = {
+      name: rawSample.name || "",
+      email: rawSample.email || "",
+      meta: rawSample
+    };
+
     const extras = { unsubscribe_url: "#" };
 
     res.json({
       preview: {
-        subject: processTemplate(template.subject, sampleData, extras),
-        body_html: processTemplate(template.body_html, sampleData, extras),
-        body_text: processTemplate(template.body_text || "", sampleData, extras)
+        subject: processTemplate(template.subject, recipient, extras),
+        body_html: processTemplate(template.body_html, recipient, extras),
+        body_text: processTemplate(template.body_text || "", recipient, extras)
       }
     });
   } catch (error) {

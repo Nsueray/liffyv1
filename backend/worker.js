@@ -13,53 +13,10 @@ const {
   validatePhysicalAddress
 } = require("./utils/unsubscribeHelper");
 
-/* =========================================================
-   TEMPLATE PROCESSING (Placeholder replacement)
-   ========================================================= */
-function processTemplate(text, recipient, extras = {}) {
-  if (!text) return "";
-  
-  const fullName = recipient.name || "";
-  const nameParts = fullName.trim().split(/\s+/);
-  const firstName = nameParts[0] || "";
-  const lastName = nameParts.length > 1 ? nameParts.slice(1).join(" ") : "";
-  
-  let meta = {};
-  if (recipient.meta) {
-    try {
-      meta = typeof recipient.meta === "string" ? JSON.parse(recipient.meta) : recipient.meta;
-    } catch (e) {
-      meta = {};
-    }
-  }
-  
-  const companyName = meta.company || meta.company_name || "";
-  const country = meta.country || "";
-  const position = meta.position || meta.job_title || meta.title || "";
-  const website = meta.website || "";
-  const tag = Array.isArray(meta.tags) ? (meta.tags[0] || "") : (meta.tag || "");
-  const email = recipient.email || "";
-  
-  let processed = text;
-  processed = processed.replace(/{{first_name}}/gi, firstName);
-  processed = processed.replace(/{{last_name}}/gi, lastName);
-  processed = processed.replace(/{{name}}/gi, fullName);
-  processed = processed.replace(/{{company_name}}/gi, companyName);
-  processed = processed.replace(/{{company}}/gi, companyName);
-  processed = processed.replace(/{{email}}/gi, email);
-  processed = processed.replace(/{{country}}/gi, country);
-  processed = processed.replace(/{{position}}/gi, position);
-  processed = processed.replace(/{{website}}/gi, website);
-  processed = processed.replace(/{{tag}}/gi, tag);
-  
-  // Unsubscribe URL replacement (from extras)
-  if (extras.unsubscribe_url) {
-    processed = processed.replace(/{{unsubscribe_url}}/gi, extras.unsubscribe_url);
-    processed = processed.replace(/{{unsubscribe_link}}/gi, extras.unsubscribe_url);
-  }
-  
-  return processed;
-}
+// ============================================================
+// TEMPLATE PROCESSOR (shared — single source of truth)
+// ============================================================
+const { processTemplate, convertPlainTextToHtml } = require("./utils/templateProcessor");
 
 
 /* =========================================================
@@ -224,10 +181,12 @@ async function processSendingCampaigns() {
           // PROCESS TEMPLATE WITH UNSUBSCRIBE URL
           // ============================================================
           const processedSubject = processTemplate(campaign.subject, r);
-          
+          let processedHtml = processTemplate(campaign.body_html, r, { unsubscribe_url: unsubscribeUrl });
+          processedHtml = convertPlainTextToHtml(processedHtml);
+
           // Process HTML with compliance (unsubscribe + footer + address)
           const complianceResult = processEmailCompliance({
-            html: processTemplate(campaign.body_html, r, { unsubscribe_url: unsubscribeUrl }),
+            html: processedHtml,
             text: processTemplate(campaign.body_text || "", r, { unsubscribe_url: unsubscribeUrl }),
             recipientEmail: r.email,
             organizerId: campaign.organizer_id,
