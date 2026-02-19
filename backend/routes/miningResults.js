@@ -10,6 +10,7 @@ const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 const MANUAL_MINER_TOKEN = process.env.MANUAL_MINER_TOKEN;
+const IMPORT_BATCH_SIZE = 200;
 
 function authRequired(req, res, next) {
   try {
@@ -36,7 +37,7 @@ function authRequired(req, res, next) {
 
 function authRequiredOrManual(req, res, next) {
   const authHeader = req.headers.authorization;
-  
+
   if (MANUAL_MINER_TOKEN && authHeader) {
     const token = authHeader.replace("Bearer ", "").trim();
     if (token === MANUAL_MINER_TOKEN) {
@@ -169,7 +170,7 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
     const finalContacts = dedupeResult.contacts.map(c => {
       const raw = c._raw || {};
       const source = raw.source || (req.is_manual_miner ? 'manual' : 'import');
-      
+
       return UnifiedContact.fromLegacy({
         email: c.email,
         contactName: c.name,
@@ -303,7 +304,7 @@ router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (r
     const where = ['mj.organizer_id = $1', 'mr.job_id = $2'];
     const params = [organizerId, jobId];
     let idx = 3;
-    
+
     // emails is text[] array, use array_length
     if (has_email === 'with') {
       where.push(`COALESCE(array_length(mr.emails, 1), 0) > 0`);
@@ -344,7 +345,7 @@ router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (r
     const whereSql = where.join(' AND ');
 
     const resultsRes = await db.query(
-      `SELECT 
+      `SELECT
         mr.id,
         mr.job_id,
         mr.company_name,
@@ -398,30 +399,292 @@ router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (r
 
 
 /**
+ * Process a single batch of mining results for import.
+ * Called by the background processor within a transaction.
+ */
+async function processImportBatch(client, batchRows, organizerId, jobId, tagsArray, listId) {
+  let imported = 0, skipped = 0, duplicates = 0;
+  let personsUpserted = 0, affiliationsUpserted = 0;
+  const errors = [];
+
+  for (const mr of batchRows) {
+    try {
+      const emails = Array.isArray(mr.emails) ? mr.emails : [];
+      const primaryEmail = emails.find(e => e && typeof e === 'string' && e.includes('@'));
+
+      if (!primaryEmail) {
+        skipped++;
+        continue;
+      }
+
+      const trimmedEmail = primaryEmail.trim().toLowerCase();
+
+      // Legacy: prospects table check/upsert
+      const existingProspect = await client.query(
+        'SELECT id, tags FROM prospects WHERE organizer_id = $1 AND LOWER(email) = $2',
+        [organizerId, trimmedEmail]
+      );
+
+      let prospectId;
+
+      if (existingProspect.rows.length > 0) {
+        prospectId = existingProspect.rows[0].id;
+        duplicates++;
+
+        if (tagsArray.length > 0) {
+          const existingTags = existingProspect.rows[0].tags || [];
+          const mergedTags = [...new Set([...existingTags, ...tagsArray])];
+          await client.query(
+            'UPDATE prospects SET tags = $1 WHERE id = $2',
+            [mergedTags, prospectId]
+          );
+        }
+      } else {
+        const meta = {
+          mining_result_id: mr.id,
+          job_id: jobId,
+          job_title: mr.job_title,
+          all_emails: emails,
+          website: mr.website,
+          phone: mr.phone,
+          city: mr.city,
+          address: mr.address,
+          source_url: mr.source_url,
+          confidence_score: mr.confidence_score
+        };
+
+        const prospectRes = await client.query(
+          `INSERT INTO prospects (
+            organizer_id, email, name, company, country,
+            source_type, source_ref, verification_status, tags, meta
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+          RETURNING id`,
+          [
+            organizerId, trimmedEmail,
+            mr.contact_name || null, mr.company_name || null,
+            mr.country || null, 'mining', jobId,
+            mr.verification_status || 'unknown',
+            tagsArray.length > 0 ? tagsArray : [], meta
+          ]
+        );
+        prospectId = prospectRes.rows[0].id;
+      }
+
+      // Add to list if creating one
+      if (listId) {
+        await client.query(
+          `INSERT INTO list_members (list_id, prospect_id, organizer_id)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (list_id, prospect_id) DO NOTHING`,
+          [listId, prospectId, organizerId]
+        );
+      }
+
+      // Canonical: persons table UPSERT (Phase 3 dual-write)
+      const nameParts = (mr.contact_name || '').trim().split(/\s+/);
+      const firstName = nameParts[0] || null;
+      const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null;
+
+      const personResult = await client.query(
+        `INSERT INTO persons (organizer_id, email, first_name, last_name)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
+           first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
+           last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
+           updated_at = NOW()
+         RETURNING id`,
+        [organizerId, trimmedEmail, firstName, lastName]
+      );
+      personsUpserted++;
+      const personId = personResult.rows[0].id;
+
+      // Canonical: affiliations table UPSERT (if company present)
+      if (mr.company_name) {
+        await client.query(
+          `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, city, website, phone, source_type, source_ref)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'mining', $9)
+           ON CONFLICT (organizer_id, person_id, LOWER(company_name))
+           WHERE company_name IS NOT NULL
+           DO UPDATE SET
+             position = COALESCE(NULLIF(EXCLUDED.position, ''), affiliations.position),
+             country_code = COALESCE(NULLIF(EXCLUDED.country_code, ''), affiliations.country_code),
+             city = COALESCE(NULLIF(EXCLUDED.city, ''), affiliations.city),
+             website = COALESCE(NULLIF(EXCLUDED.website, ''), affiliations.website),
+             phone = COALESCE(NULLIF(EXCLUDED.phone, ''), affiliations.phone)`,
+          [
+            organizerId, personId, mr.company_name,
+            mr.job_title || null,
+            mr.country ? mr.country.substring(0, 2).toUpperCase() : null,
+            mr.city || null, mr.website || null,
+            mr.phone || null, jobId
+          ]
+        );
+        affiliationsUpserted++;
+      }
+
+      // Mark mining result as imported
+      await client.query(
+        `UPDATE mining_results SET status = 'imported', updated_at = NOW() WHERE id = $1`,
+        [mr.id]
+      );
+
+      imported++;
+    } catch (rowErr) {
+      console.error(`Error importing result ${mr.id}:`, rowErr.message);
+      errors.push({ id: mr.id, error: rowErr.message });
+      skipped++;
+    }
+  }
+
+  return { imported, skipped, duplicates, personsUpserted, affiliationsUpserted, errors };
+}
+
+/**
+ * Background processor for import-all.
+ * Processes mining results in batches of IMPORT_BATCH_SIZE with per-batch transactions.
+ * Each batch commits independently so partial imports survive crashes.
+ */
+async function processImportInBackground(jobId, organizerId, tagsArray, listId) {
+  let totalImported = 0, totalSkipped = 0, totalDuplicates = 0;
+  let totalPersonsUpserted = 0, totalAffiliationsUpserted = 0;
+  const allErrors = [];
+
+  try {
+    // Get initial total for progress tracking
+    const totalRes = await db.query(`
+      SELECT COUNT(*)::int as total
+      FROM mining_results mr
+      WHERE mr.job_id = $1 AND mr.organizer_id = $2
+        AND COALESCE(array_length(mr.emails, 1), 0) > 0
+        AND COALESCE(mr.status, 'new') != 'imported'
+    `, [jobId, organizerId]);
+    const totalToProcess = totalRes.rows[0].total;
+
+    while (true) {
+      // Fetch next batch (status != 'imported' naturally skips already-processed rows)
+      const batchRes = await db.query(`
+        SELECT mr.id, mr.company_name, mr.contact_name, mr.job_title,
+               mr.emails, mr.website, mr.phone, mr.country, mr.city,
+               mr.address, mr.source_url, mr.confidence_score, mr.verification_status
+        FROM mining_results mr
+        WHERE mr.job_id = $1 AND mr.organizer_id = $2
+          AND COALESCE(array_length(mr.emails, 1), 0) > 0
+          AND COALESCE(mr.status, 'new') != 'imported'
+        ORDER BY mr.id
+        LIMIT $3
+      `, [jobId, organizerId, IMPORT_BATCH_SIZE]);
+
+      if (batchRes.rows.length === 0) break;
+
+      // Process batch in its own transaction
+      const client = await db.connect();
+      try {
+        await client.query('BEGIN');
+        const result = await processImportBatch(client, batchRes.rows, organizerId, jobId, tagsArray, listId);
+        await client.query('COMMIT');
+
+        totalImported += result.imported;
+        totalSkipped += result.skipped;
+        totalDuplicates += result.duplicates;
+        totalPersonsUpserted += result.personsUpserted;
+        totalAffiliationsUpserted += result.affiliationsUpserted;
+        if (result.errors.length > 0) allErrors.push(...result.errors);
+      } catch (batchErr) {
+        await client.query('ROLLBACK').catch(() => {});
+        console.error(`Batch transaction error for job ${jobId}:`, batchErr.message);
+        totalSkipped += batchRes.rows.length;
+        allErrors.push({ batch_error: batchErr.message, affected_count: batchRes.rows.length });
+      } finally {
+        client.release();
+      }
+
+      // Update progress after each batch
+      await db.query(
+        `UPDATE mining_jobs SET import_progress = $2 WHERE id = $1`,
+        [jobId, JSON.stringify({
+          imported: totalImported,
+          skipped: totalSkipped,
+          duplicates: totalDuplicates,
+          total: totalToProcess,
+          persons_upserted: totalPersonsUpserted,
+          affiliations_upserted: totalAffiliationsUpserted,
+          errors: allErrors.slice(-10)
+        })]
+      );
+    }
+
+    // Build final progress
+    const finalProgress = {
+      imported: totalImported,
+      skipped: totalSkipped,
+      duplicates: totalDuplicates,
+      new_prospects: totalImported - totalDuplicates,
+      total: totalToProcess,
+      persons_upserted: totalPersonsUpserted,
+      affiliations_upserted: totalAffiliationsUpserted,
+      errors: allErrors.slice(-10),
+      completed_at: new Date().toISOString()
+    };
+
+    // If list was created, include member count
+    if (listId) {
+      const listCount = await db.query(
+        'SELECT COUNT(*)::int as count FROM list_members WHERE list_id = $1',
+        [listId]
+      );
+      finalProgress.list_member_count = listCount.rows[0].count;
+    }
+
+    // Mark as completed
+    await db.query(
+      `UPDATE mining_jobs SET import_status = 'completed', import_progress = $2 WHERE id = $1`,
+      [jobId, JSON.stringify(finalProgress)]
+    );
+
+    console.log(`Import completed for job ${jobId}: ${totalImported} imported, ${totalSkipped} skipped`);
+  } catch (err) {
+    console.error(`Background import fatal error for job ${jobId}:`, err);
+    try {
+      await db.query(
+        `UPDATE mining_jobs SET import_status = 'failed', import_progress = COALESCE(import_progress, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+        [jobId, JSON.stringify({
+          error: err.message,
+          failed_at: new Date().toISOString(),
+          imported: totalImported,
+          skipped: totalSkipped
+        })]
+      );
+    } catch (updateErr) {
+      console.error(`Failed to update import status for job ${jobId}:`, updateErr);
+    }
+  }
+}
+
+
+/**
  * ============================================================
  * POST /api/mining/jobs/:id/import-all
  * ============================================================
- * Import ALL mining results from a job to prospects (leads)
- * - Only imports results with valid emails
- * - Supports tags
- * - Optionally creates a list
- * - Single click = 600+ contacts imported!
+ * Import ALL mining results from a job to prospects (leads).
+ * Uses background processing with batched transactions
+ * to avoid Render's 30s request timeout on large datasets (3000+ records).
+ *
+ * Returns 202 Accepted immediately.
+ * Frontend polls GET /api/mining/jobs/:id for import_status + import_progress.
  */
 router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, async (req, res) => {
-  const client = await db.connect();
-  
   try {
     const jobId = req.params.id;
     const organizerId = req.auth.organizer_id;
-    const { 
+    const {
       tags = [],
       create_list = false,
       list_name = null
     } = req.body;
 
     // Validate job exists and belongs to organizer
-    const jobRes = await client.query(
-      `SELECT id, name, input, total_found FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+    const jobRes = await db.query(
+      `SELECT id, name, input, total_found, import_status, import_progress FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [jobId, organizerId]
     );
 
@@ -431,67 +694,62 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
 
     const job = jobRes.rows[0];
 
+    // Prevent concurrent imports (with 5-minute staleness check for crash recovery)
+    if (job.import_status === 'processing') {
+      const progress = job.import_progress || {};
+      const startedAt = progress.started_at ? new Date(progress.started_at) : null;
+      const isStale = startedAt && (Date.now() - startedAt.getTime() > 5 * 60 * 1000);
+
+      if (!isStale) {
+        return res.status(409).json({
+          error: "Import already in progress",
+          import_status: job.import_status,
+          import_progress: job.import_progress
+        });
+      }
+      console.log(`Stale import detected for job ${jobId}, allowing restart`);
+    }
+
     // Validate list name if creating list
     if (create_list && (!list_name || !list_name.trim())) {
       return res.status(400).json({ error: "List name is required when create_list is true" });
     }
 
-    await client.query('BEGIN');
-
-    // Get ALL mining results with valid emails (no pagination!)
-    // emails is text[] array, use array_length
-    const resultsRes = await client.query(`
-      SELECT 
-        mr.id,
-        mr.company_name,
-        mr.contact_name,
-        mr.job_title,
-        mr.emails,
-        mr.website,
-        mr.phone,
-        mr.country,
-        mr.city,
-        mr.address,
-        mr.source_url,
-        mr.confidence_score,
-        mr.verification_status,
-        mr.status
+    // Count importable results
+    const countRes = await db.query(`
+      SELECT COUNT(*)::int as total
       FROM mining_results mr
-      WHERE mr.job_id = $1 
-        AND mr.organizer_id = $2
+      WHERE mr.job_id = $1 AND mr.organizer_id = $2
         AND COALESCE(array_length(mr.emails, 1), 0) > 0
         AND COALESCE(mr.status, 'new') != 'imported'
     `, [jobId, organizerId]);
 
-    const miningResults = resultsRes.rows;
+    const totalToImport = countRes.rows[0].total;
 
-    if (miningResults.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ 
-        error: "No results to import", 
+    if (totalToImport === 0) {
+      return res.status(400).json({
+        error: "No results to import",
         message: "No results with valid emails found, or all results are already imported"
       });
     }
 
-    // Create list if requested
+    // Create list synchronously if requested (fast operation)
     let listId = null;
     let listCreated = null;
 
     if (create_list) {
       const trimmedListName = list_name.trim();
-      
-      // Check if list name already exists
-      const existingList = await client.query(
+
+      const existingList = await db.query(
         'SELECT id FROM lists WHERE organizer_id = $1 AND LOWER(name) = LOWER($2)',
         [organizerId, trimmedListName]
       );
 
       if (existingList.rows.length > 0) {
-        await client.query('ROLLBACK');
         return res.status(409).json({ error: `A list named "${trimmedListName}" already exists` });
       }
 
-      const listRes = await client.query(
+      const listRes = await db.query(
         `INSERT INTO lists (organizer_id, name, type) VALUES ($1, $2, 'mining_import') RETURNING id, name, created_at`,
         [organizerId, trimmedListName]
       );
@@ -500,215 +758,47 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
     }
 
     // Process tags
-    const tagsArray = Array.isArray(tags) 
+    const tagsArray = Array.isArray(tags)
       ? tags.filter(t => t && typeof t === 'string' && t.trim()).map(t => t.trim())
       : [];
 
-    // Process each mining result
-    let imported = 0;
-    let skipped = 0;
-    let duplicates = 0;
-    let personsUpserted = 0;
-    let affiliationsUpserted = 0;
-    const errors = [];
+    // Mark job as importing
+    await db.query(
+      `UPDATE mining_jobs SET import_status = 'processing', import_progress = $2 WHERE id = $1`,
+      [jobId, JSON.stringify({
+        imported: 0, skipped: 0, duplicates: 0, total: totalToImport,
+        persons_upserted: 0, affiliations_upserted: 0,
+        started_at: new Date().toISOString()
+      })]
+    );
 
-    for (const mr of miningResults) {
-      try {
-        // emails is already a text[] array from PostgreSQL
-        const emails = Array.isArray(mr.emails) ? mr.emails : [];
-
-        // Get first valid email
-        const primaryEmail = emails.find(e => e && typeof e === 'string' && e.includes('@'));
-        
-        if (!primaryEmail) {
-          skipped++;
-          continue;
-        }
-
-        const trimmedEmail = primaryEmail.trim().toLowerCase();
-
-        // Check if prospect already exists
-        const existingProspect = await client.query(
-          'SELECT id, tags FROM prospects WHERE organizer_id = $1 AND LOWER(email) = $2',
-          [organizerId, trimmedEmail]
-        );
-
-        let prospectId;
-
-        if (existingProspect.rows.length > 0) {
-          // Prospect exists - update tags if new ones provided
-          prospectId = existingProspect.rows[0].id;
-          duplicates++;
-
-          if (tagsArray.length > 0) {
-            const existingTags = existingProspect.rows[0].tags || [];
-            const mergedTags = [...new Set([...existingTags, ...tagsArray])];
-            await client.query(
-              'UPDATE prospects SET tags = $1 WHERE id = $2',
-              [mergedTags, prospectId]
-            );
-          }
-        } else {
-          // Create new prospect
-          const meta = {
-            mining_result_id: mr.id,
-            job_id: jobId,
-            job_title: mr.job_title,
-            all_emails: emails,
-            website: mr.website,
-            phone: mr.phone,
-            city: mr.city,
-            address: mr.address,
-            source_url: mr.source_url,
-            confidence_score: mr.confidence_score
-          };
-
-          const prospectRes = await client.query(
-            `INSERT INTO prospects (
-              organizer_id, 
-              email, 
-              name, 
-              company, 
-              country,
-              source_type, 
-              source_ref,
-              verification_status,
-              tags,
-              meta
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            RETURNING id`,
-            [
-              organizerId,
-              trimmedEmail,
-              mr.contact_name || null,
-              mr.company_name || null,
-              mr.country || null,
-              'mining',
-              jobId,
-              mr.verification_status || 'unknown',
-              tagsArray.length > 0 ? tagsArray : [],
-              meta
-            ]
-          );
-          prospectId = prospectRes.rows[0].id;
-        }
-
-        // Add to list if creating one
-        if (listId) {
-          await client.query(
-            `INSERT INTO list_members (list_id, prospect_id, organizer_id)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (list_id, prospect_id) DO NOTHING`,
-            [listId, prospectId, organizerId]
-          );
-        }
-
-        // --- CANONICAL: persons table UPSERT (Phase 3 dual-write) ---
-        const nameParts = (mr.contact_name || '').trim().split(/\s+/);
-        const firstName = nameParts[0] || null;
-        const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null;
-
-        const personResult = await client.query(
-          `INSERT INTO persons (organizer_id, email, first_name, last_name)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
-             first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
-             last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
-             updated_at = NOW()
-           RETURNING id`,
-          [organizerId, trimmedEmail, firstName, lastName]
-        );
-        personsUpserted++;
-        const personId = personResult.rows[0].id;
-
-        // --- CANONICAL: affiliations table UPSERT (if company present) ---
-        if (mr.company_name) {
-          await client.query(
-            `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, city, website, phone, source_type, source_ref)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'mining', $9)
-             ON CONFLICT (organizer_id, person_id, LOWER(company_name))
-             WHERE company_name IS NOT NULL
-             DO UPDATE SET
-               position = COALESCE(NULLIF(EXCLUDED.position, ''), affiliations.position),
-               country_code = COALESCE(NULLIF(EXCLUDED.country_code, ''), affiliations.country_code),
-               city = COALESCE(NULLIF(EXCLUDED.city, ''), affiliations.city),
-               website = COALESCE(NULLIF(EXCLUDED.website, ''), affiliations.website),
-               phone = COALESCE(NULLIF(EXCLUDED.phone, ''), affiliations.phone)`,
-            [
-              organizerId,
-              personId,
-              mr.company_name,
-              mr.job_title || null,
-              mr.country ? mr.country.substring(0, 2).toUpperCase() : null,
-              mr.city || null,
-              mr.website || null,
-              mr.phone || null,
-              jobId
-            ]
-          );
-          affiliationsUpserted++;
-        }
-
-        // Mark mining result as imported
-        await client.query(
-          `UPDATE mining_results SET status = 'imported', updated_at = NOW() WHERE id = $1`,
-          [mr.id]
-        );
-
-        imported++;
-      } catch (rowErr) {
-        console.error(`Error importing result ${mr.id}:`, rowErr.message);
-        errors.push({ id: mr.id, error: rowErr.message });
-        skipped++;
-      }
-    }
-
-    await client.query('COMMIT');
-
-    // Build response
+    // Return immediately (202 Accepted)
     const response = {
-      success: true,
-      stats: {
-        total_with_email: miningResults.length,
-        imported: imported,
-        skipped: skipped,
-        duplicates_updated: duplicates,
-        new_prospects: imported - duplicates
-      },
-      canonical_sync: {
-        persons_upserted: personsUpserted,
-        affiliations_upserted: affiliationsUpserted
-      },
+      status: "processing",
+      job_id: jobId,
+      total_to_import: totalToImport,
       tags_applied: tagsArray,
-      message: `Successfully imported ${imported} leads from "${job.name || jobId}"`
+      message: `Import started for ${totalToImport} results. Poll GET /api/mining/jobs/${jobId} for progress.`
     };
 
     if (listCreated) {
       response.list_created = listCreated;
-      
-      // Get final list member count
-      const listCount = await db.query(
-        'SELECT COUNT(*) as count FROM list_members WHERE list_id = $1',
-        [listId]
-      );
-      response.list_created.member_count = parseInt(listCount.rows[0].count, 10);
     }
 
-    if (errors.length > 0) {
-      response.errors = errors.slice(0, 10);
-    }
+    res.status(202).json(response);
 
-    return res.status(201).json(response);
-
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('POST /mining/jobs/:id/import-all error:', err);
-    return res.status(500).json({ 
-      error: "Failed to import results", 
-      message: err.message 
+    // Launch background processing (non-blocking)
+    setImmediate(() => {
+      processImportInBackground(jobId, organizerId, tagsArray, listId).catch(err => {
+        console.error(`Background import failed for job ${jobId}:`, err);
+      });
     });
-  } finally {
-    client.release();
+  } catch (err) {
+    console.error('POST /mining/jobs/:id/import-all error:', err);
+    return res.status(500).json({
+      error: "Failed to start import",
+      message: err.message
+    });
   }
 });
 
@@ -736,7 +826,7 @@ router.get('/api/mining/jobs/:id/import-preview', authRequired, validateJobId, a
 
     // Count results - emails is text[] array, use array_length
     const countRes = await db.query(`
-      SELECT 
+      SELECT
         COUNT(*) FILTER (WHERE COALESCE(array_length(mr.emails, 1), 0) > 0) as with_email,
         COUNT(*) FILTER (WHERE COALESCE(array_length(mr.emails, 1), 0) > 0 AND COALESCE(mr.status, 'new') != 'imported') as importable,
         COUNT(*) FILTER (WHERE COALESCE(mr.status, 'new') = 'imported') as already_imported,

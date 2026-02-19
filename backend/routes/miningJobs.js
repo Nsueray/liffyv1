@@ -204,9 +204,9 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
 
     // ÖNEMLİ: file_data sütununu seçmiyoruz - performans için
     const jobsRes = await db.query(
-      `SELECT id, organizer_id, type, input, name, strategy, site_profile, config, status, 
+      `SELECT id, organizer_id, type, input, name, strategy, site_profile, config, status,
               progress, total_found, total_emails_raw, stats, error, created_at, completed_at,
-              manual_required, manual_reason
+              manual_required, manual_reason, import_status, import_progress
        FROM mining_jobs
        WHERE ${where.join(' AND ')}
        ORDER BY created_at DESC
@@ -249,9 +249,9 @@ router.get('/api/mining/jobs/:id', authRequired, validateJobId, async (req, res)
   try {
     // file_data'yı çekmiyoruz - sadece metadata
     const result = await db.query(
-      `SELECT id, organizer_id, type, input, name, strategy, site_profile, config, status, 
+      `SELECT id, organizer_id, type, input, name, strategy, site_profile, config, status,
               progress, total_found, total_emails_raw, stats, error, created_at, completed_at,
-              manual_required, manual_reason,
+              manual_required, manual_reason, import_status, import_progress,
               CASE WHEN file_data IS NOT NULL THEN true ELSE false END as has_file
        FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [job_id, organizer_id]

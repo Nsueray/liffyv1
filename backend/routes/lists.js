@@ -173,10 +173,183 @@ function parseCSVBuffer(buffer) {
   });
 }
 
+const CSV_BACKGROUND_THRESHOLD = 500;
+const CSV_BATCH_SIZE = 200;
+
+/**
+ * Background processor for large CSV uploads.
+ * Processes rows in batches with per-batch transactions.
+ */
+async function processCSVRowsInBackground(validRows, organizerId, listId, tags) {
+  let imported = 0, skipped = 0;
+  const errors = [];
+  let personsUpserted = 0, affiliationsUpserted = 0;
+
+  try {
+    for (let batchStart = 0; batchStart < validRows.length; batchStart += CSV_BATCH_SIZE) {
+      const batch = validRows.slice(batchStart, batchStart + CSV_BATCH_SIZE);
+      const client = await db.connect();
+
+      try {
+        await client.query('BEGIN');
+
+        for (let i = 0; i < batch.length; i++) {
+          const row = batch[i];
+          try {
+            const email = row.email.toLowerCase().trim();
+
+            // Legacy: prospects table
+            let prospectId;
+            const existingProspect = await client.query(
+              `SELECT id FROM prospects WHERE organizer_id = $1 AND LOWER(email) = $2`,
+              [organizerId, email]
+            );
+
+            if (existingProspect.rows.length > 0) {
+              prospectId = existingProspect.rows[0].id;
+              await client.query(
+                `UPDATE prospects SET
+                   name = COALESCE(NULLIF($3, ''), name),
+                   company = COALESCE(NULLIF($4, ''), company),
+                   country = COALESCE(NULLIF($5, ''), country),
+                   sector = COALESCE(NULLIF($6, ''), sector)
+                 WHERE id = $2 AND organizer_id = $1`,
+                [organizerId, prospectId, row.name || '', row.company || '', row.country || '', row.position || '']
+              );
+            } else {
+              const insertResult = await client.query(
+                `INSERT INTO prospects (organizer_id, email, name, company, country, sector, source_type, source_ref, tags)
+                 VALUES ($1, $2, $3, $4, $5, $6, 'import', 'CSV upload', $7)
+                 RETURNING id`,
+                [organizerId, email, row.name || null, row.company || null, row.country || null, row.position || null, tags || null]
+              );
+              prospectId = insertResult.rows[0].id;
+            }
+
+            // Legacy: list_members
+            if (prospectId) {
+              await client.query(
+                `INSERT INTO list_members (list_id, prospect_id, organizer_id)
+                 VALUES ($1, $2, $3)
+                 ON CONFLICT (list_id, prospect_id) DO NOTHING`,
+                [listId, prospectId, organizerId]
+              );
+            }
+
+            // Canonical: persons table UPSERT
+            const firstName = row.first_name || (row.name ? row.name.split(/\s+/)[0] : null);
+            const lastName = row.last_name || (row.name && row.name.includes(' ') ? row.name.split(/\s+/).slice(1).join(' ') : null);
+
+            const personResult = await client.query(
+              `INSERT INTO persons (organizer_id, email, first_name, last_name)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
+                 first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
+                 last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
+                 updated_at = NOW()
+               RETURNING id`,
+              [organizerId, email, firstName || null, lastName || null]
+            );
+            personsUpserted++;
+            const personId = personResult.rows[0].id;
+
+            // Canonical: affiliations table UPSERT
+            if (row.company) {
+              await client.query(
+                `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, website, phone, source_type, source_ref)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'import', 'CSV upload')
+                 ON CONFLICT (organizer_id, person_id, LOWER(company_name))
+                 WHERE company_name IS NOT NULL
+                 DO UPDATE SET
+                   position = COALESCE(NULLIF(EXCLUDED.position, ''), affiliations.position),
+                   country_code = COALESCE(NULLIF(EXCLUDED.country_code, ''), affiliations.country_code),
+                   website = COALESCE(NULLIF(EXCLUDED.website, ''), affiliations.website),
+                   phone = COALESCE(NULLIF(EXCLUDED.phone, ''), affiliations.phone)`,
+                [
+                  organizerId,
+                  personId,
+                  row.company,
+                  row.position || null,
+                  row.country ? row.country.substring(0, 2).toUpperCase() : null,
+                  row.website || null,
+                  row.phone || null
+                ]
+              );
+              affiliationsUpserted++;
+            }
+
+            imported++;
+          } catch (rowErr) {
+            errors.push({ row: batchStart + i + 1, email: row.email, error: rowErr.message });
+            skipped++;
+          }
+        }
+
+        await client.query('COMMIT');
+      } catch (batchErr) {
+        await client.query('ROLLBACK').catch(() => {});
+        console.error(`CSV batch error for list ${listId}:`, batchErr.message);
+        skipped += batch.length;
+        errors.push({ batch_error: batchErr.message, from_row: batchStart + 1, to_row: batchStart + batch.length });
+      } finally {
+        client.release();
+      }
+
+      // Update progress after each batch
+      await db.query(
+        `UPDATE lists SET import_progress = $2 WHERE id = $1`,
+        [listId, JSON.stringify({
+          imported, skipped, total: validRows.length,
+          persons_upserted: personsUpserted,
+          affiliations_upserted: affiliationsUpserted,
+          errors: errors.slice(-10)
+        })]
+      );
+    }
+
+    // Mark completed
+    await db.query(
+      `UPDATE lists SET import_status = 'completed', import_progress = $2 WHERE id = $1`,
+      [listId, JSON.stringify({
+        imported, skipped, total: validRows.length,
+        persons_upserted: personsUpserted,
+        affiliations_upserted: affiliationsUpserted,
+        errors: errors.slice(-10),
+        completed_at: new Date().toISOString()
+      })]
+    );
+
+    // Auto-queue verification (best-effort)
+    try {
+      const orgCheck = await db.query(
+        `SELECT zerobounce_api_key FROM organizers WHERE id = $1`,
+        [organizerId]
+      );
+      if (orgCheck.rows.length > 0 && orgCheck.rows[0].zerobounce_api_key) {
+        const { queueEmails } = require('../services/verificationService');
+        const emailsToVerify = validRows.map(r => r.email.toLowerCase().trim());
+        await queueEmails(organizerId, emailsToVerify, 'csv_upload');
+      }
+    } catch (vErr) {
+      console.error('CSV background auto-queue verification error (non-fatal):', vErr.message);
+    }
+
+    console.log(`CSV import completed for list ${listId}: ${imported} imported, ${skipped} skipped`);
+  } catch (err) {
+    console.error(`Background CSV import fatal error for list ${listId}:`, err);
+    try {
+      await db.query(
+        `UPDATE lists SET import_status = 'failed', import_progress = COALESCE(import_progress, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+        [listId, JSON.stringify({ error: err.message, failed_at: new Date().toISOString(), imported, skipped })]
+      );
+    } catch (updateErr) {
+      console.error(`Failed to update list import status for ${listId}:`, updateErr);
+    }
+  }
+}
+
 // POST /api/lists/upload-csv
 router.post('/upload-csv', authRequired, upload.single('file'), async (req, res) => {
-  const client = await db.connect();
-
   try {
     const organizerId = req.auth.organizer_id;
 
@@ -216,153 +389,188 @@ router.post('/upload-csv', authRequired, upload.single('file'), async (req, res)
       }
     }
 
-    await client.query('BEGIN');
+    const invalidEmailCount = rows.length - validRows.length;
 
-    const listResult = await client.query(
+    // Create list (fast, single query — outside transaction so it persists for background path)
+    const listResult = await db.query(
       `INSERT INTO lists (organizer_id, name, type) VALUES ($1, $2, 'import') RETURNING id, name, created_at`,
       [organizerId, listName]
     );
     const newList = listResult.rows[0];
 
-    let imported = 0;
-    let skipped = 0;
-    const errors = [];
-    let personsUpserted = 0;
-    let affiliationsUpserted = 0;
-
-    // Process in batches of 100
-    for (let i = 0; i < validRows.length; i++) {
-      const row = validRows[i];
-      try {
-        const email = row.email.toLowerCase().trim();
-
-        // --- LEGACY: prospects table (check-then-insert, no unique index on organizer_id+email) ---
-        let prospectId;
-        const existingProspect = await client.query(
-          `SELECT id FROM prospects WHERE organizer_id = $1 AND LOWER(email) = $2`,
-          [organizerId, email]
-        );
-
-        if (existingProspect.rows.length > 0) {
-          prospectId = existingProspect.rows[0].id;
-          // Enrich existing prospect with new data (don't overwrite non-null)
-          await client.query(
-            `UPDATE prospects SET
-               name = COALESCE(NULLIF($3, ''), name),
-               company = COALESCE(NULLIF($4, ''), company),
-               country = COALESCE(NULLIF($5, ''), country),
-               sector = COALESCE(NULLIF($6, ''), sector)
-             WHERE id = $2 AND organizer_id = $1`,
-            [organizerId, prospectId, row.name || '', row.company || '', row.country || '', row.position || '']
-          );
-        } else {
-          const insertResult = await client.query(
-            `INSERT INTO prospects (organizer_id, email, name, company, country, sector, source_type, source_ref, tags)
-             VALUES ($1, $2, $3, $4, $5, $6, 'import', 'CSV upload', $7)
-             RETURNING id`,
-            [organizerId, email, row.name || null, row.company || null, row.country || null, row.position || null, tags || null]
-          );
-          prospectId = insertResult.rows[0].id;
-        }
-
-        // --- LEGACY: list_members ---
-        if (prospectId) {
-          await client.query(
-            `INSERT INTO list_members (list_id, prospect_id, organizer_id)
-             VALUES ($1, $2, $3)
-             ON CONFLICT (list_id, prospect_id) DO NOTHING`,
-            [newList.id, prospectId, organizerId]
-          );
-        }
-
-        // --- CANONICAL: persons table UPSERT (Phase 3 dual-write) ---
-        const firstName = row.first_name || (row.name ? row.name.split(/\s+/)[0] : null);
-        const lastName = row.last_name || (row.name && row.name.includes(' ') ? row.name.split(/\s+/).slice(1).join(' ') : null);
-
-        const personResult = await client.query(
-          `INSERT INTO persons (organizer_id, email, first_name, last_name)
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
-             first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
-             last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
-             updated_at = NOW()
-           RETURNING id`,
-          [organizerId, email, firstName || null, lastName || null]
-        );
-        personsUpserted++;
-        const personId = personResult.rows[0].id;
-
-        // --- CANONICAL: affiliations table UPSERT (if company present) ---
-        if (row.company) {
-          await client.query(
-            `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, website, phone, source_type, source_ref)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'import', 'CSV upload')
-             ON CONFLICT (organizer_id, person_id, LOWER(company_name))
-             WHERE company_name IS NOT NULL
-             DO UPDATE SET
-               position = COALESCE(NULLIF(EXCLUDED.position, ''), affiliations.position),
-               country_code = COALESCE(NULLIF(EXCLUDED.country_code, ''), affiliations.country_code),
-               website = COALESCE(NULLIF(EXCLUDED.website, ''), affiliations.website),
-               phone = COALESCE(NULLIF(EXCLUDED.phone, ''), affiliations.phone)`,
-            [
-              organizerId,
-              personId,
-              row.company,
-              row.position || null,
-              row.country ? row.country.substring(0, 2).toUpperCase() : null,
-              row.website || null,
-              row.phone || null
-            ]
-          );
-          affiliationsUpserted++;
-        }
-
-        imported++;
-      } catch (rowErr) {
-        errors.push({ row: i + 1, email: row.email, error: rowErr.message });
-        skipped++;
-      }
-    }
-
-    // Count rows without valid email
-    const invalidEmailCount = rows.length - validRows.length;
-    skipped += invalidEmailCount;
-
-    await client.query('COMMIT');
-
-    // --- AUTO-QUEUE for email verification (best-effort, non-blocking) ---
-    let verificationQueued = 0;
-    try {
-      const orgCheck = await db.query(
-        `SELECT zerobounce_api_key FROM organizers WHERE id = $1`,
-        [organizerId]
+    // --- LARGE FILE: background processing ---
+    if (validRows.length >= CSV_BACKGROUND_THRESHOLD) {
+      await db.query(
+        `UPDATE lists SET import_status = 'processing', import_progress = $2 WHERE id = $1`,
+        [newList.id, JSON.stringify({
+          imported: 0, skipped: invalidEmailCount, total: validRows.length,
+          persons_upserted: 0, affiliations_upserted: 0,
+          started_at: new Date().toISOString()
+        })]
       );
-      if (orgCheck.rows.length > 0 && orgCheck.rows[0].zerobounce_api_key) {
-        const { queueEmails } = require('../services/verificationService');
-        const emailsToVerify = validRows.map(r => r.email.toLowerCase().trim());
-        const queueResult = await queueEmails(organizerId, emailsToVerify, 'csv_upload');
-        verificationQueued = queueResult.queued;
-      }
-    } catch (vErr) {
-      console.error('CSV upload auto-queue verification error (non-fatal):', vErr.message);
+
+      res.status(202).json({
+        status: "processing",
+        list_id: newList.id,
+        list_name: newList.name,
+        total_rows: rows.length,
+        valid_rows: validRows.length,
+        invalid_rows: invalidEmailCount,
+        message: `CSV import started for ${validRows.length} rows. Poll GET /api/lists/${newList.id} for progress.`
+      });
+
+      setImmediate(() => {
+        processCSVRowsInBackground(validRows, organizerId, newList.id, tags).catch(err => {
+          console.error(`Background CSV import failed for list ${newList.id}:`, err);
+        });
+      });
+      return;
     }
 
-    res.status(201).json({
-      list_id: newList.id,
-      list_name: newList.name,
-      total_rows: rows.length,
-      imported,
-      skipped,
-      errors: errors.slice(0, 20),
-      canonical_sync: {
-        persons_upserted: personsUpserted,
-        affiliations_upserted: affiliationsUpserted
-      },
-      verification_queued: verificationQueued
-    });
+    // --- SMALL FILE: inline processing (single transaction) ---
+    const client = await db.connect();
+    try {
+      await client.query('BEGIN');
 
+      let imported = 0;
+      let skipped = 0;
+      const errors = [];
+      let personsUpserted = 0;
+      let affiliationsUpserted = 0;
+
+      for (let i = 0; i < validRows.length; i++) {
+        const row = validRows[i];
+        try {
+          const email = row.email.toLowerCase().trim();
+
+          // Legacy: prospects table
+          let prospectId;
+          const existingProspect = await client.query(
+            `SELECT id FROM prospects WHERE organizer_id = $1 AND LOWER(email) = $2`,
+            [organizerId, email]
+          );
+
+          if (existingProspect.rows.length > 0) {
+            prospectId = existingProspect.rows[0].id;
+            await client.query(
+              `UPDATE prospects SET
+                 name = COALESCE(NULLIF($3, ''), name),
+                 company = COALESCE(NULLIF($4, ''), company),
+                 country = COALESCE(NULLIF($5, ''), country),
+                 sector = COALESCE(NULLIF($6, ''), sector)
+               WHERE id = $2 AND organizer_id = $1`,
+              [organizerId, prospectId, row.name || '', row.company || '', row.country || '', row.position || '']
+            );
+          } else {
+            const insertResult = await client.query(
+              `INSERT INTO prospects (organizer_id, email, name, company, country, sector, source_type, source_ref, tags)
+               VALUES ($1, $2, $3, $4, $5, $6, 'import', 'CSV upload', $7)
+               RETURNING id`,
+              [organizerId, email, row.name || null, row.company || null, row.country || null, row.position || null, tags || null]
+            );
+            prospectId = insertResult.rows[0].id;
+          }
+
+          // Legacy: list_members
+          if (prospectId) {
+            await client.query(
+              `INSERT INTO list_members (list_id, prospect_id, organizer_id)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (list_id, prospect_id) DO NOTHING`,
+              [newList.id, prospectId, organizerId]
+            );
+          }
+
+          // Canonical: persons table UPSERT
+          const firstName = row.first_name || (row.name ? row.name.split(/\s+/)[0] : null);
+          const lastName = row.last_name || (row.name && row.name.includes(' ') ? row.name.split(/\s+/).slice(1).join(' ') : null);
+
+          const personResult = await client.query(
+            `INSERT INTO persons (organizer_id, email, first_name, last_name)
+             VALUES ($1, $2, $3, $4)
+             ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
+               first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
+               last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
+               updated_at = NOW()
+             RETURNING id`,
+            [organizerId, email, firstName || null, lastName || null]
+          );
+          personsUpserted++;
+          const personId = personResult.rows[0].id;
+
+          // Canonical: affiliations table UPSERT
+          if (row.company) {
+            await client.query(
+              `INSERT INTO affiliations (organizer_id, person_id, company_name, position, country_code, website, phone, source_type, source_ref)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'import', 'CSV upload')
+               ON CONFLICT (organizer_id, person_id, LOWER(company_name))
+               WHERE company_name IS NOT NULL
+               DO UPDATE SET
+                 position = COALESCE(NULLIF(EXCLUDED.position, ''), affiliations.position),
+                 country_code = COALESCE(NULLIF(EXCLUDED.country_code, ''), affiliations.country_code),
+                 website = COALESCE(NULLIF(EXCLUDED.website, ''), affiliations.website),
+                 phone = COALESCE(NULLIF(EXCLUDED.phone, ''), affiliations.phone)`,
+              [
+                organizerId,
+                personId,
+                row.company,
+                row.position || null,
+                row.country ? row.country.substring(0, 2).toUpperCase() : null,
+                row.website || null,
+                row.phone || null
+              ]
+            );
+            affiliationsUpserted++;
+          }
+
+          imported++;
+        } catch (rowErr) {
+          errors.push({ row: i + 1, email: row.email, error: rowErr.message });
+          skipped++;
+        }
+      }
+
+      skipped += invalidEmailCount;
+
+      await client.query('COMMIT');
+
+      // Auto-queue verification (best-effort, non-blocking)
+      let verificationQueued = 0;
+      try {
+        const orgCheck = await db.query(
+          `SELECT zerobounce_api_key FROM organizers WHERE id = $1`,
+          [organizerId]
+        );
+        if (orgCheck.rows.length > 0 && orgCheck.rows[0].zerobounce_api_key) {
+          const { queueEmails } = require('../services/verificationService');
+          const emailsToVerify = validRows.map(r => r.email.toLowerCase().trim());
+          const queueResult = await queueEmails(organizerId, emailsToVerify, 'csv_upload');
+          verificationQueued = queueResult.queued;
+        }
+      } catch (vErr) {
+        console.error('CSV upload auto-queue verification error (non-fatal):', vErr.message);
+      }
+
+      res.status(201).json({
+        list_id: newList.id,
+        list_name: newList.name,
+        total_rows: rows.length,
+        imported,
+        skipped,
+        errors: errors.slice(0, 20),
+        canonical_sync: {
+          persons_upserted: personsUpserted,
+          affiliations_upserted: affiliationsUpserted
+        },
+        verification_queued: verificationQueued
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
   } catch (err) {
-    await client.query('ROLLBACK');
     console.error('POST /api/lists/upload-csv error:', err);
 
     if (err.message === 'Only CSV files are allowed') {
@@ -370,8 +578,6 @@ router.post('/upload-csv', authRequired, upload.single('file'), async (req, res)
     }
 
     res.status(500).json({ error: err.message || 'Failed to upload CSV' });
-  } finally {
-    client.release();
   }
 });
 
@@ -674,7 +880,7 @@ router.get('/:id', authRequired, async (req, res) => {
     const listId = req.params.id;
 
     const listResult = await db.query(
-      'SELECT id, name, created_at FROM lists WHERE id = $1 AND organizer_id = $2',
+      'SELECT id, name, created_at, import_status, import_progress FROM lists WHERE id = $1 AND organizer_id = $2',
       [listId, organizerId]
     );
 
@@ -707,7 +913,7 @@ router.get('/:id', authRequired, async (req, res) => {
     const totalLeads = membersResult.rows.length;
     const verifiedCount = membersResult.rows.filter(r => r.verification_status === 'valid').length;
 
-    res.json({
+    const response = {
       id: list.id,
       name: list.name,
       created_at: list.created_at,
@@ -718,7 +924,14 @@ router.get('/:id', authRequired, async (req, res) => {
         ...row,
         tags: row.tags || []
       }))
-    });
+    };
+
+    if (list.import_status) {
+      response.import_status = list.import_status;
+      response.import_progress = list.import_progress;
+    }
+
+    res.json(response);
   } catch (err) {
     console.error('GET /api/lists/:id error:', err);
     res.status(500).json({ error: 'Failed to fetch list' });
