@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
 const { sendEmail } = require('../mailer');
-const { getUnsubscribeUrl } = require('./webhooks');
+const { getUnsubscribeUrl, processEmailCompliance, getListUnsubscribeHeaders } = require('../utils/unsubscribeHelper');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -154,7 +154,7 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
 
     // 2. Organizer Ayarlarını (API Key) Çek
     const orgRes = await client.query(
-      `SELECT sendgrid_api_key FROM organizers WHERE id = $1`,
+      `SELECT sendgrid_api_key, physical_address FROM organizers WHERE id = $1`,
       [organizer_id]
     );
     const organizer = orgRes.rows[0];
@@ -228,16 +228,30 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
         const personalizedHtml = processTemplate(campaign.body_html, r, { unsubscribe_url });
         const personalizedText = processTemplate(campaign.body_text || "", r, { unsubscribe_url });
 
-        // B. Gönderim (Mailer'a Dinamik Key Gönderiyoruz)
+        // B. Compliance Pipeline (mandatory footer + physical address)
+        const compliance = processEmailCompliance({
+          html: personalizedHtml,
+          text: personalizedText,
+          recipientEmail: r.email,
+          organizerId: organizer_id,
+          physicalAddress: organizer.physical_address || '',
+          lang: 'en'
+        });
+
+        // C. RFC 8058 List-Unsubscribe headers (one-click unsubscribe in Gmail/Outlook)
+        const unsubHeaders = getListUnsubscribeHeaders(r.email, organizer_id, sender.from_email);
+
+        // D. Gönderim (Mailer'a Dinamik Key Gönderiyoruz)
         const mailResp = await sendEmail({
           to: r.email,
           subject: personalizedSubject,
-          text: personalizedText,
-          html: personalizedHtml,
+          text: compliance.text,
+          html: compliance.html,
           from_name: sender.from_name,
           from_email: sender.from_email,
           reply_to: sender.reply_to || null,
-          sendgrid_api_key: organizer.sendgrid_api_key // ÖNEMLİ: Settings'den gelen key
+          sendgrid_api_key: organizer.sendgrid_api_key, // ÖNEMLİ: Settings'den gelen key
+          headers: unsubHeaders
         });
 
         // C. Sonucu İşle
