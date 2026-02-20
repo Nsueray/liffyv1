@@ -19,13 +19,7 @@ const BUILD_DATE = '2026-02-week8';
 // Check required env variables
 function checkRequirements() {
     const issues = [];
-    
-    if (SUPERMINER_ENABLED) {
-        if (!process.env.REDIS_URL) {
-            issues.push('REDIS_URL is required when SUPERMINER_ENABLED=true');
-        }
-    }
-    
+    // Redis is now optional — SuperMiner works without it (aggregateSimple fallback)
     return issues;
 }
 
@@ -109,25 +103,37 @@ async function initialize() {
     }
     
     try {
-        // Connect to Redis
+        // Connect to Redis (optional — non-fatal if unavailable)
         const eb = getEventBus();
         const is = getIntermediateStorage();
-        
-        if (eb) {
-            await eb.connect();
+
+        if (eb && eb.enabled) {
+            try {
+                await eb.connect();
+            } catch (redisErr) {
+                console.warn('[SuperMiner] ⚠️ EventBus Redis connection failed (non-fatal):', redisErr.message);
+            }
         }
-        
-        if (is) {
-            await is.connect();
+
+        if (is && is.enabled) {
+            try {
+                await is.connect();
+            } catch (redisErr) {
+                console.warn('[SuperMiner] ⚠️ IntermediateStorage Redis connection failed (non-fatal):', redisErr.message);
+            }
         }
-        
+
         console.log('[SuperMiner] ✅ Initialized successfully');
-        
+        if (!process.env.REDIS_URL) {
+            console.log('[SuperMiner] ⚠️ Running without Redis — Flow2 disabled, aggregateSimple fallback active');
+        }
+
         return { success: true, mode: 'superminer' };
-        
+
     } catch (err) {
-        console.error('[SuperMiner] ❌ Initialization failed:', err.message);
-        return { success: false, mode: 'error', error: err.message };
+        console.error('[SuperMiner] ⚠️ Initialization warning:', err.message);
+        console.log('[SuperMiner] Continuing without full Redis support');
+        return { success: true, mode: 'superminer-degraded' };
     }
 }
 

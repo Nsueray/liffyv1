@@ -81,7 +81,25 @@ class ResultAggregator {
         
         // Calculate miner stats
         const minerStats = this.calculateMinerStats(minerResults);
-        
+
+        // Check if Redis storage is available — if not, fallback to direct DB write
+        if (!this.storage || !this.storage.enabled) {
+            console.log(`[Aggregator V1] Redis unavailable, falling back to direct DB write (aggregateSimple)`);
+            const simpleResult = await this.aggregateSimple(minerResults, jobContext);
+            return {
+                status: 'FLOW1_COMPLETE',
+                jobId,
+                contactCount: mergedContacts.length,
+                emailBasedCount: emailBased.length,
+                profileOnlyCount: profileOnly.length,
+                enrichmentRate,
+                websiteUrlCount: 0,
+                needsDeepCrawl: false,
+                minerStats,
+                _alreadyPersisted: true
+            };
+        }
+
         // Save to Redis (NOT to DB!)
         const saveResult = await this.storage.saveFlowResults(jobId, {
             contacts: mergedContacts.map(c => c.toObject ? c.toObject() : c),

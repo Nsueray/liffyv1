@@ -348,6 +348,37 @@ class FlowOrchestrator {
             console.log(`[FlowOrchestrator] Enrichment rate: ${(flow1Result.enrichmentRate * 100).toFixed(1)}%`);
 
             // ========================================
+            // NO-REDIS FAST PATH: If Flow1 already persisted to DB, skip Flow2
+            // ========================================
+            if (flow1Result._alreadyPersisted) {
+                this.updateState(jobId, FLOW_STATE.COMPLETED);
+                const totalTime = Date.now() - startTime;
+                let costSummary = null;
+                if (this.costTracker) {
+                    costSummary = this.costTracker.finalizeJob(jobId);
+                }
+                this.activeJobs.delete(jobId);
+
+                console.log(`\n${'='.repeat(60)}`);
+                console.log(`[FlowOrchestrator] Job ${jobId} COMPLETED (no-Redis path) in ${(totalTime/1000).toFixed(1)}s`);
+                console.log(`[FlowOrchestrator] Contacts: ${flow1Result.contactCount}`);
+                console.log(`${'='.repeat(60)}\n`);
+
+                return {
+                    status: 'COMPLETED',
+                    jobId,
+                    totalTime,
+                    flow1: {
+                        contactCount: flow1Result.contactCount,
+                        enrichmentRate: flow1Result.enrichmentRate,
+                        pagination: flow1Result.paginationStats || null
+                    },
+                    flow2: { triggered: false },
+                    cost: costSummary
+                };
+            }
+
+            // ========================================
             // FLOW 2: Deep Crawl (if needed)
             // ========================================
             let flow2Result = null;
@@ -818,8 +849,8 @@ class FlowOrchestrator {
                     return {
                         contactCount: aggregationResult.contactCount,
                         enrichmentRate: aggregationResult.enrichmentRate,
-                        websiteUrls: aggregationResult.websiteUrlCount > 0 ?
-                            (await this.storage.getFlowResults(jobId))?.websiteUrls : [],
+                        websiteUrls: (aggregationResult.websiteUrlCount > 0 && this.storage?.enabled) ?
+                            (await this.storage.getFlowResults(jobId))?.websiteUrls || [] : [],
                         minerStats: aggregationResult.minerStats,
                         paginationStats: paginationInfo.isPaginated ? {
                             totalPages: paginationInfo.totalPages,
