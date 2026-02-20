@@ -728,6 +728,7 @@ Miners NEVER:
 - ✅ **processTemplate Unification (CRITICAL)** — worker.js had outdated processTemplate (no meta.first_name, no display_name, no pipe syntax). Production sends ALL emails through worker → placeholders not replaced. Extracted to `backend/utils/templateProcessor.js` as single source of truth, imported by campaignSend.js + worker.js + emailTemplates.js. Also added missing `convertPlainTextToHtml` to worker send flow. (commit: fa916e5)
 - ✅ **Templates Page Action Buttons Fix** — Preview/Edit/Delete buttons invisible due to `overflow-hidden` on table container + `whitespace-nowrap` on Subject column. Changed to `overflow-x-auto`, Subject gets `max-w-xs truncate`. (commit: f50b8ed in liffy-ui)
 - ✅ **Favicon + Browser Tab Title** — Resized 1024x1024 logo to 32x32 (favicon) + 180x180 (Apple touch icon), served from `public/`. CDN logo was 1.3MB + wrong path (404). Title "Liffy UI" → "Liffy". (commits: 7359a4c, dbafe9d in liffy-ui)
+- ✅ **Contacts Page Search/Filter Bug** — Page showed "0 total contacts" despite 3,379 in stats. Two fixes: (1) Backend `exclude_invalid` SQL filter used `NOT IN ('invalid','risky')` which silently excludes NULL rows (NULL NOT IN (...) = NULL = false). Added `IS NULL OR` clause. Stats unverified count also now includes NULL. (2) Frontend switched from Next.js rewrite proxy to direct API URL (`api.liffy.app`) matching campaigns page pattern. Added null-safe response parsing + better error messages. (commits: c156e3f backend, 41f14d2 liffy-ui)
 
 ### Next UI Tasks (Priority Order)
 
@@ -757,6 +758,7 @@ Miners NEVER:
 - **"Web Search" appearing as name/company in a few records** (minor) — stale data from early mining runs, not recurring.
 - ~~**"Exclude Invalid" default filter lost on Contacts page**~~ — FIXED: `useState('exclude_invalid')` default, `clearFilters` resets to `exclude_invalid`, `hasActiveFilters` treats it as default. (commit: a861502 in liffy-ui)
 - ~~**Import preview `total_with_email` count bug**~~ — FIXED: frontend was accessing `data.stats.total_with_email` from 202 background response that doesn't include stats. Now uses already-fetched `importPreview` data. (commit: db641b2 in liffy-ui)
+- ~~**Contacts page search/filter returns 0 results**~~ — FIXED: SQL NULL semantics in `exclude_invalid` filter + switched to direct API URL. (commits: c156e3f, 41f14d2)
 - **Mining console page hidden** — page exists at `/mining/jobs/[id]/console/page.tsx` but all navigation links removed. Requires: log writing in mining services, `/logs` endpoint, job control endpoints (pause/resume/cancel). Future feature.
 
 ### Immediate Next Tasks (New Session)
