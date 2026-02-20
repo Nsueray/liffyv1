@@ -19,6 +19,9 @@ const os = require('os');
 const { normalizeMinerOutput } = require('./normalizer');
 const aggregationTrigger = require('./aggregationTrigger');
 
+// Unified engine entry point (Step 3)
+const superMinerEntry = require('./superMiner/services/superMinerEntry');
+
 // Import result merger
 let resultMerger;
 try {
@@ -884,7 +887,16 @@ async function processMiningJob(job) {
         // Get mining mode from config (default to 'ai' for best quality)
         const mode = job.config?.mining_mode || 'ai';
         console.log(`[MiningService] Mining Mode: ${mode}`);
-        
+
+        // Unified Engine routing (Step 3)
+        const USE_UNIFIED_ENGINE = process.env.USE_UNIFIED_ENGINE !== 'false';
+        if (USE_UNIFIED_ENGINE) {
+            console.log(`[MiningService] Job ${job.id}: Routing to unified engine (mode: ${mode})`);
+            return superMinerEntry.runMiningJob(job, db);
+        }
+
+        // Legacy fallback below (only when USE_UNIFIED_ENGINE=false)
+        console.log(`[MiningService] Job ${job.id}: Using legacy path (mode: ${mode})`);
         switch (mode) {
             case 'quick':
                 return runQuickMining(job);

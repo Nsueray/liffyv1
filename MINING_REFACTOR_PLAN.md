@@ -98,34 +98,25 @@ UI → processMiningJob(job)
 
 ---
 
-### Step 3 — Route processMiningJob → superMinerEntry ⬅️ CURRENT
+### Step 3 — Route processMiningJob → superMinerEntry ✅ DONE
 
 **Source:** ChatGPT + Gemini (direct routing, no extra layer)
 
 **Goal:** All URL mining goes through superMinerEntry → flowOrchestrator.
 
-**Files to change:**
-- `miningService.js` `processMiningJob()` — URL path calls `superMinerEntry.runMiningJob(job, db)`
-- Old `switch(mode)` code stays but is bypassed (not deleted yet)
-- Feature flag: `USE_UNIFIED_ENGINE=true` enables new path, `false` keeps old behavior.
+**Files changed:**
+- `miningService.js` — added `require('./superMiner/services/superMinerEntry')` import, added `USE_UNIFIED_ENGINE` feature flag routing before legacy `switch(mode)`. Default: ON (`!== 'false'`).
+- Legacy `switch(mode)` code stays as fallback (not deleted yet — Step 8).
 
-```javascript
-if (type === 'url') {
-  if (process.env.USE_UNIFIED_ENGINE === 'true') {
-    return superMinerEntry.runMiningJob(job, db);
-  }
-  // Legacy path (unchanged, fallback)
-  switch (mode) { ... }
-}
-```
+**Feature flag:** `USE_UNIFIED_ENGINE` — default ON. Set `USE_UNIFIED_ENGINE=false` in Render env to instant-rollback to legacy path.
 
-**Test:** Set `USE_UNIFIED_ENGINE=true`, mine a URL, check mining_results.
+**Test:** `USE_UNIFIED_ENGINE` unset → unified engine active. Set to `'false'` → legacy path.
 
 **Rollback:** Set `USE_UNIFIED_ENGINE=false` → instant rollback via Render env var.
 
 ---
 
-### Step 4 — Save + Aggregation in superMinerEntry
+### Step 4 — Save + Aggregation in superMinerEntry ⬅️ CURRENT
 
 **Source:** Gemini (superMinerEntry as fat wrapper instead of new file)
 
