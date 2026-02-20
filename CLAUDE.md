@@ -674,6 +674,27 @@ Miners NEVER:
 
 ---
 
+## Mining Architecture Rules (SACRED — DO NOT VIOLATE)
+
+1. **Never modify existing miners** — no miner code is ever changed to accommodate a new site
+2. **Orchestrator only adds** — new miners are added to the pipeline, never removed
+3. **All miners are tried** — orchestrator runs every available miner, merges results
+4. **Normalizer/merge is frozen** — orchestration, normalization, and merge logic is NOT modified when adding miners
+5. **New URL doesn't work → add new miner** — never break existing miners to fix a new URL
+6. **20-30 miners is fine** — quantity of miners is not a concern, coverage is
+7. **Each miner is a plugin** — standalone, no dependencies on other miners, receives URL + config, returns results
+
+### Miner Registry (add new miners here)
+| Miner | Type | Specialty |
+|-------|------|-----------|
+| mine.js (base) | Playwright | Exhibition sites, general crawl |
+| apiMiner.js | XHR intercept | AJAX-loaded data |
+| listMiner.js | List page | Quick extraction without detail pages |
+| countryMiner.js | Enrichment | Country + stand info |
+| directoryMiner.js | TODO | Business directories (Yellow Pages, etc.) |
+
+---
+
 ## Build Priority (Current)
 
 1. ~~**Constitution Migration** — persons + affiliations tables, backfill~~ ✅ DONE
