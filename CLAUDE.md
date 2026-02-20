@@ -866,3 +866,10 @@ Legacy removal must be **incremental and reversible**.
 3. Remove dual-write in CSV upload, import-all, leads/import
 4. Drop `prospects` table (only after full migration verification)
 5. Remove legacy resolve fallback in campaign resolve
+
+---
+
+## Mining Engine Refactor
+
+Active refactor in progress. See `MINING_REFACTOR_PLAN.md` for full 10-step plan.
+Current step: Step 1 — Redis Optional.
