@@ -44,7 +44,7 @@ router.get('/', authRequired, async (req, res) => {
 
     if (verification_status && verification_status !== 'all') {
       if (verification_status === 'exclude_invalid') {
-        where.push(`p.verification_status NOT IN ('invalid', 'risky')`);
+        where.push(`(p.verification_status IS NULL OR p.verification_status NOT IN ('invalid', 'risky'))`);
       } else {
         where.push(`p.verification_status = $${idx}`);
         params.push(verification_status.trim());
@@ -154,7 +154,7 @@ router.get('/stats', authRequired, async (req, res) => {
          COUNT(*) AS total,
          COUNT(*) FILTER (WHERE verification_status = 'valid') AS verified,
          COUNT(*) FILTER (WHERE verification_status = 'invalid') AS invalid,
-         COUNT(*) FILTER (WHERE verification_status IN ('unknown', 'catchall')) AS unverified
+         COUNT(*) FILTER (WHERE verification_status IS NULL OR verification_status IN ('unknown', 'catchall')) AS unverified
        FROM persons
        WHERE organizer_id = $1`,
       [organizerId]
