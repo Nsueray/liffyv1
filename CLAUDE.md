@@ -727,6 +727,7 @@ Miners NEVER:
 - ✅ **Template Placeholder Fallback** — `{{display_name}}` computed field (first_name → company_name → "Valued Partner") + pipe fallback syntax `{{field1|field2|"literal"}}`. Both `processTemplate()` functions updated. Frontend: green chip + tooltip + tip text. (commits: 3d286f5, 357b685 in liffy-ui)
 - ✅ **processTemplate Unification (CRITICAL)** — worker.js had outdated processTemplate (no meta.first_name, no display_name, no pipe syntax). Production sends ALL emails through worker → placeholders not replaced. Extracted to `backend/utils/templateProcessor.js` as single source of truth, imported by campaignSend.js + worker.js + emailTemplates.js. Also added missing `convertPlainTextToHtml` to worker send flow. (commit: fa916e5)
 - ✅ **Templates Page Action Buttons Fix** — Preview/Edit/Delete buttons invisible due to `overflow-hidden` on table container + `whitespace-nowrap` on Subject column. Changed to `overflow-x-auto`, Subject gets `max-w-xs truncate`. (commit: f50b8ed in liffy-ui)
+- ✅ **Favicon + Browser Tab Title** — CDN logo as favicon (`https://cdn.liffy.app/assets/logo.png`) + Apple touch icon via Next.js metadata API. Removed old default `favicon.ico` from app dir. Title "Liffy UI" → "Liffy". (commit: 7359a4c in liffy-ui)
 
 ### Next UI Tasks (Priority Order)
 
