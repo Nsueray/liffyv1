@@ -262,19 +262,20 @@ function mapMode(mode) {
 
 **Sub-steps:**
 
-**9.1** Copy `liffy-local-miner/miners/directoryMiner.js` → `backend/services/urlMiners/directoryMiner.js`
-- Remove `require('../utils/normalize')` import
-- Return raw extraction data (no normalizeResult call)
-- Keep Playwright lifecycle internal
+**9.1** ✅ DONE — Copy `liffy-local-miner/miners/directoryMiner.js` → `backend/services/urlMiners/directoryMiner.js`
+- Removed `require('../utils/normalize')` import
+- Returns raw card data (no normalizeResult call)
+- Removed CLI entry point (browser lifecycle managed by wrapper)
 
-**9.2** Create `backend/services/urlMiners/directoryMinerAdapter.js` (~60 lines)
-- Wraps `runDirectoryMiner(page, url, config)` → `mine(job)` interface
-- Manages Playwright browser lifecycle
-- Returns `{ status, contacts, emails, meta }`
+**9.2** ✅ DONE (merged into 9.3) — Adapter inline in flowOrchestrator wrapper instead of separate file
+- Manages Playwright browser lifecycle (launch → page → mine → close)
+- Converts raw cards to `{ contacts, emails }` → `normalizeResult()`
 
-**9.3** Register in `flowOrchestrator.loadMiners()` (try/catch, ~10 lines)
+**9.3** ✅ DONE — Registered in `flowOrchestrator.loadMiners()` (try/catch, ~40 lines)
+- Separate try/catch block after main miners (failure doesn't break other miners)
+- Requires `playwright` + `directoryMiner` — logs warning if not available
 
-**9.4** Add directory URL patterns to SmartRouter
+**9.4** ⬅️ PHASE 2 — Add directory URL patterns to SmartRouter
 ```javascript
 const DIRECTORY_PATTERNS = [
   'yellowpages', 'yell.com', 'goldenpages', 'ghanayello',

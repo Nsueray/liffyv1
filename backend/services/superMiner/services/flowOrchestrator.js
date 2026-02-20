@@ -187,6 +187,51 @@ class FlowOrchestrator {
                 }
             };
 
+            // directoryMiner: try/catch load (Step 9 Phase 1)
+            // Separate from main miners block so failure doesn't break other miners
+            try {
+                const { runDirectoryMiner } = require('../../urlMiners/directoryMiner');
+                const { chromium } = require('playwright');
+
+                this.miners.directoryMiner = {
+                    name: 'directoryMiner',
+                    mine: async (job) => {
+                        console.log(`[directoryMiner] Starting for: ${job.input}`);
+                        let browser = null;
+                        try {
+                            browser = await chromium.launch({ headless: true });
+                            const page = await browser.newPage();
+                            const rawCards = await runDirectoryMiner(page, job.input, job.config || {});
+                            await browser.close();
+                            browser = null;
+
+                            // Convert raw cards to normalizeResult format
+                            const contacts = rawCards.map(card => ({
+                                company_name: card.company_name,
+                                email: card.email || (card.all_emails && card.all_emails[0]) || null,
+                                phone: card.phone,
+                                website: card.website,
+                                country: card.country,
+                                address: card.address
+                            }));
+                            const emails = rawCards
+                                .flatMap(c => c.all_emails || (c.email ? [c.email] : []))
+                                .filter(Boolean);
+
+                            console.log(`[directoryMiner] Result: ${contacts.length} contacts, ${emails.length} emails`);
+
+                            return this.normalizeResult({ contacts, emails }, 'directoryMiner');
+                        } catch (err) {
+                            if (browser) await browser.close().catch(() => {});
+                            throw err;
+                        }
+                    }
+                };
+                console.log('[FlowOrchestrator] directoryMiner loaded ✅');
+            } catch (err) {
+                console.log('[FlowOrchestrator] directoryMiner not available:', err.message);
+            }
+
             // Aliases
             this.miners.playwrightMiner = this.miners.fullMiner;
             this.miners.playwrightDetailMiner = this.miners.fullMiner;
