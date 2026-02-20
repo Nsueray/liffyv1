@@ -16,6 +16,17 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
   };
 
   // Rule-based plan selection by input type and mining mode.
+
+  // Directory sites — directoryMiner handles its own pagination internally.
+  // No additional pagination wrapper needed from flowOrchestrator.
+  if (resolvedInputType === 'directory') {
+    addStep('directoryMiner', 'legacy', 'Business directory extraction');
+    if (resolvedMiningMode === 'ai') {
+      addStep('aiMiner', 'legacy', 'AI enrichment for directory');
+    }
+    return plan;
+  }
+
   if (resolvedInputType === 'document') {
     // Primary document context first, then enrich for full/ai modes.
     addStep('documentMiner', 'documentTextNormalizer', 'Primary document context');

@@ -751,7 +751,9 @@ class FlowOrchestrator {
             if (analysis) {
                 let inputType = 'unknown';
 
-                if (analysis.pageType === PAGE_TYPES.DOCUMENT_VIEWER) {
+                if (analysis.pageType === PAGE_TYPES.DIRECTORY) {
+                    inputType = 'directory';
+                } else if (analysis.pageType === PAGE_TYPES.DOCUMENT_VIEWER) {
                     inputType = 'document';
                 } else if (analysis.pageType === PAGE_TYPES.EXHIBITOR_TABLE || analysis.pageType === 'website') {
                     inputType = 'website';
@@ -780,10 +782,16 @@ class FlowOrchestrator {
                     }
 
                     // --- Pagination detection for execution plan path ---
-                    const paginationInfo = await this.detectPagination(job, {
-                        paginationType: analysis.paginationType,
-                        hints: { pagination: { detected: analysis.paginationType !== PAGINATION_TYPES.NONE } }
-                    });
+                    // GUARD: directoryMiner handles its own pagination internally
+                    // (crawlListPages, max 10 pages). Running flowOrchestrator pagination
+                    // on top would cause N × M crawls (e.g. 15 × 10 = 150). Skip external.
+                    const primaryStepMiner = executablePlan[0]?.miner;
+                    const paginationInfo = (primaryStepMiner === 'directoryMiner' || inputType === 'directory')
+                        ? { isPaginated: false, totalPages: 1, pageUrls: [job.input] }
+                        : await this.detectPagination(job, {
+                            paginationType: analysis.paginationType,
+                            hints: { pagination: { detected: analysis.paginationType !== PAGINATION_TYPES.NONE } }
+                        });
 
                     const minerResults = [];
 
@@ -925,7 +933,10 @@ class FlowOrchestrator {
         }
 
         // 3. Detect pagination
-        const paginationInfo = await this.detectPagination(job, routeDecision);
+        // GUARD: directoryMiner handles its own pagination — skip external pagination
+        const paginationInfo = (selectedMiner === 'directoryMiner' || routeDecision.pageType === PAGE_TYPES.DIRECTORY)
+            ? { isPaginated: false, totalPages: 1, pageUrls: [job.input] }
+            : await this.detectPagination(job, routeDecision);
 
         // 4. Execute miner (single page or paginated)
         const miner = miners[selectedMiner] || miners.fullMiner;

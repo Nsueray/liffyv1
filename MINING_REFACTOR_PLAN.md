@@ -275,16 +275,17 @@ function mapMode(mode) {
 - Separate try/catch block after main miners (failure doesn't break other miners)
 - Requires `playwright` + `directoryMiner` — logs warning if not available
 
-**9.4** ⬅️ PHASE 2 — Add directory URL patterns to SmartRouter
-```javascript
-const DIRECTORY_PATTERNS = [
-  'yellowpages', 'yell.com', 'goldenpages', 'ghanayello',
-  'yelp.com', 'justdial', 'europages', 'thomasnet',
-  'kompass', 'hotfrog', 'cylex'
-];
-```
+**9.4** ✅ DONE — Add directory URL patterns to SmartRouter + PageAnalyzer
+- `PAGE_TYPES.DIRECTORY` added to pageAnalyzer
+- `DIRECTORY_DOMAINS` list (16 domains) with hostname-based detection in overridden `analyzeHtml`
+- Directory detection runs after ERROR/BLOCKED, before other heuristics (document viewer, etc.)
+- `getRecommendation` returns `directoryMiner` with `ownPagination: true` hint
+- SmartRouter `minerPriority`: directoryMiner = 2, `fallbackChains`: directoryMiner → [playwrightTableMiner, aiMiner]
 
-**9.5** Add to `executionPlanBuilder` if directory site detected
+**9.5** ✅ DONE — Add to `executionPlanBuilder` if directory site detected
+- `inputType === 'directory'` branch: directoryMiner primary, aiMiner enrichment for ai mode
+- flowOrchestrator maps `PAGE_TYPES.DIRECTORY` → `inputType = 'directory'`
+- Double-pagination guard: both execution-plan path and SmartRouter fallback path skip external pagination when directoryMiner is primary (directoryMiner handles its own pagination via crawlListPages)
 
 **9.6** Test: GhanaYello URL → directoryMiner triggered → results in persons table
 

@@ -25,8 +25,17 @@ const PAGE_TYPES = {
     BLOCKED: 'blocked',                     // Access denied
     ERROR: 'error',                         // Page error
     DOCUMENT_VIEWER: 'document_viewer',    // Flipbook/PDF viewer
+    DIRECTORY: 'directory',                // Business directory (Yellow Pages, etc.)
     UNKNOWN: 'unknown'
 };
+
+// Known business directory domains — hostname-based detection (Step 9 Phase 2)
+const DIRECTORY_DOMAINS = [
+    'yellowpages', 'yell.com', 'goldenpages', 'ghanayello',
+    'yelp.com', 'justdial', 'europages', 'thomasnet',
+    'kompass', 'hotfrog', 'cylex', 'infobel',
+    'businesslist', 'dnb.com', 'manta.com', 'glmis.gov.gh'
+];
 
 // Pagination types
 const PAGINATION_TYPES = {
@@ -521,7 +530,8 @@ module.exports = {
     PageAnalyzer,
     getPageAnalyzer,
     PAGE_TYPES,
-    PAGINATION_TYPES
+    PAGINATION_TYPES,
+    DIRECTORY_DOMAINS
 };
 
 // ============================================
@@ -575,30 +585,54 @@ PageAnalyzer.prototype.detectDocumentViewer = function($, html, url) {
     };
 };
 
-// Override analyzeHtml to include document viewer detection
+// Override analyzeHtml to include directory + document viewer detection
 const originalAnalyzeHtml = PageAnalyzer.prototype.analyzeHtml;
 PageAnalyzer.prototype.analyzeHtml = function(html, url) {
     const result = originalAnalyzeHtml.call(this, html, url);
-    
-    // Add document viewer detection
+
+    // Directory detection (hostname-based) — after ERROR/BLOCKED, before other heuristics
+    // Step 9 Phase 2: directoryMiner handles its own pagination, so this must be detected
+    // early to prevent double-pagination in flowOrchestrator.
+    try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        if (DIRECTORY_DOMAINS.some(d => hostname.includes(d))) {
+            result.pageType = PAGE_TYPES.DIRECTORY;
+            result.isDirectory = true;
+            console.log(`[PageAnalyzer] Directory detected via hostname: ${hostname}`);
+            return result; // Skip document viewer — directory takes priority
+        }
+    } catch (e) {
+        // Invalid URL, continue to other checks
+    }
+    result.isDirectory = false;
+
+    // Document viewer detection
     const $ = cheerio.load(html);
     const docViewerAnalysis = this.detectDocumentViewer($, html, url);
-    
+
     result.isDocumentViewer = docViewerAnalysis.isDocumentViewer;
     result.documentViewerIndicators = docViewerAnalysis.indicators;
-    
+
     // Override pageType if document viewer detected
     if (result.isDocumentViewer) {
         result.pageType = PAGE_TYPES.DOCUMENT_VIEWER;
         console.log('[PageAnalyzer] Document viewer detected:', docViewerAnalysis.indicators.join(', '));
     }
-    
+
     return result;
 };
 
-// Override getRecommendation to handle DOCUMENT_VIEWER
+// Override getRecommendation to handle DIRECTORY + DOCUMENT_VIEWER
 const originalGetRecommendation = PageAnalyzer.prototype.getRecommendation;
 PageAnalyzer.prototype.getRecommendation = function(analysis) {
+    if (analysis.pageType === PAGE_TYPES.DIRECTORY) {
+        return {
+            miner: 'directoryMiner',
+            useCache: false, // Playwright-based, no cache
+            reason: 'Business directory detected, using directoryMiner',
+            ownPagination: true // directoryMiner handles its own pagination
+        };
+    }
     if (analysis.pageType === PAGE_TYPES.DOCUMENT_VIEWER) {
         return {
             miner: 'documentMiner',
