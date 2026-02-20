@@ -205,18 +205,23 @@ class FlowOrchestrator {
                             await browser.close();
                             browser = null;
 
-                            // Convert raw cards to normalizeResult format
+                            // Convert raw cards to normalizeResult format (Step 9 Phase 3)
+                            const cleanEmail = (e) => e ? e.replace(/\s+/g, '').trim() : null;
                             const contacts = rawCards.map(card => ({
                                 company_name: card.company_name,
-                                email: card.email || (card.all_emails && card.all_emails[0]) || null,
+                                email: cleanEmail(card.email || (card.all_emails && card.all_emails[0]) || null),
                                 phone: card.phone,
                                 website: card.website,
                                 country: card.country,
-                                address: card.address
+                                address: card.address,
+                                contact_name: card.contact_name || card.contactName || null,
+                                job_title: card.job_title || card.jobTitle || null
                             }));
                             const emails = rawCards
                                 .flatMap(c => c.all_emails || (c.email ? [c.email] : []))
-                                .filter(Boolean);
+                                .filter(Boolean)
+                                .map(e => e.replace(/\s+/g, '').trim())
+                                .filter(e => e.includes('@') && e.length > 5);
 
                             console.log(`[directoryMiner] Result: ${contacts.length} contacts, ${emails.length} emails`);
 

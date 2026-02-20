@@ -470,7 +470,7 @@ async function goToNextPage(page, baseUrl, currentPage) {
  * Phase 1: Crawl all list pages and collect business cards.
  */
 async function crawlListPages(page, baseUrl, config = {}) {
-  const maxPages = config.max_pages || 10;
+  const maxPages = config.max_pages || config.maxPages || 10;
   const delayMs = config.delay_ms || 1000;
   const detailPattern = config.detail_url_pattern || null;
   const siteDomain = config.site_domain || getSiteDomain(baseUrl);
@@ -1022,8 +1022,21 @@ async function runDirectoryMiner(page, url, config = {}) {
 
   console.log(`\n   [directoryMiner] Coverage: ${total} total, ${withEmail} email, ${withPhone} phone, ${withWebsite} website`);
 
+  // Filter noise cards (Step 9 Phase 3)
+  const NOISE_NAME = /^(no\s*local|not\s*found|no\s*results?|error|loading|n\/a|none|no\s*data|no\s*match)/i;
+  const filtered = cards.filter(card => {
+    if (card.company_name && NOISE_NAME.test(card.company_name.trim())) return false;
+    // Remove cards with no email AND no website (no actionable data)
+    if (!card.email && (!card.all_emails || card.all_emails.length === 0) && !card.website) return false;
+    return true;
+  });
+
+  if (filtered.length < cards.length) {
+    console.log(`   [directoryMiner] Filtered: ${cards.length - filtered.length} noise cards removed → ${filtered.length} remaining`);
+  }
+
   // Return raw cards — normalization handled by flowOrchestrator.normalizeResult()
-  return cards;
+  return filtered;
 }
 
 module.exports = { runDirectoryMiner, getSiteDomain };
