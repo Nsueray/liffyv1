@@ -685,13 +685,25 @@ Miners NEVER:
 7. **Each miner is a plugin** — standalone, no dependencies on other miners, receives URL + config, returns results
 
 ### Miner Registry (add new miners here)
-| Miner | Type | Specialty |
-|-------|------|-----------|
-| mine.js (base) | Playwright | Exhibition sites, general crawl |
-| apiMiner.js | XHR intercept | AJAX-loaded data |
-| listMiner.js | List page | Quick extraction without detail pages |
-| countryMiner.js | Enrichment | Country + stand info |
-| directoryMiner.js | TODO | Business directories (Yellow Pages, etc.) |
+| Miner | Type | Specialty | Status |
+|-------|------|-----------|--------|
+| mine.js (base) | Playwright | Exhibition sites, general crawl | ACTIVE |
+| apiMiner.js | XHR intercept | AJAX-loaded data | ACTIVE |
+| listMiner.js | List page | Quick extraction without detail pages | ACTIVE |
+| countryMiner.js | Enrichment | Country + stand info | ACTIVE |
+| directoryMiner.js | Playwright | Business directories (Yellow Pages, GhanaYello, etc.) | PROTOTYPE |
+
+### directoryMiner.js — Status & Next Steps
+
+**Location:** `liffy-local-miner/miners/directoryMiner.js` (+ `test-directory.js`)
+**Status:** PROTOTYPE — standalone CLI works, tested on GhanaYello (20/20 cards, 100% phone, detail page enrichment).
+
+**NOT yet integrated:**
+1. **orchestrator.js** — directoryMiner must be added to orchestrator pipeline (like listMiner/apiMiner/countryMiner)
+2. **API push** — results need to be pushed to `POST /api/mining/jobs/:id/results` (like mine.js does)
+3. **Normalizer pipeline** — output uses `normalizeResult()` but not wired into aggregationTrigger → persons/affiliations
+
+**These 3 steps are REQUIRED before directoryMiner is production-ready.**
 
 ---
 
