@@ -1,16 +1,12 @@
 /**
- * SuperMiner v3.1 - Main Entry Point
- * 
- * Feature flag ile kontrol edilen intelligent mining orchestration system.
- * 
+ * SuperMiner v3.2 - Main Entry Point
+ *
+ * Intelligent mining orchestration system.
+ * Orchestrator is always active (SUPERMINER_ENABLED flag removed in Step 2).
+ *
  * KURALLAR:
- * - SUPERMINER_ENABLED=false → %100 legacy davranış
- * - SUPERMINER_ENABLED=true → SuperMiner aktif
  * - Mevcut miner'lar DEĞİŞMEZ, sadece wrapper pattern
  */
-
-// Feature flag
-const SUPERMINER_ENABLED = process.env.SUPERMINER_ENABLED === 'true';
 
 // Version info
 const VERSION = '3.2.0';
@@ -28,18 +24,15 @@ function logStartup() {
     console.log('\n' + '='.repeat(60));
     console.log(`SuperMiner v${VERSION} (${BUILD_DATE})`);
     console.log('='.repeat(60));
-    console.log(`Status: ${SUPERMINER_ENABLED ? '✅ ENABLED' : '⚠️ DISABLED (legacy mode)'}`);
-    
-    if (SUPERMINER_ENABLED) {
-        console.log(`Redis: ${process.env.REDIS_URL ? '✅ Configured' : '❌ Missing'}`);
-        
-        const issues = checkRequirements();
-        if (issues.length > 0) {
-            console.log('\n⚠️ Configuration Issues:');
-            issues.forEach(issue => console.log(`   - ${issue}`));
-        }
+    console.log(`Status: ✅ ACTIVE`);
+    console.log(`Redis: ${process.env.REDIS_URL ? '✅ Configured' : '⚠️ Not configured (fallback mode)'}`);
+
+    const issues = checkRequirements();
+    if (issues.length > 0) {
+        console.log('\n⚠️ Configuration Issues:');
+        issues.forEach(issue => console.log(`   - ${issue}`));
     }
-    
+
     console.log('='.repeat(60) + '\n');
 }
 
@@ -48,30 +41,20 @@ let eventBus = null;
 let intermediateStorage = null;
 let UnifiedContact = null;
 
-// Lazy load modules only when enabled
+// Lazy load modules
 function getEventBus() {
-    if (!SUPERMINER_ENABLED) {
-        return null;
-    }
-    
     if (!eventBus) {
         const { getEventBus: getEB } = require('./services/eventBus');
         eventBus = getEB();
     }
-    
     return eventBus;
 }
 
 function getIntermediateStorage() {
-    if (!SUPERMINER_ENABLED) {
-        return null;
-    }
-    
     if (!intermediateStorage) {
         const { getIntermediateStorage: getIS } = require('./services/intermediateStorage');
         intermediateStorage = getIS();
     }
-    
     return intermediateStorage;
 }
 
@@ -86,22 +69,17 @@ function getUnifiedContactClass() {
 
 /**
  * Initialize SuperMiner
- * Call this from server.js if SUPERMINER_ENABLED
+ * Call this from server.js at startup
  */
 async function initialize() {
     logStartup();
-    
-    if (!SUPERMINER_ENABLED) {
-        console.log('[SuperMiner] Running in legacy mode, no initialization needed');
-        return { success: true, mode: 'legacy' };
-    }
-    
+
     const issues = checkRequirements();
     if (issues.length > 0) {
         console.error('[SuperMiner] ❌ Cannot initialize due to configuration issues');
         return { success: false, mode: 'error', issues };
     }
-    
+
     try {
         // Connect to Redis (optional — non-fatal if unavailable)
         const eb = getEventBus();
@@ -141,10 +119,6 @@ async function initialize() {
  * Graceful shutdown
  */
 async function shutdown() {
-    if (!SUPERMINER_ENABLED) {
-        return;
-    }
-    
     console.log('[SuperMiner] Shutting down...');
     
     try {
@@ -169,23 +143,20 @@ async function shutdown() {
 async function healthCheck() {
     const result = {
         version: VERSION,
-        enabled: SUPERMINER_ENABLED,
-        mode: SUPERMINER_ENABLED ? 'superminer' : 'legacy'
+        mode: 'superminer'
     };
-    
-    if (SUPERMINER_ENABLED) {
-        const eb = getEventBus();
-        const is = getIntermediateStorage();
-        
-        if (eb) {
-            result.eventBus = await eb.healthCheck();
-        }
-        
-        if (is) {
-            result.intermediateStorage = await is.healthCheck();
-        }
+
+    const eb = getEventBus();
+    const is = getIntermediateStorage();
+
+    if (eb) {
+        result.eventBus = await eb.healthCheck();
     }
-    
+
+    if (is) {
+        result.intermediateStorage = await is.healthCheck();
+    }
+
     return result;
 }
 
@@ -195,13 +166,7 @@ async function healthCheck() {
  * @returns {boolean}
  */
 function shouldUseSuperminer(job) {
-    if (!SUPERMINER_ENABLED) {
-        return false;
-    }
-    
-    // Future: Check job.version === 'v2' or job.config.use_superminer
-    // For now, all new jobs use SuperMiner when enabled
-    
+    // All jobs use SuperMiner orchestrator
     return true;
 }
 
@@ -253,116 +218,74 @@ function getServices() {
 // Get cost tracker
 let costTracker = null;
 function getCostTracker() {
-    if (!SUPERMINER_ENABLED) {
-        return null;
-    }
-    
     if (!costTracker) {
         const { getCostTracker: getCT } = require('./services/costTracker');
         costTracker = getCT();
     }
-    
     return costTracker;
 }
 
 // Get HTML cache
 let htmlCache = null;
 function getHtmlCache() {
-    if (!SUPERMINER_ENABLED) {
-        return null;
-    }
-    
     if (!htmlCache) {
         const { getHtmlCache: getHC } = require('./services/htmlCache');
         htmlCache = getHC();
     }
-    
     return htmlCache;
 }
 
 // Get page analyzer (Scout)
 let pageAnalyzer = null;
 function getPageAnalyzer() {
-    if (!SUPERMINER_ENABLED) {
-        return null;
-    }
-    
     if (!pageAnalyzer) {
         const { getPageAnalyzer: getPA } = require('./services/pageAnalyzer');
         pageAnalyzer = getPA();
     }
-    
     return pageAnalyzer;
 }
 
 // Get smart router
 let smartRouter = null;
 function getSmartRouter() {
-    if (!SUPERMINER_ENABLED) {
-        return null;
-    }
-    
     if (!smartRouter) {
         const { getSmartRouter: getSR } = require('./services/smartRouter');
         smartRouter = getSR();
     }
-    
     return smartRouter;
 }
 
 // Get circuit breaker
 let circuitBreaker = null;
 function getCircuitBreaker() {
-    if (!SUPERMINER_ENABLED) {
-        return null;
-    }
-    
     if (!circuitBreaker) {
         const { getCircuitBreaker: getCB } = require('./services/circuitBreaker');
         circuitBreaker = getCB();
     }
-    
     return circuitBreaker;
 }
 
 // Create result aggregator (needs db connection)
 function createResultAggregator(db) {
-    if (!SUPERMINER_ENABLED) {
-        return null;
-    }
-    
     const { createResultAggregator: create } = require('./services/resultAggregator');
     return create(db);
 }
 
 // Get SuperMiner Entry (main entry point)
 function getEntry() {
-    if (!SUPERMINER_ENABLED) {
-        return null;
-    }
-    
     return require('./services/superMinerEntry');
 }
 
 // Initialize SuperMiner (convenience wrapper)
 async function initializeSuperMiner(db, config = {}) {
     const entry = getEntry();
-    if (entry) {
-        return entry.initialize(db, config);
-    }
-    return { success: true, mode: 'legacy' };
+    return entry.initialize(db, config);
 }
 
 // Run mining job (convenience wrapper)
 async function runMiningJob(job, db) {
     const entry = getEntry();
-    if (entry) {
-        return entry.runMiningJob(job, db);
-    }
-    
-    // Fallback to legacy
-    const miningService = require('../miningService');
-    return miningService.runMining(job.id, job.organizer_id, job.config?.mining_mode || 'full');
+    return entry.runMiningJob(job, db);
 }
 
 /**
@@ -399,7 +322,6 @@ function filterHallucinations(contacts, options = {}) {
 
 module.exports = {
     // Config
-    SUPERMINER_ENABLED,
     VERSION,
     
     // Lifecycle

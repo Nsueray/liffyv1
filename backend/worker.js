@@ -45,7 +45,7 @@ function isHardSite(url) {
 }
 
 /* =========================================================
-   SUPERMINER INTEGRATION (UNCHANGED)
+   SUPERMINER INTEGRATION
    ========================================================= */
 let superMiner = null;
 let superMinerInitialized = false;
@@ -53,11 +53,6 @@ let superMinerInitialized = false;
 async function initSuperMiner() {
   try {
     superMiner = require("./services/superMiner");
-
-    if (!superMiner.SUPERMINER_ENABLED) {
-      console.log("[Worker] SuperMiner DISABLED");
-      return false;
-    }
 
     const result = await superMiner.initializeSuperMiner(db);
     if (result.success) {
@@ -73,10 +68,10 @@ async function initSuperMiner() {
 
 function shouldUseSuperMiner(job) {
   if (isHardSite(job.input)) {
-    console.log("[Worker] 🔒 HARD SITE → legacy + manual only");
+    console.log("[Worker] HARD SITE → legacy + manual only");
     return false;
   }
-  if (!superMiner || !superMiner.SUPERMINER_ENABLED || !superMinerInitialized) {
+  if (!superMiner || !superMinerInitialized) {
     return false;
   }
   if (job.type !== "url") return false;

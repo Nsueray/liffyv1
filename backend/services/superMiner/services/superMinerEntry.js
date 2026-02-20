@@ -1,13 +1,8 @@
 /**
- * superMinerEntry.js - SuperMiner v3.1
- * 
+ * superMinerEntry.js - SuperMiner v3.2
+ *
  * TEK ENTRY POINT - Tüm SuperMiner işlemleri buradan başlar.
- * Legacy sistemle entegrasyon noktası.
- * 
- * KURALLAR:
- * - SUPERMINER_ENABLED=false → Legacy'ye yönlendir
- * - SUPERMINER_ENABLED=true → SuperMiner kullan
- * - Her zaman feature flag kontrol et
+ * Orchestrator always active (SUPERMINER_ENABLED flag removed in Step 2).
  */
 
 const superMiner = require('../index');
@@ -28,16 +23,6 @@ let isInitialized = false;
  * @returns {Promise<Object>} Init result
  */
 async function initialize(db, config = {}) {
-    // Check feature flag
-    if (!superMiner.SUPERMINER_ENABLED) {
-        console.log('[SuperMinerEntry] SuperMiner DISABLED, using legacy system');
-        return {
-            success: true,
-            mode: 'legacy',
-            message: 'SuperMiner disabled, legacy system active'
-        };
-    }
-    
     console.log('[SuperMinerEntry] Initializing SuperMiner...');
     
     try {
@@ -90,10 +75,6 @@ async function initialize(db, config = {}) {
  * Call this on server shutdown
  */
 async function shutdown() {
-    if (!superMiner.SUPERMINER_ENABLED) {
-        return;
-    }
-    
     console.log('[SuperMinerEntry] Shutting down...');
     
     try {
@@ -123,57 +104,15 @@ async function shutdown() {
  * @returns {Promise<Object>} Mining result
  */
 async function runMiningJob(job, db) {
-    // Check feature flag
-    if (!superMiner.SUPERMINER_ENABLED) {
-        // Delegate to legacy system
-        console.log(`[SuperMinerEntry] Job ${job.id}: Using legacy system`);
-        return runLegacyMining(job);
-    }
-    
     // Check initialization
     if (!isInitialized || !orchestrator) {
-        console.warn('[SuperMinerEntry] Not initialized, falling back to legacy');
-        return runLegacyMining(job);
+        throw new Error('[SuperMinerEntry] Not initialized — call initialize() first');
     }
-    
-    console.log(`[SuperMinerEntry] Job ${job.id}: Using SuperMiner`);
-    
+
+    console.log(`[SuperMinerEntry] Job ${job.id}: Using SuperMiner orchestrator`);
+
     // Use SuperMiner orchestrator
     return orchestrator.executeJob(job);
-}
-
-/**
- * Run legacy mining (fallback)
- */
-async function runLegacyMining(job) {
-    try {
-        // Import legacy miningService
-        const miningService = require('../../miningService');
-        
-        // Determine mode from job config
-        const mode = job.config?.mining_mode || 'full';
-        
-        console.log(`[SuperMinerEntry] Legacy mode: ${mode}`);
-        
-        // Call legacy service
-        const result = await miningService.runMining(job.id, job.organizer_id, mode);
-        
-        return {
-            status: 'COMPLETED',
-            mode: 'legacy',
-            jobId: job.id,
-            result
-        };
-        
-    } catch (err) {
-        console.error(`[SuperMinerEntry] Legacy mining failed:`, err.message);
-        return {
-            status: 'FAILED',
-            mode: 'legacy',
-            jobId: job.id,
-            error: err.message
-        };
-    }
 }
 
 /**
@@ -184,19 +123,13 @@ async function runLegacyMining(job) {
  * @returns {Promise<Object>} Quick result
  */
 async function quickMine(url, options = {}) {
-    if (!superMiner.SUPERMINER_ENABLED) {
-        // Legacy quick mode
-        const urlMiner = require('../../urlMiner');
-        return urlMiner.mineUrl(url);
-    }
-    
     // Use page analyzer for quick analysis
     const analyzer = superMiner.getPageAnalyzer();
     if (analyzer) {
         return analyzer.analyze(url, { skipCache: options.fresh });
     }
-    
-    return { error: 'Quick mine not available' };
+
+    return { error: 'Quick mine not available — page analyzer not loaded' };
 }
 
 /**
@@ -204,25 +137,23 @@ async function quickMine(url, options = {}) {
  */
 async function getHealth() {
     const health = {
-        enabled: superMiner.SUPERMINER_ENABLED,
         initialized: isInitialized,
         version: superMiner.VERSION
     };
-    
-    if (superMiner.SUPERMINER_ENABLED && isInitialized) {
-        // Get detailed health
+
+    if (isInitialized) {
         const coreHealth = await superMiner.healthCheck();
         health.core = coreHealth;
-        
+
         if (listener) {
             health.listener = listener.getStatus();
         }
-        
+
         if (orchestrator) {
             health.activeJobs = orchestrator.getActiveJobs();
         }
     }
-    
+
     return health;
 }
 
@@ -230,10 +161,10 @@ async function getHealth() {
  * Get system stats
  */
 function getStats() {
-    if (!superMiner.SUPERMINER_ENABLED || !isInitialized) {
-        return { mode: 'legacy', stats: null };
+    if (!isInitialized) {
+        return { mode: 'not_initialized', stats: null };
     }
-    
+
     const stats = {
         mode: 'superminer',
         version: superMiner.VERSION
@@ -275,8 +206,8 @@ function getStats() {
  * @returns {Promise<Object>} Result
  */
 async function runWithMiner(job, minerName, db) {
-    if (!superMiner.SUPERMINER_ENABLED || !orchestrator) {
-        return { error: 'SuperMiner not enabled' };
+    if (!orchestrator) {
+        return { error: 'SuperMiner not initialized' };
     }
     
     // Force route to specific miner
@@ -309,7 +240,6 @@ module.exports = {
     getListener: () => listener,
     isInitialized: () => isInitialized,
     
-    // Re-export feature flag
-    SUPERMINER_ENABLED: superMiner.SUPERMINER_ENABLED,
+    // Re-export version
     VERSION: superMiner.VERSION
 };

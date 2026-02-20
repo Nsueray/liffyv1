@@ -61,7 +61,7 @@ UI → processMiningJob(job)
 
 ## 10-STEP EXECUTION PLAN
 
-### Step 1 — Redis Optional ⬅️ CURRENT
+### Step 1 — Redis Optional ✅ DONE
 
 **Source:** Claude (Phase 1.1) — all 3 AIs agree this is the blocker
 
@@ -81,15 +81,16 @@ UI → processMiningJob(job)
 
 ---
 
-### Step 2 — Remove SUPERMINER_ENABLED Flag
+### Step 2 — Remove SUPERMINER_ENABLED Flag ✅ DONE
 
 **Source:** ChatGPT (Phase 2)
 
 **Goal:** superMinerEntry always uses flowOrchestrator. No legacy fallback path.
 
-**Files to change:**
-- `superMiner/index.js` — remove `SUPERMINER_ENABLED` check, always initialize
-- `superMinerEntry.js` — remove legacy fallback branch
+**Files changed:**
+- `superMiner/index.js` — removed `SUPERMINER_ENABLED` const + all guards, `shouldUseSuperminer()` always returns true
+- `superMinerEntry.js` — removed legacy fallback branches + `runLegacyMining()` function
+- `worker.js` — removed `SUPERMINER_ENABLED` check from `initSuperMiner()` + `shouldUseSuperMiner()`
 
 **Test:** `superMinerEntry.runMiningJob()` always goes to orchestrator path.
 
@@ -97,7 +98,7 @@ UI → processMiningJob(job)
 
 ---
 
-### Step 3 — Route processMiningJob → superMinerEntry
+### Step 3 — Route processMiningJob → superMinerEntry ⬅️ CURRENT
 
 **Source:** ChatGPT + Gemini (direct routing, no extra layer)
 
