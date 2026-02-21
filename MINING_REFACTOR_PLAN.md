@@ -1,5 +1,7 @@
 # MINING ENGINE REFACTOR — MASTER PLAN v2
 
+> See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [LIFFY_TODO.md](./LIFFY_TODO.md)
+
 **(Claude + ChatGPT + Gemini Consensus)**
 
 ## Vision
@@ -116,7 +118,9 @@ UI → processMiningJob(job)
 
 ---
 
-### Step 4 — Save + Aggregation in superMinerEntry ⬅️ CURRENT
+### Step 4 — Save + Aggregation in superMinerEntry — SKIPPED
+
+**Status:** SKIPPED — resultAggregator already handles both writeToDatabase() and triggerCanonicalAggregation() in aggregateV2() and aggregateSimple(). No need to move to superMinerEntry.
 
 **Source:** Gemini (superMinerEntry as fat wrapper instead of new file)
 
@@ -154,7 +158,9 @@ async function runMiningJob(job, db) {
 
 ---
 
-### Step 5 — Flow2 Simplify/Disable
+### Step 5 — Flow2 Simplify/Disable ✅ DONE
+
+**Status:** DONE (fiilen) — `_alreadyPersisted` flag in aggregateV1 short-circuits to skip Flow2 when Redis unavailable. Production path is Flow1 → direct DB write.
 
 **Source:** ChatGPT (Phase 3.2)
 
@@ -172,7 +178,9 @@ async function runMiningJob(job, db) {
 
 ---
 
-### Step 6 — Mode Mapping: quick/full/ai → free/ai
+### Step 6 — Mode Mapping: quick/full/ai → free/ai ✅ DONE
+
+**Status:** DONE — UI shows Free/AI modes. Backend maps quick/full → free, ai → ai.
 
 **Source:** ChatGPT (Phase 5), User vision doc
 
@@ -199,7 +207,7 @@ function mapMode(mode) {
 
 ---
 
-### Step 7 — urlMiner + miningWorker DB Write Removal
+### Step 7 — urlMiner + miningWorker DB Write Removal — DEFER
 
 **Source:** ChatGPT (Phase 4) + Claude — done AFTER legacy cleanup
 
@@ -217,7 +225,7 @@ function mapMode(mode) {
 
 ---
 
-### Step 8 — Legacy Function Deletion (miningService slim down)
+### Step 8 — Legacy Function Deletion (miningService slim down) — DEFER
 
 **Source:** Claude (Phase 3)
 
@@ -254,7 +262,7 @@ function mapMode(mode) {
 
 ---
 
-### Step 9 — directoryMiner Integration
+### Step 9 — directoryMiner Integration ✅ Phase 1-5 DONE
 
 **Source:** All 3 AIs agree — last step
 
@@ -293,11 +301,11 @@ function mapMode(mode) {
 
 ---
 
-### Step 10 — UI Simplification (FUTURE — not this refactor)
+### Step 10 — UI Simplification ✅ DONE
 
 **Goal:** UI shows only Free / AI Powered (remove Quick mode).
 
-This is a frontend-only change in liffy-ui. Backend already handles mode mapping from Step 6.
+**Status:** DONE — UI already shows Free/AI modes. Backend mode mapping from Step 6 handles legacy compatibility.
 
 Not blocking. Can be done anytime after engine refactor is stable.
 

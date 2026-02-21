@@ -5,6 +5,8 @@ const { validateJobId, validateResultId } = require('../utils/validation');
 const { UnifiedContact } = require('../services/superMiner/types/UnifiedContact');
 const { validateContacts } = require('../services/validators/resultValidator');
 const { deduplicate } = require('../services/validators/deduplicator');
+const { normalizeMinerOutput } = require('../services/normalizer');
+const aggregationTrigger = require('../services/aggregationTrigger');
 
 const router = express.Router();
 
@@ -260,6 +262,56 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
     );
 
     await client.query('COMMIT');
+
+    // Canonical aggregation: persons + affiliations (best-effort, never breaks response)
+    try {
+      const emailContacts = finalContacts.filter(uc => uc.email);
+      if (emailContacts.length > 0 && aggregationTrigger.isEnabled()) {
+        const minerOutput = {
+          status: 'success',
+          raw: {
+            text: '',
+            html: '',
+            blocks: emailContacts.map(uc => ({
+              email: uc.email || null,
+              emails: uc.email ? [uc.email] : [],
+              company_name: uc.companyName || null,
+              contact_name: uc.contactName || null,
+              website: uc.website || null,
+              country: uc.country || null,
+              phone: uc.phone || null,
+              text: null,
+              data: uc,
+            })),
+            links: [],
+          },
+          meta: {
+            miner_name: req.is_manual_miner ? 'local_miner' : 'external_push',
+            duration_ms: 0,
+            confidence_hint: null,
+            source_url: results[0]?.sourceUrl || results[0]?.source_url || null,
+            page_title: null,
+          },
+        };
+
+        const normResult = normalizeMinerOutput(minerOutput);
+
+        await aggregationTrigger.process({
+          jobId,
+          organizerId,
+          normalizationResult: normResult,
+          metadata: {
+            original_contact_count: emailContacts.length,
+            source: req.is_manual_miner ? 'local_miner' : 'external_push',
+          },
+        });
+
+        console.log(`[POST results] Canonical aggregation: ${normResult.stats?.candidates_produced || 0} candidates processed`);
+      }
+    } catch (aggErr) {
+      // Best-effort — never break the response
+      console.error('[POST results] Canonical aggregation error (non-fatal):', aggErr.message);
+    }
 
     return res.json({
       success: true,
