@@ -350,33 +350,37 @@ async function processNextJob() {
 if (shouldUseSuperMiner(job)) {
   const smResult = await superMiner.runMiningJob(job, db);
 
-  // Block detection for unified engine: check result + mining_results count
-  if (smResult?.blockDetected || smResult?.status === 'FAILED') {
+  // Block detection for unified engine: check actual DB results
+  // smResult.blockDetected covers BLOCKED/FAILED miner statuses
+  // Also check for 0 results in DB (covers empty pages, Cloudflare, etc.)
+  if (smResult?.blockDetected || smResult?.status === 'FAILED' || smResult?.flow1?.contactCount === 0) {
     const countRes = await db.query(
       'SELECT COUNT(*) as count FROM mining_results WHERE job_id = $1',
       [job.id]
     );
     const resultCount = parseInt(countRes.rows[0]?.count || 0);
     if (resultCount === 0) {
-      console.log(`🚫 Unified engine: 0 results + block detected for job ${job.id} — triggering manual assist`);
+      console.log(`🚫 Unified engine: 0 mining_results for job ${job.id} — triggering manual assist`);
       await triggerManualAssist(job);
     }
   }
 } else {
   legacyResult = await processMiningJob(job);
 
-  // 🔴 CRITICAL: HARD SITE + ZERO RESULT = BLOCK
-  if (
-    isHardSite(job.input) &&
-    (
-      legacyResult?.contacts?.length === 0 ||
-      legacyResult?.total_found === 0 ||
-      legacyResult?.total_emails_raw === 0
-    )
-  ) {
-    console.log("🚫 HARD SITE returned 0 results – treating as BLOCK, triggering MANUAL");
-    await triggerManualAssist(job);
-    return;
+  // HARD SITE + ZERO RESULT = BLOCK
+  // processMiningJob now routes to unified engine internally,
+  // so check both legacy format AND unified engine format AND DB count
+  if (isHardSite(job.input)) {
+    const countRes = await db.query(
+      'SELECT COUNT(*) as count FROM mining_results WHERE job_id = $1',
+      [job.id]
+    );
+    const resultCount = parseInt(countRes.rows[0]?.count || 0);
+    if (resultCount === 0) {
+      console.log("🚫 HARD SITE returned 0 mining_results – treating as BLOCK, triggering MANUAL");
+      await triggerManualAssist(job);
+      return;
+    }
   }
 }
     } catch (e) {
