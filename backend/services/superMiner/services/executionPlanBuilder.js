@@ -28,12 +28,11 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
   }
 
   if (resolvedInputType === 'document') {
-    // Primary document context first, then enrich for full/ai modes.
+    // Primary document context first, then enrich for ai mode only.
     addStep('documentMiner', 'documentTextNormalizer', 'Primary document context');
 
-    if (resolvedMiningMode === 'full') {
+    if (resolvedMiningMode === 'full' || resolvedMiningMode === 'free') {
       addStep('playwrightTableMiner', 'legacy', 'Email harvesting');
-      addStep('aiMiner', 'legacy', 'AI enrichment');
     }
 
     if (resolvedMiningMode === 'ai') {
@@ -47,11 +46,6 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
     // Website sources prioritize fast table extraction.
     addStep('playwrightTableMiner', 'legacy', 'Primary website tables');
 
-    if (resolvedMiningMode === 'full') {
-      addStep('playwrightDetailMiner', 'legacy', 'Deep website details');
-      addStep('aiMiner', 'legacy', 'AI enrichment');
-    }
-
     if (resolvedMiningMode === 'ai') {
       addStep('aiMiner', 'legacy', 'AI enrichment');
     }
@@ -63,10 +57,6 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
     // Table inputs reuse the table miner as the fastest baseline.
     addStep('playwrightTableMiner', 'legacy', 'Primary table extraction');
 
-    if (resolvedMiningMode === 'full') {
-      addStep('aiMiner', 'legacy', 'AI enrichment');
-    }
-
     if (resolvedMiningMode === 'ai') {
       addStep('aiMiner', 'legacy', 'AI enrichment');
     }
@@ -76,10 +66,6 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
 
   // Unknown input types fall back to a general miner.
   addStep('playwrightMiner', 'legacy', 'General fallback');
-
-  if (resolvedMiningMode === 'full') {
-    addStep('aiMiner', 'legacy', 'AI enrichment');
-  }
 
   if (resolvedMiningMode === 'ai') {
     addStep('aiMiner', 'legacy', 'AI enrichment');

@@ -150,39 +150,22 @@ class FlowOrchestrator {
                 },
 
 
-                // Composite miner: runs multiple miners and merges
+                // Deterministic composite miner: runs playwrightTableMiner only
+                // aiMiner is only added via execution plan when mode === 'ai'
                 fullMiner: {
                     name: 'fullMiner',
                     mine: async (job) => {
-                        console.log(`[fullMiner] Starting composite mining for: ${job.input}`);
+                        console.log(`[fullMiner] Starting deterministic mining for: ${job.input}`);
 
-                        const results = [];
-
-                        // Run playwrightTableMiner first (faster)
                         try {
                             const tableResult = await playwrightTableMiner.mine(job);
-                            results.push(this.normalizeResult(tableResult, 'playwrightTableMiner'));
+                            const normalized = this.normalizeResult(tableResult, 'playwrightTableMiner');
                             console.log(`[fullMiner] playwrightTableMiner: ${tableResult?.emails?.length || 0} emails`);
+                            return normalized;
                         } catch (err) {
                             console.warn(`[fullMiner] playwrightTableMiner failed: ${err.message}`);
+                            return { status: 'FAILED', contacts: [], emails: [], error: err.message };
                         }
-
-                        // Run aiMiner with timeout (180 seconds max)
-                        try {
-                            const aiPromise = aiMiner.mine(job);
-                            const timeoutPromise = new Promise((_, reject) =>
-                                setTimeout(() => reject(new Error('AI Miner timeout (180s)')), 180000)
-                            );
-
-                            const aiResult = await Promise.race([aiPromise, timeoutPromise]);
-                            results.push(this.normalizeResult(aiResult, 'aiMiner'));
-                            console.log(`[fullMiner] aiMiner: ${aiResult?.emails?.length || 0} emails`);
-                        } catch (err) {
-                            console.warn(`[fullMiner] aiMiner failed: ${err.message}`);
-                        }
-
-                        // Merge results
-                        return this.mergeResults(results);
                     }
                 }
             };
@@ -409,9 +392,12 @@ class FlowOrchestrator {
                 }
                 this.activeJobs.delete(jobId);
 
+                // Block detection: 0 contacts + miner failures indicate possible block
+                const blockDetected = flow1Result.contactCount === 0 && (flow1Result.hasBlockedMiner || flow1Result.allMinersFailed);
+
                 console.log(`\n${'='.repeat(60)}`);
                 console.log(`[FlowOrchestrator] Job ${jobId} COMPLETED (no-Redis path) in ${(totalTime/1000).toFixed(1)}s`);
-                console.log(`[FlowOrchestrator] Contacts: ${flow1Result.contactCount}`);
+                console.log(`[FlowOrchestrator] Contacts: ${flow1Result.contactCount}${blockDetected ? ' ⚠️ BLOCK DETECTED' : ''}`);
                 console.log(`${'='.repeat(60)}\n`);
 
                 return {
@@ -424,7 +410,8 @@ class FlowOrchestrator {
                         pagination: flow1Result.paginationStats || null
                     },
                     flow2: { triggered: false },
-                    cost: costSummary
+                    cost: costSummary,
+                    blockDetected
                 };
             }
 
@@ -470,6 +457,9 @@ class FlowOrchestrator {
             // Cleanup
             this.activeJobs.delete(jobId);
 
+            // Block detection: 0 contacts + miner failures indicate possible block
+            const blockDetected = flow1Result.contactCount === 0 && (flow1Result.hasBlockedMiner || flow1Result.allMinersFailed);
+
             const finalResult = {
                 status: 'COMPLETED',
                 jobId,
@@ -485,7 +475,8 @@ class FlowOrchestrator {
                 } : {
                     triggered: false
                 },
-                cost: costSummary
+                cost: costSummary,
+                blockDetected
             };
 
             console.log(`\n${'='.repeat(60)}`);
@@ -523,7 +514,8 @@ class FlowOrchestrator {
                 status: 'FAILED',
                 jobId,
                 error: err.message,
-                totalTime: Date.now() - startTime
+                totalTime: Date.now() - startTime,
+                blockDetected: err.message?.includes('BLOCK') || false
             };
         }
     }
@@ -740,9 +732,10 @@ class FlowOrchestrator {
         const miningMode = job.config?.mining_mode;
         console.log('[DEBUG][FLOW1] mining_mode =', miningMode);
 
-        // Full mode: build and run an execution plan when available.
-        if (miningMode === 'full' && typeof buildExecutionPlan === 'function') {
-            console.log('[Flow1] Full mode: building execution plan...');
+        // Free/Full mode: build and run an execution plan when available.
+        // 'full' = legacy name for free mode, 'free' = new name from UI
+        if ((miningMode === 'full' || miningMode === 'free') && typeof buildExecutionPlan === 'function') {
+            console.log(`[Flow1] ${miningMode} mode: building execution plan...`);
 
             const analyzer = getPageAnalyzer();
             let analysis = null;
@@ -767,7 +760,7 @@ class FlowOrchestrator {
                 let executionPlan = [];
 
                 try {
-                    executionPlan = buildExecutionPlan({ inputType, miningMode: 'full', analysis });
+                    executionPlan = buildExecutionPlan({ inputType, miningMode: miningMode || 'full', analysis });
                 } catch (err) {
                     console.warn(`[Flow1] Execution plan build failed: ${err.message}`);
                 }
@@ -904,6 +897,10 @@ class FlowOrchestrator {
                         }
                     );
 
+                    // Block detection: check miner results for BLOCKED/FAILED statuses
+                    const hasBlockedMiner = minerResults.some(r => r.status === 'BLOCKED');
+                    const allMinersFailed = minerResults.length > 0 && minerResults.every(r => r.status === 'FAILED' || r.status === 'BLOCKED' || r.status === 'EMPTY');
+
                     return {
                         contactCount: aggregationResult.contactCount,
                         enrichmentRate: aggregationResult.enrichmentRate,
@@ -913,7 +910,9 @@ class FlowOrchestrator {
                         paginationStats: paginationInfo.isPaginated ? {
                             totalPages: paginationInfo.totalPages,
                             pageUrls: paginationInfo.pageUrls.length
-                        } : null
+                        } : null,
+                        hasBlockedMiner,
+                        allMinersFailed
                     };
                 }
             }
@@ -989,6 +988,10 @@ class FlowOrchestrator {
             }
         );
 
+        // Block detection for SmartRouter path
+        const hasBlockedMiner = minerResult.status === 'BLOCKED';
+        const allMinersFailed = minerResult.status === 'FAILED' || minerResult.status === 'BLOCKED' || minerResult.status === 'EMPTY';
+
         return {
             contactCount: aggregationResult.contactCount,
             enrichmentRate: aggregationResult.enrichmentRate,
@@ -998,7 +1001,9 @@ class FlowOrchestrator {
             paginationStats: paginationInfo.isPaginated ? {
                 totalPages: paginationInfo.totalPages,
                 pageUrls: paginationInfo.pageUrls.length
-            } : null
+            } : null,
+            hasBlockedMiner,
+            allMinersFailed
         };
     }
 

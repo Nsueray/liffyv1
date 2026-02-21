@@ -348,7 +348,20 @@ async function processNextJob() {
       let legacyResult = null;
 
 if (shouldUseSuperMiner(job)) {
-  await superMiner.runMiningJob(job, db);
+  const smResult = await superMiner.runMiningJob(job, db);
+
+  // Block detection for unified engine: check result + mining_results count
+  if (smResult?.blockDetected || smResult?.status === 'FAILED') {
+    const countRes = await db.query(
+      'SELECT COUNT(*) as count FROM mining_results WHERE job_id = $1',
+      [job.id]
+    );
+    const resultCount = parseInt(countRes.rows[0]?.count || 0);
+    if (resultCount === 0) {
+      console.log(`🚫 Unified engine: 0 results + block detected for job ${job.id} — triggering manual assist`);
+      await triggerManualAssist(job);
+    }
+  }
 } else {
   legacyResult = await processMiningJob(job);
 
@@ -391,29 +404,91 @@ if (shouldUseSuperMiner(job)) {
    MANUAL ASSIST (ORIGINAL BEHAVIOR)
    ========================================================= */
 async function triggerManualAssist(job) {
-  await db.query(
-    `UPDATE mining_jobs
-     SET manual_required=true, manual_reason='blocked_source'
-     WHERE id=$1`,
-    [job.id]
-  );
+  try {
+    await db.query(
+      `UPDATE mining_jobs
+       SET manual_required=true, manual_reason='blocked_source'
+       WHERE id=$1`,
+      [job.id]
+    );
 
-  const token = process.env.MANUAL_MINER_TOKEN;
-  if (!token) return;
+    const token = process.env.MINING_API_TOKEN || process.env.MANUAL_MINER_TOKEN;
+    if (!token) {
+      console.warn('[ManualAssist] No MINING_API_TOKEN set — cannot send email with command');
+      return;
+    }
 
-  const cmd = `
-node mine.js \\
-  --job-id ${job.id} \\
-  --api https://api.liffy.app/api \\
-  --token ${token} \\
-  --input "${job.input}"
+    // Extract domain for subject line
+    let siteDomain = 'unknown';
+    try {
+      siteDomain = new URL(job.input).hostname;
+    } catch { /* ignore */ }
+
+    const inputUrl = job.input || '';
+
+    const emailText = `Hi,
+
+Liffy detected that ${inputUrl} is blocking our cloud servers.
+This typically happens with Cloudflare-protected sites, CAPTCHA challenges, or IP-based restrictions.
+
+To mine this site, you need to run the mining tool from your local computer.
+Copy and paste the command below into your terminal.
+
+
+=== COPY AND PASTE THIS COMMAND INTO YOUR TERMINAL ===
+
+cd ~/Projects/liffy-local-miner && node mine.js --job-id ${job.id} --api https://api.liffy.app/api --token ${token} --input "${inputUrl}"
+
+===================================================
+
+
+=== FIRST TIME SETUP (skip if already installed) ===
+
+1. Install Node.js (if not installed): https://nodejs.org/en/download
+2. Clone the local miner:
+   git clone https://github.com/Nsueray/liffy-local-miner.git ~/Projects/liffy-local-miner
+3. Install dependencies:
+   cd ~/Projects/liffy-local-miner && npm install
+4. Install Playwright browsers:
+   npx playwright install chromium
+
+Now run the command above.
+===================================================
+
+Job ID: ${job.id}
+Site: ${inputUrl}
 `;
 
-  await sendEmail({
-    to: "suer@elan-expo.com",
-    subject: `Manual Mining Required for Job ${job.id}`,
-    text: cmd
-  });
+    // Get organizer admin email
+    let recipientEmail = 'suer@elan-expo.com'; // default fallback
+    try {
+      const orgResult = await db.query(
+        `SELECT u.email FROM users u
+         JOIN organizers o ON o.id = u.organizer_id
+         WHERE o.id = $1 AND u.role = 'admin'
+         LIMIT 1`,
+        [job.organizer_id]
+      );
+      if (orgResult.rows.length > 0 && orgResult.rows[0].email) {
+        recipientEmail = orgResult.rows[0].email;
+      }
+    } catch (err) {
+      console.warn('[ManualAssist] Could not fetch organizer admin email:', err.message);
+    }
+
+    await sendEmail({
+      to: recipientEmail,
+      fromEmail: 'noreply@liffy.app',
+      fromName: 'Liffy Mining',
+      subject: `⛏️ Manual Mining Required — Job ${job.id} — ${siteDomain}`,
+      text: emailText
+    });
+
+    console.log(`📧 Manual mining email sent to ${recipientEmail} for job ${job.id}`);
+  } catch (err) {
+    // Best-effort — never break the job
+    console.error('[ManualAssist] Email send error (non-fatal):', err.message);
+  }
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
