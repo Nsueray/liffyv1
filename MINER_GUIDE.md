@@ -393,7 +393,7 @@ triggerCanonicalAggregation():
 | `documentMiner` | HTTP + PDF | Flipbook/PDF/document parsing | ACTIVE |
 | `directoryMiner` | Playwright | Business directories (card-based layouts, Yellow Pages, etc.) | PROTOTYPE |
 | `httpBasicMiner` | HTTP | Basic HTTP fetch + regex (alias for playwrightTableMiner) | ACTIVE (alias) |
-| `fullMiner` | Composite | Runs playwrightTableMiner + aiMiner, merges results | ACTIVE |
+| `fullMiner` | Composite | Runs playwrightTableMiner only (aiMiner removed from free mode) | ACTIVE |
 | `playwrightMiner` | Playwright | General Playwright crawl (alias for fullMiner) | ACTIVE (alias) |
 | `playwrightDetailMiner` | Playwright | Detail page enrichment (alias for fullMiner) | ACTIVE (alias) |
 
@@ -413,18 +413,54 @@ When Liffy detects that the target site blocks its server IP (Render), mining ca
 
 ### Flow
 ```
-1. Liffy detects IP block → sends email to admin with terminal command
-2. Admin runs: node mine.js --job-id <id> --api https://api.liffy.app --token <token>
-3. Local miner crawls the site from admin's local IP
-4. Results pushed to: POST /api/mining/jobs/:id/results
-5. Backend validates, deduplicates, writes to mining_results
-6. Canonical pipeline triggers: normalizeResult → aggregationTrigger → persons + affiliations
+1. Liffy detects IP block (HARD_SITE or Cloudflare/CAPTCHA or 0 results + block indicator)
+2. worker.js triggerManualAssist() → sets mining_jobs.manual_required=true
+3. Sends email to organizer admin via SendGrid with copy-paste terminal command
+4. Admin runs: node mine.js --job-id <id> --api https://api.liffy.app/api --token <token> --input "<url>"
+5. Local miner crawls the site from admin's local IP
+6. Results pushed to: POST /api/mining/jobs/:id/results
+7. Backend validates, deduplicates, writes to mining_results (COMMIT)
+8. Canonical aggregation triggers (best-effort, after COMMIT):
+   normalizeMinerOutput() → aggregationTrigger.process() → persons + affiliations UPSERT
 ```
 
-### Push Endpoint
+### Block Detection → Email Notification
+
+Block detection triggers in these scenarios:
+1. **HARD_SITE list** — known blocked domains (big5construct, thebig5, etc.) in `worker.js`
+2. **Unified engine: 0 results + block indicator** — flowOrchestrator returns `blockDetected: true` when all miners return BLOCKED/FAILED/EMPTY status with 0 contacts
+3. **HtmlCache poisoned content** — Cloudflare challenge pages, CAPTCHA, content too short
+4. **BLOCK_DETECTED error** — miningWorker throws when Cloudflare/suspicious text detected
+
+**Email content (3 sections):**
+
+Section 1 — Explanation:
+```
+Subject: ⛏️ Manual Mining Required — Job {job_id} — {site_domain}
+
+Liffy detected that {site_url} is blocking our cloud servers.
+This typically happens with Cloudflare-protected sites, CAPTCHA challenges, or IP-based restrictions.
+```
+
+Section 2 — Terminal command (copy-paste ready, real token from env):
+```
+cd ~/Projects/liffy-local-miner && node mine.js --job-id {job_id} --api https://api.liffy.app/api --token {MINING_API_TOKEN} --input "{input_url}"
+```
+
+Section 3 — First-time setup:
+```
+1. Install Node.js: https://nodejs.org/en/download
+2. Clone: git clone https://github.com/Nsueray/liffy-local-miner.git ~/Projects/liffy-local-miner
+3. Install: cd ~/Projects/liffy-local-miner && npm install
+4. Browsers: npx playwright install chromium
+```
+
+**Implementation:** `worker.js` → `triggerManualAssist(job)` — best-effort (try/catch), never breaks the mining job.
+
+### Push Endpoint — Canonical Aggregation
 ```
 POST /api/mining/jobs/:id/results
-Authorization: Bearer <MANUAL_MINER_TOKEN or JWT>
+Authorization: Bearer <MINING_API_TOKEN or JWT>
 
 Body:
 {
@@ -444,9 +480,14 @@ Body:
 }
 ```
 
+**After COMMIT**, the endpoint triggers canonical aggregation (added in commit 28ea802):
+- Filters contacts with email → builds minerOutput → `normalizeMinerOutput()` → `aggregationTrigger.process()`
+- Writes to `persons` + `affiliations` tables
+- Best-effort: aggregation failure never breaks the response
+
 ### Authentication
 - JWT token (same as web UI) — `Authorization: Bearer <jwt>`
-- Or `MANUAL_MINER_TOKEN` env var — a static token for local miner auth
+- Or `MINING_API_TOKEN` env var (also supports legacy `MANUAL_MINER_TOKEN`)
 
 ### Local Miner Repo
 - **Repo:** `liffy-local-miner/` (separate repo, NOT modified by backend changes)

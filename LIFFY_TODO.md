@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-02-21*
+*Updated: 2026-02-22*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -14,7 +14,11 @@
 | A4 | directoryMiner registry "PROTOTYPE" → "ACTIVE" | P3 | TODO |
 | A5 | Heuristic directory detection (DOM pattern) | P3 | FUTURE |
 | A6 | directoryMiner max_pages UI config | P3 | FUTURE |
-| A7 | Local miner fix + orchestrator integration | P1 | DONE |
+| A7 | Local miner fix + orchestrator integration (commits: 28ea802, fb9e7d5) | P1 | DONE |
+| A8 | Job status "needs_manual" for blocked sites — UI indicator | P2 | TODO |
+| A9 | Email'de gerçek MINING_API_TOKEN kullan (env var'dan) | P2 | TODO |
+| A10 | Free mode'da aiMiner çalışmaması fix'i (commit: 2a7ecd2) | P1 | DONE |
+| A11 | Block detection email notification (commits: 2a7ecd2, fb9e7d5) | P1 | DONE |
 
 ## B. UI TASKS
 

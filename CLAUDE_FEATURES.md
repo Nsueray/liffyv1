@@ -51,6 +51,51 @@ Job URL (e.g. ?page=1)
 
 ---
 
+## Mining Mode — Free vs AI
+
+Mining mode determines which miners run in the execution plan:
+
+| Mode | Backend Value | Miners Used | Cost |
+|------|--------------|-------------|------|
+| **Free** | `full` | Deterministic only: playwrightTableMiner, directoryMiner, documentMiner, httpBasicMiner | Free |
+| **AI** | `ai` | All deterministic + aiMiner (Claude AI analysis) | Paid (API credits) |
+
+**Key rule:** `aiMiner` is ONLY added to the execution plan when `miningMode === 'ai'`. Free mode (`full`/`free`) never includes aiMiner.
+
+**Files:**
+- `executionPlanBuilder.js` — builds plan per inputType + miningMode (aiMiner only in `'ai'` branches)
+- `flowOrchestrator.js` — `fullMiner` composite runs only playwrightTableMiner (no aiMiner)
+- `flowOrchestrator.js` — execution plan condition handles both `'full'` and `'free'` mode values
+
+---
+
+## Block Detection & Manual Mining Notification
+
+When Liffy cannot mine a site due to IP blocking (Cloudflare, CAPTCHA, etc.), it sends an email to the organizer admin with a local miner command.
+
+**Detection triggers:**
+1. **HARD_SITE list** (`worker.js`) — known blocked domains: big5construct, big5global, thebig5, big5expo, etc.
+2. **Unified engine 0 results** — flowOrchestrator returns `blockDetected: true` when all miners return BLOCKED/FAILED/EMPTY with 0 contacts. Worker confirms with `SELECT COUNT(*) FROM mining_results WHERE job_id = $1`.
+3. **HtmlCache poisoned content** (`htmlCache.js`) — detects Cloudflare challenge pages, CAPTCHA, extremely short content, missing HTML structure
+4. **BLOCK_DETECTED error** (`miningWorker.js`) — thrown when Cloudflare or suspicious text detected during Playwright crawl
+
+**Email notification (3 sections):**
+- Section 1: Explanation of why the site is blocked
+- Section 2: Copy-paste ready terminal command with real `MINING_API_TOKEN` from env
+- Section 3: First-time setup instructions (Node.js, git clone, npm install, playwright)
+
+**Implementation:** `worker.js` → `triggerManualAssist(job)` → SendGrid email to organizer admin. Best-effort (try/catch, never breaks the job). Sets `mining_jobs.manual_required = true`.
+
+**Files:**
+- `backend/worker.js` — `isHardSite()`, `shouldUseSuperMiner()`, `triggerManualAssist()`
+- `backend/services/superMiner/services/flowOrchestrator.js` — `blockDetected` flag in job result
+- `backend/services/superMiner/services/htmlCache.js` — `isPoisoned()` content check
+- `backend/services/miningWorker.js` — `checkBlock()` Cloudflare/CAPTCHA detection
+
+See [MINER_GUIDE.md](./MINER_GUIDE.md) section 7 for full local miner documentation.
+
+---
+
 ## File Mining Pipeline (Excel/CSV/PDF/Word)
 
 File mining uses `fileOrchestrator.js` (v2.0) — a multi-phase pipeline:

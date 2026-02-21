@@ -311,6 +311,26 @@ Not blocking. Can be done anytime after engine refactor is stable.
 
 ---
 
+### Additional Fixes (Post-Refactor)
+
+**Local Miner Pipeline Integration** (commit 28ea802):
+- POST `/api/mining/jobs/:id/results` now triggers canonical aggregation after COMMIT
+- `normalizeMinerOutput()` → `aggregationTrigger.process()` → persons + affiliations UPSERT
+- Best-effort: aggregation failure never breaks the response
+
+**Free Mode aiMiner Exclusion** (commit 2a7ecd2):
+- `executionPlanBuilder.js`: aiMiner removed from all `'full'`/`'free'` mode branches
+- `flowOrchestrator.js`: `fullMiner` composite no longer runs aiMiner internally
+- aiMiner ONLY added to execution plan when `miningMode === 'ai'`
+
+**Block Detection Email Notification** (commits 2a7ecd2, fb9e7d5):
+- `flowOrchestrator.js`: tracks `hasBlockedMiner`/`allMinersFailed`, returns `blockDetected` flag
+- `worker.js`: checks both unified engine result and DB mining_results count
+- `triggerManualAssist()`: sends 3-section email with copy-paste local miner command
+- Root cause fix: legacy result format check (`contacts.length`) didn't match unified engine format (`flow1.contactCount`). Replaced with DB query.
+
+---
+
 ## FINAL ARCHITECTURE
 
 ```
