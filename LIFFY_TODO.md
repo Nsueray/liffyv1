@@ -24,6 +24,9 @@
 | A14 | PDF URL routing — .pdf URL'leri documentMiner'a yönlendir | P1 | ✅ DONE |
 | A15 | PDF mining — documentMiner'da PDF text extraction (pdfjs/pdf-parse) | P2 | TODO |
 | A16 | Cloudflare partial block — site yükleniyor ama data eksik (AFMT India pattern) | P2 | TODO |
+| A17 | Stuck job cleanup on startup | P1 | ✅ DONE |
+| A18 | Node.js heap limit (NODE_OPTIONS env var) | P1 | TODO (manual Render config) |
+| A19 | Excel mining quality — column mapping improvement | P2 | TODO |
 
 ## B. UI TASKS
 
@@ -101,3 +104,4 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 |---|------|----------|--------|
 | H1 | Re-mine butonu — mevcut job'u tekrar başlat (aynı URL + config ile yeni job) | P2 | ✅ DONE |
 | H2 | New Mining Job formunda Free mode default olsun (şu an AI mode default) | P1 | ✅ DONE |
+| H3 | Campaign scheduling — gün ve saat seçerek otomatik gönderim | P2 | TODO |

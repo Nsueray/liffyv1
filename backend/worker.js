@@ -307,6 +307,27 @@ async function startVerificationProcessor() {
 async function startWorker() {
   console.log("🧪 Liffy Worker (STABLE + UNSUBSCRIBE COMPLIANT)");
 
+  // Clean up stuck jobs from previous crashes (OOM, restart, etc.)
+  try {
+    const stuckRes = await db.query(`
+      UPDATE mining_jobs
+      SET status = 'failed',
+          error = 'Server restarted, job was stuck',
+          completed_at = NOW()
+      WHERE status = 'running'
+        AND started_at < NOW() - INTERVAL '1 hour'
+      RETURNING id, name
+    `);
+    if (stuckRes.rows.length > 0) {
+      console.log(`[Startup] Cleaned ${stuckRes.rows.length} stuck jobs:`,
+        stuckRes.rows.map(r => `${r.name} (${r.id.slice(0,8)})`).join(', '));
+    } else {
+      console.log('[Startup] No stuck jobs found');
+    }
+  } catch (err) {
+    console.error('[Startup] Stuck job cleanup failed:', err.message);
+  }
+
   await initSuperMiner();
   startCampaignScheduler();
   startCampaignSender();
