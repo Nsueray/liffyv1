@@ -133,19 +133,24 @@ class FlowOrchestrator {
                         const result = await documentMiner.mine(job.input);
 
                         // Normalize rawText to contacts (Rule #3: Only here)
+                        // documentTextNormalizer handles chunking for large texts (>200K chars)
                         const normalized = documentTextNormalizer.normalize(result, job.input);
 
                         console.log(`[documentMiner] Normalized: ${normalized.contacts.length} contacts`);
 
-                        return {
+                        const output = {
                             contacts: normalized.contacts,
-                            rawText: result.extractedText,
-                            textBlocks: result.textBlocks,
                             extractionMethod: result.extractionMethod,
                             pageCount: result.pageCount,
                             source: 'documentMiner',
                             normalizationStats: normalized.stats
                         };
+
+                        // Memory cleanup — release large text after normalization
+                        result.extractedText = null;
+                        result.textBlocks = null;
+
+                        return output;
                     }
                 },
 

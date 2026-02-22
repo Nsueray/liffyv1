@@ -18,6 +18,10 @@ const CONFIG = {
     MIN_BLOCK_LENGTH: 30,
     EMAIL_CONTEXT_LINES: 10,
     DEBUG: false,
+    // OOM protection: chunk large texts
+    CHUNK_THRESHOLD: 200000,  // 200K chars
+    CHUNK_SIZE: 100000,       // 100K chars per chunk
+    CHUNK_OVERLAP: 500,       // 500 char overlap to avoid splitting mid-line
 };
 
 const PATTERNS = {
@@ -73,46 +77,52 @@ function debug(...args) {
 
 function normalize(documentMinerResult, sourceUrl) {
     const startTime = Date.now();
-    
+
     debug('Starting normalization...');
-    
+
     if (!documentMinerResult || !documentMinerResult.success) {
         return {
             contacts: [],
             stats: { error: 'Invalid input', parseTime: 0 }
         };
     }
-    
+
     if (!sourceUrl) {
         return {
             contacts: [],
             stats: { error: 'sourceUrl is required', parseTime: 0 }
         };
     }
-    
+
     const { extractedText, textBlocks } = documentMinerResult;
-    
+
     if (!extractedText || extractedText.length < CONFIG.MIN_BLOCK_LENGTH) {
         return {
             contacts: [],
             stats: { error: 'Insufficient text', parseTime: 0 }
         };
     }
-    
+
+    // === OOM PROTECTION: Chunk large texts ===
+    if (extractedText.length > CONFIG.CHUNK_THRESHOLD) {
+        return normalizeChunked(extractedText, sourceUrl, startTime);
+    }
+
+    // === Normal path (≤ 200K chars) ===
     const blocks = splitIntoBlocks(extractedText, textBlocks);
     debug('Split into ' + blocks.length + ' blocks');
-    
+
     const rawContacts = extractContactsFromBlocks(blocks);
     debug('Extracted ' + rawContacts.length + ' raw contacts');
-    
+
     const contacts = rawContacts
         .map(raw => buildContact(raw, sourceUrl))
         .filter(c => c !== null && c.confidence >= CONFIG.MIN_CONFIDENCE);
-    
+
     debug('Built ' + contacts.length + ' valid contacts');
-    
+
     const parseTime = Date.now() - startTime;
-    
+
     return {
         contacts,
         stats: {
@@ -120,6 +130,71 @@ function normalize(documentMinerResult, sourceUrl) {
             rawContactsFound: rawContacts.length,
             validContacts: contacts.length,
             parseTime,
+        }
+    };
+}
+
+/**
+ * Chunked normalization for large texts (>200K chars)
+ * Splits text into 100K chunks with 500 char overlap, processes each independently,
+ * then deduplicates contacts by email across chunks.
+ */
+function normalizeChunked(extractedText, sourceUrl, startTime) {
+    const totalLen = extractedText.length;
+    const chunkCount = Math.ceil(totalLen / CONFIG.CHUNK_SIZE);
+
+    console.log(`[DocumentTextNormalizer] Chunked processing: ${totalLen} chars → ${chunkCount} chunks × ${CONFIG.CHUNK_SIZE}`);
+
+    const allContacts = [];
+    const seenEmails = new Set();
+    let totalRawFound = 0;
+    let totalBlocks = 0;
+
+    for (let i = 0; i < chunkCount; i++) {
+        const chunkStart = i * CONFIG.CHUNK_SIZE;
+        // Overlap: extend end by CHUNK_OVERLAP to avoid cutting mid-record
+        const chunkEnd = Math.min(totalLen, chunkStart + CONFIG.CHUNK_SIZE + CONFIG.CHUNK_OVERLAP);
+
+        let chunk = extractedText.substring(chunkStart, chunkEnd);
+
+        // Process chunk
+        const blocks = splitIntoBlocks(chunk, null);
+        totalBlocks += blocks.length;
+
+        const rawContacts = extractContactsFromBlocks(blocks);
+        totalRawFound += rawContacts.length;
+
+        const chunkContacts = rawContacts
+            .map(raw => buildContact(raw, sourceUrl))
+            .filter(c => c !== null && c.confidence >= CONFIG.MIN_CONFIDENCE);
+
+        // Dedup: skip contacts whose email was already seen in previous chunks
+        for (const contact of chunkContacts) {
+            if (contact.email && !seenEmails.has(contact.email)) {
+                seenEmails.add(contact.email);
+                allContacts.push(contact);
+            }
+        }
+
+        // Memory cleanup — release chunk reference
+        chunk = null;
+
+        console.log(`[DocumentTextNormalizer] Chunk ${i + 1}/${chunkCount}: ${chunkContacts.length} contacts (${allContacts.length} total unique)`);
+    }
+
+    const parseTime = Date.now() - startTime;
+
+    console.log(`[DocumentTextNormalizer] Chunked complete: ${allContacts.length} unique contacts from ${totalRawFound} raw (${parseTime}ms)`);
+
+    return {
+        contacts: allContacts,
+        stats: {
+            totalBlocks,
+            rawContactsFound: totalRawFound,
+            validContacts: allContacts.length,
+            parseTime,
+            chunked: true,
+            chunkCount,
         }
     };
 }

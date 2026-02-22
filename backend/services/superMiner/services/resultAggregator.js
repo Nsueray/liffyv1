@@ -101,6 +101,11 @@ class ResultAggregator {
         }
 
         // Save to Redis (NOT to DB!)
+        const contactCount = mergedContacts.length;
+        const emailBasedCount = emailBased.length;
+        const profileOnlyCount = profileOnly.length;
+        const websiteUrlCount = websiteUrls.length;
+
         const saveResult = await this.storage.saveFlowResults(jobId, {
             contacts: mergedContacts.map(c => c.toObject ? c.toObject() : c),
             minerStats,
@@ -109,39 +114,44 @@ class ResultAggregator {
             sourceUrl,
             organizerId
         });
-        
+
+        // Memory cleanup — release large arrays after Redis save
+        mergedContacts.length = 0;
+        emailBased.length = 0;
+        profileOnly.length = 0;
+
         if (!saveResult) {
             console.error(`[Aggregator V1] Failed to save temp results for job ${jobId}`);
             return {
                 status: 'STORAGE_ERROR',
                 jobId,
-                contactCount: mergedContacts.length
+                contactCount
             };
         }
-        
+
         // Publish event for orchestrator
         if (this.eventBus) {
             await this.eventBus.publish(CHANNELS.AGGREGATION_DONE, {
                 jobId,
                 enrichmentRate,
-                contactCount: mergedContacts.length,
-                emailBasedCount: emailBased.length,
-                profileOnlyCount: profileOnly.length,
+                contactCount,
+                emailBasedCount,
+                profileOnlyCount,
                 websiteUrls: websiteUrls.slice(0, 50), // Limit for payload size
                 deepCrawlAttempted: false
             });
         }
-        
+
         console.log(`[Aggregator V1] ✅ Completed for job ${jobId}`);
-        
+
         return {
             status: 'FLOW1_COMPLETE',
             jobId,
-            contactCount: mergedContacts.length,
-            emailBasedCount: emailBased.length,
-            profileOnlyCount: profileOnly.length,
+            contactCount,
+            emailBasedCount,
+            profileOnlyCount,
             enrichmentRate,
-            websiteUrlCount: websiteUrls.length,
+            websiteUrlCount,
             needsDeepCrawl: enrichmentRate < ENRICHMENT_THRESHOLD,
             minerStats
         };
