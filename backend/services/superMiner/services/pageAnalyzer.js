@@ -592,6 +592,55 @@ PageAnalyzer.prototype.detectDocumentViewer = function($, html, url) {
     };
 };
 
+// ============================================
+// SPA CATALOG DETECTION (Added v1.3)
+// ============================================
+PageAnalyzer.prototype.detectSpaCatalog = function($, html, url) {
+    // ── Generic SPA detection rules ──
+    const $bodyClone = $('body').clone();
+    $bodyClone.find('script, style').remove();
+    const contentHtml = ($bodyClone.html() || '').trim();
+    const scriptCount = $('script').length;
+    const bodyText = $('body').text().trim();
+
+    // Rule 1: Very little content HTML (excluding scripts/styles) + script-heavy
+    if (contentHtml.length < 15000 && scriptCount > 3) {
+        return { isSpa: true, method: 'generic rules', reason: `small HTML (${contentHtml.length}B) + ${scriptCount} scripts` };
+    }
+
+    // Rule 2: SPA root containers with empty/minimal content
+    const spaRoots = ['#app', '#root', '#__nuxt', '#__next'];
+    for (const sel of spaRoots) {
+        const el = $(sel);
+        if (el.length > 0 && el.text().trim().length < 200) {
+            return { isSpa: true, method: 'generic rules', reason: `empty SPA root: ${sel}` };
+        }
+    }
+
+    // Rule 3: "enable JavaScript" / "doesn't work without JavaScript" message
+    if (/enable javascript|doesn'?t work without javascript|javascript is required|please enable javascript/i.test(bodyText)) {
+        return { isSpa: true, method: 'generic rules', reason: 'JavaScript required message' };
+    }
+
+    // Rule 4: Framework indicators in meta tags
+    const metaContent = $('meta').map((_, el) => $(el).attr('content') || '').get().join(' ');
+    const metaNames = $('meta').map((_, el) => $(el).attr('name') || '').get().join(' ');
+    const metaAll = metaContent + ' ' + metaNames;
+    if (/\b(vue|react|angular|nuxt|next)\b/i.test(metaAll)) {
+        return { isSpa: true, method: 'generic rules', reason: 'framework meta tag' };
+    }
+
+    // Fallback: hostname match from known SPA catalog list
+    try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        if (SPA_CATALOG_DOMAINS.some(d => hostname.includes(d))) {
+            return { isSpa: true, method: 'hostname', reason: hostname };
+        }
+    } catch (e) { /* invalid URL */ }
+
+    return { isSpa: false };
+};
+
 // Override analyzeHtml to include directory + document viewer detection
 const originalAnalyzeHtml = PageAnalyzer.prototype.analyzeHtml;
 PageAnalyzer.prototype.analyzeHtml = function(html, url) {
@@ -613,22 +662,18 @@ PageAnalyzer.prototype.analyzeHtml = function(html, url) {
     }
     result.isDirectory = false;
 
-    // SPA catalog detection (hostname-based) — before document viewer
-    try {
-        const hostname = new URL(url).hostname.toLowerCase();
-        if (SPA_CATALOG_DOMAINS.some(d => hostname.includes(d))) {
-            result.pageType = PAGE_TYPES.SPA_CATALOG;
-            result.isSpaCatalog = true;
-            console.log(`[PageAnalyzer] SPA catalog detected via hostname: ${hostname}`);
-            return result;
-        }
-    } catch (e) {
-        // Invalid URL, continue
+    // SPA catalog detection — generic rules first, hostname as fallback
+    const $ = cheerio.load(html);
+    const spaDetection = this.detectSpaCatalog($, html, url);
+    if (spaDetection.isSpa) {
+        result.pageType = PAGE_TYPES.SPA_CATALOG;
+        result.isSpaCatalog = true;
+        console.log(`[PageAnalyzer] SPA catalog detected via ${spaDetection.method}: ${spaDetection.reason}`);
+        return result;
     }
     result.isSpaCatalog = false;
 
-    // Document viewer detection
-    const $ = cheerio.load(html);
+    // Document viewer detection (reuse $ from above)
     const docViewerAnalysis = this.detectDocumentViewer($, html, url);
 
     result.isDocumentViewer = docViewerAnalysis.isDocumentViewer;

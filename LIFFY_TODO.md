@@ -19,6 +19,8 @@
 | A9 | Email'de gerçek MINING_API_TOKEN kullan, "some-long-random-secret" değil | P2 | TODO |
 | A10 | Free mode'da aiMiner çalışmaması fix'i (commit: 2a7ecd2) | P1 | DONE |
 | A11 | Block detection email notification (commits: 2a7ecd2, fb9e7d5) | P1 | DONE |
+| A12 | spaNetworkMiner v1 complete — token capture, fast path, 257/259 coverage | P1 | ✅ DONE |
+| A13 | Generic SPA detection in pageAnalyzer — hostname bağımlılığını kaldır | P1 | ✅ DONE |
 
 ## B. UI TASKS
 
@@ -89,3 +91,10 @@
 **Prospect flow:** Lead (persons) → receives campaign → replies → becomes Prospect
 
 Note: Zoho CRM push is optional (P3), not part of core prospect flow.
+
+## H. UI IMPROVEMENTS
+
+| # | Task | Priority | Status |
+|---|------|----------|--------|
+| H1 | Re-mine butonu — mevcut job'u tekrar başlat (aynı URL + config ile yeni job) | P2 | TODO |
+| H2 | New Mining Job formunda Free mode default olsun (şu an AI mode default) | P1 | TODO |
