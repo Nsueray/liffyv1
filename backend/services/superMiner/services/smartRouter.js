@@ -21,17 +21,19 @@ const ROUTER_CONFIG = {
     minerPriority: {
         httpBasicMiner: 1,
         directoryMiner: 2,
-        playwrightTableMiner: 3,
-        playwrightMiner: 4,
-        aiMiner: 5,
-        websiteScraperMiner: 6,
-        documentMiner: 7
+        spaNetworkMiner: 3,
+        playwrightTableMiner: 4,
+        playwrightMiner: 5,
+        aiMiner: 6,
+        websiteScraperMiner: 7,
+        documentMiner: 8
     },
 
     // Fallback chains
     fallbackChains: {
         httpBasicMiner: ['playwrightTableMiner', 'aiMiner'],
         directoryMiner: ['playwrightTableMiner', 'aiMiner'],
+        spaNetworkMiner: ['playwrightTableMiner', 'aiMiner'],
         playwrightTableMiner: ['playwrightMiner', 'aiMiner'],
         playwrightMiner: ['aiMiner'],
         aiMiner: ['playwrightMiner'],

@@ -220,6 +220,55 @@ class FlowOrchestrator {
                 console.log('[FlowOrchestrator] directoryMiner not available:', err.message);
             }
 
+            // spaNetworkMiner: try/catch load (SPA catalog sites)
+            // Separate from main miners block so failure doesn't break other miners
+            // This miner manages its OWN browser lifecycle (ownBrowser: true)
+            try {
+                const { runSpaNetworkMiner } = require('../../urlMiners/spaNetworkMiner');
+                const { chromium } = require('playwright');
+
+                this.miners.spaNetworkMiner = {
+                    name: 'spaNetworkMiner',
+                    mine: async (job) => {
+                        console.log(`[spaNetworkMiner] Starting for: ${job.input}`);
+                        let browser = null;
+                        try {
+                            browser = await chromium.launch({ headless: true });
+                            const page = await browser.newPage();
+                            const rawCards = await runSpaNetworkMiner(page, job.input, job.config || {});
+                            await browser.close();
+                            browser = null;
+
+                            // Convert raw cards to normalizeResult format
+                            const contacts = rawCards.map(card => ({
+                                company_name: card.company_name,
+                                email: card.email || null,
+                                phone: card.phone,
+                                website: card.website,
+                                country: card.country,
+                                address: card.address,
+                                city: card.city || null,
+                                contact_name: card.contact_name || null,
+                                job_title: card.job_title || null
+                            }));
+                            const emails = rawCards
+                                .map(c => c.email)
+                                .filter(e => e && typeof e === 'string' && e.includes('@') && e.length > 5);
+
+                            console.log(`[spaNetworkMiner] Result: ${contacts.length} contacts, ${emails.length} emails`);
+
+                            return this.normalizeResult({ contacts, emails }, 'spaNetworkMiner');
+                        } catch (err) {
+                            if (browser) await browser.close().catch(() => {});
+                            throw err;
+                        }
+                    }
+                };
+                console.log('[FlowOrchestrator] spaNetworkMiner loaded ✅');
+            } catch (err) {
+                console.log('[FlowOrchestrator] spaNetworkMiner not available:', err.message);
+            }
+
             // Aliases
             this.miners.playwrightMiner = this.miners.fullMiner;
             this.miners.playwrightDetailMiner = this.miners.fullMiner;
@@ -751,6 +800,8 @@ class FlowOrchestrator {
 
                 if (analysis.pageType === PAGE_TYPES.DIRECTORY) {
                     inputType = 'directory';
+                } else if (analysis.pageType === PAGE_TYPES.SPA_CATALOG) {
+                    inputType = 'spa_catalog';
                 } else if (analysis.pageType === PAGE_TYPES.DOCUMENT_VIEWER) {
                     inputType = 'document';
                 } else if (analysis.pageType === PAGE_TYPES.EXHIBITOR_TABLE || analysis.pageType === 'website') {
@@ -784,7 +835,11 @@ class FlowOrchestrator {
                     // (crawlListPages, max 10 pages). Running flowOrchestrator pagination
                     // on top would cause N × M crawls (e.g. 15 × 10 = 150). Skip external.
                     const primaryStepMiner = executablePlan[0]?.miner;
-                    const paginationInfo = (primaryStepMiner === 'directoryMiner' || inputType === 'directory')
+                    const skipExternalPagination = (
+                        primaryStepMiner === 'directoryMiner' || inputType === 'directory' ||
+                        primaryStepMiner === 'spaNetworkMiner' || inputType === 'spa_catalog'
+                    );
+                    const paginationInfo = skipExternalPagination
                         ? { isPaginated: false, totalPages: 1, pageUrls: [job.input] }
                         : await this.detectPagination(job, {
                             paginationType: analysis.paginationType,
@@ -937,8 +992,12 @@ class FlowOrchestrator {
         }
 
         // 3. Detect pagination
-        // GUARD: directoryMiner handles its own pagination — skip external pagination
-        const paginationInfo = (selectedMiner === 'directoryMiner' || routeDecision.pageType === PAGE_TYPES.DIRECTORY)
+        // GUARD: directoryMiner and spaNetworkMiner handle their own data fetching — skip external pagination
+        const skipPagination = (
+            selectedMiner === 'directoryMiner' || routeDecision.pageType === PAGE_TYPES.DIRECTORY ||
+            selectedMiner === 'spaNetworkMiner' || routeDecision.pageType === PAGE_TYPES.SPA_CATALOG
+        );
+        const paginationInfo = skipPagination
             ? { isPaginated: false, totalPages: 1, pageUrls: [job.input] }
             : await this.detectPagination(job, routeDecision);
 

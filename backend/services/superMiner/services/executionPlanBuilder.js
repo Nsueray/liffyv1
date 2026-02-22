@@ -27,6 +27,16 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
     return plan;
   }
 
+  // SPA catalog sites — spaNetworkMiner handles its own data fetching via network interception.
+  // No pagination wrapper needed (ownPagination: true).
+  if (resolvedInputType === 'spa_catalog') {
+    addStep('spaNetworkMiner', 'legacy', 'SPA catalog network interception');
+    if (resolvedMiningMode === 'ai') {
+      addStep('aiMiner', 'legacy', 'AI enrichment for SPA catalog');
+    }
+    return plan;
+  }
+
   if (resolvedInputType === 'document') {
     // Primary document context first, then enrich for ai mode only.
     addStep('documentMiner', 'documentTextNormalizer', 'Primary document context');

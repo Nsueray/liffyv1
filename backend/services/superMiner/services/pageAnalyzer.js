@@ -26,6 +26,7 @@ const PAGE_TYPES = {
     ERROR: 'error',                         // Page error
     DOCUMENT_VIEWER: 'document_viewer',    // Flipbook/PDF viewer
     DIRECTORY: 'directory',                // Business directory (Yellow Pages, etc.)
+    SPA_CATALOG: 'spa_catalog',            // SPA/API-driven catalog (Vue/React, data from JSON API)
     UNKNOWN: 'unknown'
 };
 
@@ -35,6 +36,11 @@ const DIRECTORY_DOMAINS = [
     'yelp.com', 'justdial', 'europages', 'thomasnet',
     'kompass', 'hotfrog', 'cylex', 'infobel',
     'businesslist', 'dnb.com', 'manta.com', 'glmis.gov.gh'
+];
+
+// Known SPA catalog domains — data comes from JSON APIs, not DOM
+const SPA_CATALOG_DOMAINS = [
+    'apps.feriavalencia.com',
 ];
 
 // Pagination types
@@ -531,7 +537,8 @@ module.exports = {
     getPageAnalyzer,
     PAGE_TYPES,
     PAGINATION_TYPES,
-    DIRECTORY_DOMAINS
+    DIRECTORY_DOMAINS,
+    SPA_CATALOG_DOMAINS
 };
 
 // ============================================
@@ -606,6 +613,20 @@ PageAnalyzer.prototype.analyzeHtml = function(html, url) {
     }
     result.isDirectory = false;
 
+    // SPA catalog detection (hostname-based) — before document viewer
+    try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        if (SPA_CATALOG_DOMAINS.some(d => hostname.includes(d))) {
+            result.pageType = PAGE_TYPES.SPA_CATALOG;
+            result.isSpaCatalog = true;
+            console.log(`[PageAnalyzer] SPA catalog detected via hostname: ${hostname}`);
+            return result;
+        }
+    } catch (e) {
+        // Invalid URL, continue
+    }
+    result.isSpaCatalog = false;
+
     // Document viewer detection
     const $ = cheerio.load(html);
     const docViewerAnalysis = this.detectDocumentViewer($, html, url);
@@ -631,6 +652,14 @@ PageAnalyzer.prototype.getRecommendation = function(analysis) {
             useCache: false, // Playwright-based, no cache
             reason: 'Business directory detected, using directoryMiner',
             ownPagination: true // directoryMiner handles its own pagination
+        };
+    }
+    if (analysis.pageType === PAGE_TYPES.SPA_CATALOG) {
+        return {
+            miner: 'spaNetworkMiner',
+            useCache: false, // Playwright-based, no cache
+            reason: 'SPA catalog detected, using spaNetworkMiner',
+            ownPagination: true // spaNetworkMiner handles its own data fetching
         };
     }
     if (analysis.pageType === PAGE_TYPES.DOCUMENT_VIEWER) {
