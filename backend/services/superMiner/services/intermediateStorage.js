@@ -9,14 +9,14 @@
  * - Flow 1 sonuclari DB'ye YAZILMAZ, Redis'e kaydedilir
  * - Flow 2 bu veriyi alir, kendi sonuclariyla birlestirir
  * - Final merge sonrasi tek seferde DB'ye yazilir
- * - Large payload korumasi (5MB limit)
+ * - Large payload warning (200MB Redis Starter plan)
  */
 
 const Redis = require('ioredis');
 
 // Constants
 const TEMP_RESULTS_TTL = 600; // 10 dakika
-const MAX_PAYLOAD_SIZE = 5 * 1024 * 1024; // 5MB
+const PAYLOAD_WARN_SIZE = 100 * 1024 * 1024; // 100MB - log warning
 const KEY_PREFIX = 'temp_results:';
 const LOCK_PREFIX = 'lock:';
 const LOCK_TTL = 30; // 30 saniye lock
@@ -112,28 +112,12 @@ class IntermediateStorage {
                 flowVersion: 1
             });
             
-            // Payload size check
-            if (data.length > MAX_PAYLOAD_SIZE) {
-                console.error(`[IntermediateStorage] Payload too large: ${(data.length / 1024 / 1024).toFixed(2)}MB`);
-                
-                // Truncate contacts if needed
-                const truncatedContacts = results.contacts.slice(0, 500);
-                const truncatedData = JSON.stringify({
-                    contacts: truncatedContacts,
-                    minerStats: results.minerStats || {},
-                    websiteUrls: results.websiteUrls || [],
-                    savedAt: new Date().toISOString(),
-                    flowVersion: 1,
-                    truncated: true,
-                    originalCount: results.contacts.length
-                });
-                
-                await this.redis.setex(key, TEMP_RESULTS_TTL, truncatedData);
-                console.warn(`[IntermediateStorage] ⚠️ Truncated to 500 contacts for job: ${jobId}`);
-                
-            } else {
-                await this.redis.setex(key, TEMP_RESULTS_TTL, data);
+            // Payload size warning (Redis Starter plan = 256MB)
+            if (data.length > PAYLOAD_WARN_SIZE) {
+                console.warn(`[IntermediateStorage] ⚠️ Large payload: ${(data.length / 1024 / 1024).toFixed(2)}MB for job: ${jobId}`);
             }
+
+            await this.redis.setex(key, TEMP_RESULTS_TTL, data);
             
             console.log(`[IntermediateStorage] 💾 Saved Flow 1 results for job: ${jobId} (${results.contacts?.length || 0} contacts)`);
             

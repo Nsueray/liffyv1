@@ -28,8 +28,10 @@
 | A18 | Flow 2 OOM protection — contact count + enrichment rate rules (skip/limit Flow 2) | P1 | ✅ DONE |
 | A19 | Enrich Remaining button — POST /api/mining/jobs/:id/enrich + UI button | P1 | ✅ DONE |
 | A20 | NaN enrichment guard — shouldTriggerFlow2 undefined/NaN default to 100% (safe skip) | P1 | ✅ DONE |
-| A21 | Node.js heap limit (NODE_OPTIONS env var) | P1 | TODO (manual Render config) |
-| A22 | Excel mining quality — column mapping improvement | P2 | TODO |
+| A21 | Redis truncate limit kaldır (Starter plan upgrade) | P1 | ✅ DONE |
+| A22 | PDF name/company extraction — documentTextNormalizer structured text parsing | P2 | TODO |
+| A23 | Node.js heap limit (NODE_OPTIONS env var) | P1 | TODO (manual Render config) |
+| A24 | Excel mining quality — column mapping improvement | P2 | TODO |
 
 ## B. UI TASKS
 
