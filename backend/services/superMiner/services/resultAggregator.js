@@ -83,6 +83,7 @@ class ResultAggregator {
         const minerStats = this.calculateMinerStats(minerResults);
 
         // Check if Redis storage is available — if not, fallback to direct DB write
+        console.log(`[Aggregator V1] Checking Redis storage: enabled=${!!this.storage?.enabled}`);
         if (!this.storage || !this.storage.enabled) {
             console.log(`[Aggregator V1] Redis unavailable, falling back to direct DB write (aggregateSimple)`);
             const simpleResult = await this.aggregateSimple(minerResults, jobContext);
@@ -100,14 +101,21 @@ class ResultAggregator {
             };
         }
 
-        // Save to Redis (NOT to DB!)
+        // Capture counts before cleanup
         const contactCount = mergedContacts.length;
         const emailBasedCount = emailBased.length;
         const profileOnlyCount = profileOnly.length;
         const websiteUrlCount = websiteUrls.length;
 
+        // Save to Redis (NOT to DB!)
+        console.log(`[Aggregator V1] Saving to Redis: ${contactCount} contacts, ${websiteUrlCount} URLs...`);
+        const saveStartTime = Date.now();
+
+        const contactObjects = mergedContacts.map(c => c.toObject ? c.toObject() : c);
+        console.log(`[Aggregator V1] toObject() mapping done (${Date.now() - saveStartTime}ms)`);
+
         const saveResult = await this.storage.saveFlowResults(jobId, {
-            contacts: mergedContacts.map(c => c.toObject ? c.toObject() : c),
+            contacts: contactObjects,
             minerStats,
             websiteUrls,
             enrichmentRate,
@@ -115,10 +123,13 @@ class ResultAggregator {
             organizerId
         });
 
+        console.log(`[Aggregator V1] Redis save ${saveResult ? 'OK' : 'FAILED'} (${Date.now() - saveStartTime}ms)`);
+
         // Memory cleanup — release large arrays after Redis save
         mergedContacts.length = 0;
         emailBased.length = 0;
         profileOnly.length = 0;
+        contactObjects.length = 0;
 
         if (!saveResult) {
             console.error(`[Aggregator V1] Failed to save temp results for job ${jobId}`);
@@ -131,6 +142,7 @@ class ResultAggregator {
 
         // Publish event for orchestrator
         if (this.eventBus) {
+            console.log(`[Aggregator V1] Publishing aggregation done event...`);
             await this.eventBus.publish(CHANNELS.AGGREGATION_DONE, {
                 jobId,
                 enrichmentRate,
@@ -140,9 +152,12 @@ class ResultAggregator {
                 websiteUrls: websiteUrls.slice(0, 50), // Limit for payload size
                 deepCrawlAttempted: false
             });
+            console.log(`[Aggregator V1] Event published OK`);
+        } else {
+            console.log(`[Aggregator V1] No eventBus, skipping event publish`);
         }
 
-        console.log(`[Aggregator V1] ✅ Completed for job ${jobId}`);
+        console.log(`[Aggregator V1] ✅ Completed for job ${jobId} — returning`);
 
         return {
             status: 'FLOW1_COMPLETE',

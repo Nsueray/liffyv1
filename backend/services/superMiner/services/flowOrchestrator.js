@@ -952,7 +952,7 @@ class FlowOrchestrator {
                         }
                     }
 
-                    console.log('[Flow1] Step 3: Aggregating (V1 → Redis)...');
+                    console.log(`[Flow1] Step 3: Aggregating (V1 → Redis)... minerResults=${minerResults.length}, totalContacts=${minerResults.reduce((s, r) => s + (r.contacts?.length || 0), 0)}`);
 
                     const aggregationResult = await this.aggregator.aggregateV1(
                         minerResults,
@@ -962,6 +962,8 @@ class FlowOrchestrator {
                             sourceUrl: job.input
                         }
                     );
+
+                    console.log(`[Flow1] Step 3 done: contactCount=${aggregationResult.contactCount}, enrichment=${aggregationResult.enrichmentRate}`);
 
                     // Block detection: check miner results for BLOCKED/FAILED statuses
                     const hasBlockedMiner = minerResults.some(r => r.status === 'BLOCKED');
@@ -1047,7 +1049,7 @@ class FlowOrchestrator {
         }
 
         // 5. Aggregate V1 (save to Redis, NOT DB!)
-        console.log('[Flow1] Step 3: Aggregating (V1 → Redis)...');
+        console.log(`[Flow1] Step 3: Aggregating (V1 → Redis)... contacts=${minerResult.contacts?.length || 0}`);
 
         const aggregationResult = await this.aggregator.aggregateV1(
             [minerResult],
@@ -1057,6 +1059,8 @@ class FlowOrchestrator {
                 sourceUrl: job.input
             }
         );
+
+        console.log(`[Flow1] Step 3 done: contactCount=${aggregationResult.contactCount}, enrichment=${aggregationResult.enrichmentRate}`);
 
         // Block detection for SmartRouter path
         const hasBlockedMiner = minerResult.status === 'BLOCKED';
@@ -1134,7 +1138,10 @@ class FlowOrchestrator {
      *   - Contact <= 500 → Normal Flow 2 (existing behavior)
      */
     shouldTriggerFlow2(flow1Result) {
+        console.log(`[FlowOrchestrator] shouldTriggerFlow2: contacts=${flow1Result.contactCount || 0} enrichment=${flow1Result.enrichmentRate || 0} enableFlow2=${this.config.enableFlow2}`);
+
         if (!this.config.enableFlow2) {
+            console.log(`[FlowOrchestrator] shouldTriggerFlow2 → SKIP (disabled in config)`);
             return { trigger: false, reason: 'Flow 2 disabled in config' };
         }
 
@@ -1145,13 +1152,13 @@ class FlowOrchestrator {
         // === OOM PROTECTION: Large dataset rules ===
         if (contactCount > 500) {
             if (enrichmentRate >= 0.5) {
-                // Rule 1: Large dataset + good enrichment → skip
+                console.log(`[FlowOrchestrator] shouldTriggerFlow2 → SKIP (OOM rule 1: ${contactCount} contacts, ${enrichPct}% enrichment)`);
                 return {
                     trigger: false,
                     reason: `OOM protection: ${contactCount} contacts with ${enrichPct}% enrichment — skipping Flow 2`
                 };
             } else {
-                // Rule 2: Large dataset + low enrichment → limited Flow 2
+                console.log(`[FlowOrchestrator] shouldTriggerFlow2 → LIMITED (OOM rule 2: ${contactCount} contacts, ${enrichPct}% enrichment)`);
                 return {
                     trigger: true,
                     maxWebsites: 50,
@@ -1163,6 +1170,7 @@ class FlowOrchestrator {
 
         // === Normal dataset (≤ 500 contacts) — existing logic ===
         if (enrichmentRate < this.config.flow2Threshold) {
+            console.log(`[FlowOrchestrator] shouldTriggerFlow2 → TRIGGER (enrichment ${enrichPct}% < threshold ${this.config.flow2Threshold * 100}%)`);
             return {
                 trigger: true,
                 reason: `Enrichment ${enrichPct}% < threshold ${this.config.flow2Threshold * 100}%`
@@ -1170,12 +1178,14 @@ class FlowOrchestrator {
         }
 
         if (flow1Result.websiteUrls?.length > 0 && contactCount < 10) {
+            console.log(`[FlowOrchestrator] shouldTriggerFlow2 → TRIGGER (websites found + few contacts: ${contactCount})`);
             return {
                 trigger: true,
                 reason: `Websites found with few contacts (${contactCount})`
             };
         }
 
+        console.log(`[FlowOrchestrator] shouldTriggerFlow2 → SKIP (enrichment sufficient: ${enrichPct}%)`);
         return { trigger: false, reason: `Enrichment sufficient (${enrichPct}%)` };
     }
 
