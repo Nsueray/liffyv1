@@ -250,6 +250,18 @@ async function runSpaNetworkMiner(page, url, config = {}) {
 
   page.on('response', responseHandler);
 
+  // Capture session token (JWT) from outgoing request headers for fast-path reuse
+  let capturedToken = null;
+  const requestHandler = (request) => {
+    if (capturedToken) return;
+    const authHeader = request.headers()['authorization'];
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      capturedToken = authHeader;
+      console.log('[spaNetworkMiner] Captured session token from browser request');
+    }
+  };
+  page.on('request', requestHandler);
+
   // Navigate to list page
   try {
     await page.goto(url, { waitUntil: 'networkidle', timeout: 30000 });
@@ -444,15 +456,16 @@ async function runSpaNetworkMiner(page, url, config = {}) {
     if (i < learnCount - 1) await sleep(delayMs);
   }
 
-  // Strategy B: If we learned the API pattern, use fetch() in browser context for remaining items
-  if (detailApiPattern && itemsToProcess.length > learnCount) {
+  // Strategy B: If we learned the API pattern AND captured a session token, use fast fetch
+  if (detailApiPattern && capturedToken && itemsToProcess.length > learnCount) {
     const remaining = itemsToProcess.slice(learnCount);
-    console.log(`[spaNetworkMiner] Fetching ${remaining.length} details via browser fetch (fast path)...`);
+    console.log(`[spaNetworkMiner] Fast path: ${remaining.length} items (token OK, concurrency 3)...`);
 
     let fastPathFailed = false;
+    let fastPathEmails = 0;
 
-    // Process in batches to avoid overwhelming the server
-    const batchSize = 5;
+    // Process in batches of 50 for progress reporting, concurrency 3 inside each batch
+    const batchSize = 50;
     for (let batchStart = 0; batchStart < remaining.length; batchStart += batchSize) {
       if (Date.now() - startTime > totalTimeout) {
         console.log('[spaNetworkMiner] Total timeout reached during fast path');
@@ -466,39 +479,52 @@ async function runSpaNetworkMiner(page, url, config = {}) {
       let batchPayload = {};
       try {
         batchPayload = await page.evaluate(async (params) => {
-          const { items, apiTemplate, idField, delayMs } = params;
+          const { items, apiTemplate, idField, token, concurrency } = params;
           const results = {};
           const errors = [];
 
-          for (const item of items) {
-            const itemId = item[idField];
-            if (!itemId) continue;
+          // Concurrent fetch pool (3 workers sharing one index counter)
+          let idx = 0;
+          const workers = Array.from({ length: concurrency }, async () => {
+            while (idx < items.length) {
+              const i = idx++;
+              const item = items[i];
+              const itemId = item[idField];
+              if (!itemId) continue;
 
-            const apiUrl = apiTemplate.replace('{id}', itemId);
+              const apiUrl = apiTemplate.replace('{id}', itemId);
 
-            try {
-              const resp = await fetch(apiUrl, { credentials: 'include' });
-              if (resp.ok) {
-                const json = await resp.json();
-                results[String(itemId)] = json;
-              } else {
-                errors.push({ id: String(itemId), status: resp.status, statusText: resp.statusText });
+              try {
+                const resp = await fetch(apiUrl, {
+                  headers: {
+                    'Authorization': token,
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json'
+                  },
+                  credentials: 'include'
+                });
+                if (resp.ok) {
+                  results[String(itemId)] = await resp.json();
+                } else {
+                  errors.push({ id: String(itemId), status: resp.status });
+                }
+              } catch (e) {
+                errors.push({ id: String(itemId), error: e.message || String(e) });
               }
-            } catch (e) {
-              errors.push({ id: String(itemId), error: e.message || String(e) });
-            }
 
-            if (delayMs > 0) {
-              await new Promise(r => setTimeout(r, delayMs));
+              // Human-like random delay 300-500ms
+              await new Promise(r => setTimeout(r, 300 + Math.floor(Math.random() * 200)));
             }
-          }
+          });
 
+          await Promise.all(workers);
           return { results, errors };
         }, {
           items: batch,
           apiTemplate: detailApiPattern.template,
           idField: bestFieldMap.id || 'id',
-          delayMs: Math.max(200, delayMs / 2),
+          token: capturedToken,
+          concurrency: 3,
         });
       } catch (evalErr) {
         console.error(`[spaNetworkMiner] page.evaluate crashed: ${evalErr.message}`);
@@ -509,12 +535,12 @@ async function runSpaNetworkMiner(page, url, config = {}) {
       const { results = {}, errors = [] } = batchPayload || {};
 
       if (errors.length > 0) {
-        console.warn(`[spaNetworkMiner] Fast path batch errors (${errors.length}): ${JSON.stringify(errors.slice(0, 3))}`);
+        console.warn(`[spaNetworkMiner] Fast path errors (${errors.length}): ${JSON.stringify(errors.slice(0, 3))}`);
       }
 
       const resultCount = Object.keys(results).length;
 
-      // If first batch returned 0 results, fast path is broken — fall back
+      // If first batch returned 0 results, token might be expired — fall back
       if (batchStart === 0 && resultCount === 0) {
         console.warn('[spaNetworkMiner] Fast path returned 0 results on first batch — switching to slow path');
         fastPathFailed = true;
@@ -523,14 +549,15 @@ async function runSpaNetworkMiner(page, url, config = {}) {
 
       for (const [id, data] of Object.entries(results)) {
         detailDataMap.set(id, data);
+        // Quick email check for progress reporting
+        if (typeof data === 'object' && data) {
+          const fm = buildFieldMap(data);
+          if (fm.email && data[fm.email]) fastPathEmails++;
+        }
       }
-
-      await sleep(delayMs);
 
       const progress = Math.min(batchStart + batchSize, remaining.length);
-      if (progress % 50 === 0 || batchStart + batchSize >= remaining.length) {
-        console.log(`[spaNetworkMiner] Fast-path progress: ${learnCount + progress}/${itemsToProcess.length}`);
-      }
+      console.log(`[spaNetworkMiner] Fast path progress: ${learnCount + progress}/${itemsToProcess.length} (${fastPathEmails} emails found)`);
     }
 
     // ── Fallback: if fast path failed, use browser navigation for remaining items ──
@@ -601,9 +628,13 @@ async function runSpaNetworkMiner(page, url, config = {}) {
         }
       }
     }
-  } else if (!detailApiPattern && itemsToProcess.length > learnCount) {
-    // No API pattern learned — continue with browser navigation (slow path)
-    console.log(`[spaNetworkMiner] No API pattern learned, continuing browser navigation...`);
+  } else if (itemsToProcess.length > learnCount) {
+    // No API pattern or no session token — browser navigation (slow path)
+    if (detailApiPattern && !capturedToken) {
+      console.warn('[spaNetworkMiner] API pattern learned but no session token — using browser navigation');
+    } else {
+      console.log('[spaNetworkMiner] No API pattern learned, continuing browser navigation...');
+    }
 
     for (let i = learnCount; i < itemsToProcess.length; i++) {
       if (Date.now() - startTime > totalTimeout) {
