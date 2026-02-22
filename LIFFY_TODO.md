@@ -96,5 +96,5 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 
 | # | Task | Priority | Status |
 |---|------|----------|--------|
-| H1 | Re-mine butonu — mevcut job'u tekrar başlat (aynı URL + config ile yeni job) | P2 | TODO |
-| H2 | New Mining Job formunda Free mode default olsun (şu an AI mode default) | P1 | TODO |
+| H1 | Re-mine butonu — mevcut job'u tekrar başlat (aynı URL + config ile yeni job) | P2 | ✅ DONE |
+| H2 | New Mining Job formunda Free mode default olsun (şu an AI mode default) | P1 | ✅ DONE |
