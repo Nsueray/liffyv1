@@ -162,6 +162,14 @@ class DocumentMiner {
         result.stats.duration = Date.now() - startTime;
         result.stats.endTime = new Date().toISOString();
 
+        // Memory cleanup — release large text blocks after extraction
+        // Keep extractedText but clear redundant textBlocks if text is large
+        if (result.extractedText && result.extractedText.length > 500000) {
+            const blockCount = result.textBlocks?.length || 0;
+            result.textBlocks = []; // Free page-level copies
+            console.log(`[DocumentMiner] Memory cleanup: cleared ${blockCount} textBlocks (${(result.extractedText.length / 1024).toFixed(0)}KB text retained)`);
+        }
+
         return result;
     }
 
@@ -250,7 +258,7 @@ class DocumentMiner {
         if (!fileMiner) {
             throw new Error('fileMiner module not available');
         }
-        
+
         if (!fileMiner.extractTextFromPDF) {
             throw new Error('fileMiner.extractTextFromPDF not available - PDF text extraction requires this function');
         }
@@ -263,11 +271,15 @@ class DocumentMiner {
             headers: { 'User-Agent': CONFIG.USER_AGENT },
         });
 
-        const buffer = Buffer.from(response.data);
+        let buffer = Buffer.from(response.data);
         console.log(`[DocumentMiner] PDF downloaded: ${buffer.length} bytes`);
 
         const pdfResult = await fileMiner.extractTextFromPDF(buffer);
-        
+
+        // Memory cleanup — release PDF binary buffer after extraction
+        buffer = null;
+        if (response.data) response.data = null;
+
         return {
             text: pdfResult.text || '',
             textBlocks: [{ page: 1, text: pdfResult.text || '' }],

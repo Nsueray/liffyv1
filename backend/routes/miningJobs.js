@@ -356,6 +356,238 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
 });
 
 /**
+ * POST /api/mining/jobs/:id/enrich
+ * Enrich remaining contacts — scrape websites for email/phone
+ * Processes contacts that have website but no email
+ */
+router.post('/api/mining/jobs/:id/enrich', authRequired, validateJobId, async (req, res) => {
+  const organizer_id = req.auth.organizer_id;
+  const job_id = req.params.id;
+
+  try {
+    // Verify job ownership
+    const jobRes = await db.query(
+      `SELECT id, name, status FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      [job_id, organizer_id]
+    );
+
+    if (!jobRes.rows.length) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    const job = jobRes.rows[0];
+
+    if (job.status === 'enriching') {
+      return res.status(409).json({ error: 'Enrichment already in progress' });
+    }
+
+    // Count unenriched contacts (has website but no email)
+    const countRes = await db.query(
+      `SELECT COUNT(*) as cnt FROM mining_results
+       WHERE job_id = $1
+         AND website IS NOT NULL AND website != ''
+         AND (emails IS NULL OR emails = '{}')`,
+      [job_id]
+    );
+
+    const unenrichedCount = parseInt(countRes.rows[0].cnt, 10);
+
+    if (unenrichedCount === 0) {
+      return res.json({ success: true, message: 'No contacts to enrich', unenriched_count: 0 });
+    }
+
+    // Set job status to 'enriching'
+    await db.query(
+      `UPDATE mining_jobs SET status = 'enriching' WHERE id = $1`,
+      [job_id]
+    );
+
+    console.log(`🔬 Enrichment started: job ${job_id} — ${unenrichedCount} contacts to enrich`);
+
+    // Respond immediately — enrichment runs in background
+    res.json({
+      success: true,
+      message: `Enrichment started for ${unenrichedCount} contacts`,
+      unenriched_count: unenrichedCount
+    });
+
+    // === BACKGROUND ENRICHMENT ===
+    const axios = require('axios');
+
+    const ENRICH_BATCH_SIZE = 10;
+    const BATCH_DELAY_MS = 3000;
+    const EMAIL_REGEX = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
+    const PHONE_REGEX = /(?:\+?\d{1,4}[\s\-.]?)?\(?\d{2,4}\)?[\s\-.]?\d{3,4}[\s\-.]?\d{3,4}/g;
+
+    let enrichedCount = 0;
+    let errorCount = 0;
+
+    try {
+      // Get all unenriched results
+      const resultsRes = await db.query(
+        `SELECT id, website FROM mining_results
+         WHERE job_id = $1
+           AND website IS NOT NULL AND website != ''
+           AND (emails IS NULL OR emails = '{}')
+         ORDER BY created_at
+         LIMIT 500`,
+        [job_id]
+      );
+
+      const items = resultsRes.rows;
+      console.log(`[Enrich] Processing ${items.length} contacts in batches of ${ENRICH_BATCH_SIZE}`);
+
+      // Process in serial batches
+      for (let i = 0; i < items.length; i += ENRICH_BATCH_SIZE) {
+        const batch = items.slice(i, i + ENRICH_BATCH_SIZE);
+        const batchNum = Math.floor(i / ENRICH_BATCH_SIZE) + 1;
+        const totalBatches = Math.ceil(items.length / ENRICH_BATCH_SIZE);
+
+        console.log(`[Enrich] Batch ${batchNum}/${totalBatches} (${batch.length} items)`);
+
+        // Process batch items sequentially
+        for (const item of batch) {
+          try {
+            let websiteUrl = item.website;
+            if (!websiteUrl.startsWith('http')) {
+              websiteUrl = 'https://' + websiteUrl;
+            }
+
+            const response = await axios.get(websiteUrl, {
+              timeout: 15000,
+              maxRedirects: 3,
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml',
+              },
+              validateStatus: (status) => status < 400,
+            });
+
+            const html = typeof response.data === 'string' ? response.data : '';
+            const foundEmails = [...new Set((html.match(EMAIL_REGEX) || [])
+              .filter(e => !e.endsWith('.png') && !e.endsWith('.jpg') && !e.endsWith('.gif'))
+              .filter(e => !e.includes('example.com') && !e.includes('sentry.io'))
+              .slice(0, 5)
+            )];
+
+            const foundPhones = [...new Set((html.match(PHONE_REGEX) || [])
+              .filter(p => p.replace(/\D/g, '').length >= 7)
+              .slice(0, 3)
+            )];
+
+            if (foundEmails.length > 0 || foundPhones.length > 0) {
+              const updates = [];
+              const values = [item.id];
+              let paramIdx = 2;
+
+              if (foundEmails.length > 0) {
+                updates.push(`emails = $${paramIdx}`);
+                values.push(foundEmails);
+                paramIdx++;
+              }
+
+              if (foundPhones.length > 0 && !item.phone) {
+                updates.push(`phone = $${paramIdx}`);
+                values.push(foundPhones[0]);
+                paramIdx++;
+              }
+
+              if (updates.length > 0) {
+                updates.push(`updated_at = NOW()`);
+                await db.query(
+                  `UPDATE mining_results SET ${updates.join(', ')} WHERE id = $1`,
+                  values
+                );
+                enrichedCount++;
+              }
+            }
+          } catch (err) {
+            errorCount++;
+            // Silent — don't log per-item errors to avoid spam
+          }
+        }
+
+        // Delay between batches
+        if (i + ENRICH_BATCH_SIZE < items.length) {
+          await new Promise(resolve => setTimeout(resolve, BATCH_DELAY_MS));
+        }
+      }
+
+      // Update job totals
+      const emailCountRes = await db.query(
+        `SELECT COUNT(*) as cnt FROM mining_results
+         WHERE job_id = $1 AND emails IS NOT NULL AND emails != '{}'`,
+        [job_id]
+      );
+
+      await db.query(
+        `UPDATE mining_jobs
+         SET status = 'completed',
+             total_emails_raw = $2
+         WHERE id = $1`,
+        [job_id, parseInt(emailCountRes.rows[0].cnt, 10)]
+      );
+
+      console.log(`✅ Enrichment complete: job ${job_id} — ${enrichedCount} enriched, ${errorCount} errors`);
+
+    } catch (bgErr) {
+      console.error(`[Enrich] Background error:`, bgErr.message);
+      // Reset job status
+      await db.query(
+        `UPDATE mining_jobs SET status = 'completed' WHERE id = $1`,
+        [job_id]
+      ).catch(() => {});
+    }
+
+  } catch (err) {
+    console.error('POST /mining/jobs/:id/enrich error:', err);
+    return res.status(500).json({ error: 'Failed to start enrichment' });
+  }
+});
+
+/**
+ * GET /api/mining/jobs/:id/enrich-stats
+ * Returns count of unenriched contacts for a job
+ */
+router.get('/api/mining/jobs/:id/enrich-stats', authRequired, validateJobId, async (req, res) => {
+  const organizer_id = req.auth.organizer_id;
+  const job_id = req.params.id;
+
+  try {
+    // Verify job ownership
+    const jobRes = await db.query(
+      `SELECT id, status FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      [job_id, organizer_id]
+    );
+
+    if (!jobRes.rows.length) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    const countRes = await db.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE website IS NOT NULL AND website != '' AND (emails IS NULL OR emails = '{}')) as unenriched,
+         COUNT(*) FILTER (WHERE emails IS NOT NULL AND emails != '{}') as with_email,
+         COUNT(*) as total
+       FROM mining_results WHERE job_id = $1`,
+      [job_id]
+    );
+
+    const stats = countRes.rows[0];
+
+    return res.json({
+      unenriched: parseInt(stats.unenriched, 10),
+      with_email: parseInt(stats.with_email, 10),
+      total: parseInt(stats.total, 10),
+      is_enriching: jobRes.rows[0].status === 'enriching'
+    });
+  } catch (err) {
+    console.error('GET /mining/jobs/:id/enrich-stats error:', err);
+    return res.status(500).json({ error: 'Failed to get enrich stats' });
+  }
+});
+
+/**
  * DELETE /api/mining/jobs/:id
  */
 router.delete('/api/mining/jobs/:id', authRequired, validateJobId, async (req, res) => {

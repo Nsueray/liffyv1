@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-02-22*
+*Updated: 2026-02-23*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -25,8 +25,10 @@
 | A15 | PDF mining — documentMiner'da PDF text extraction (pdfjs/pdf-parse) | P2 | TODO |
 | A16 | Cloudflare partial block — site yükleniyor ama data eksik (AFMT India pattern) | P2 | TODO |
 | A17 | Stuck job cleanup on startup | P1 | ✅ DONE |
-| A18 | Node.js heap limit (NODE_OPTIONS env var) | P1 | TODO (manual Render config) |
-| A19 | Excel mining quality — column mapping improvement | P2 | TODO |
+| A18 | Flow 2 OOM protection — contact count + enrichment rate rules (skip/limit Flow 2) | P1 | ✅ DONE |
+| A19 | Enrich Remaining button — POST /api/mining/jobs/:id/enrich + UI button | P1 | ✅ DONE |
+| A20 | Node.js heap limit (NODE_OPTIONS env var) | P1 | TODO (manual Render config) |
+| A21 | Excel mining quality — column mapping improvement | P2 | TODO |
 
 ## B. UI TASKS
 

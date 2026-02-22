@@ -469,12 +469,16 @@ class FlowOrchestrator {
             // ========================================
             let flow2Result = null;
 
-            if (this.shouldTriggerFlow2(flow1Result)) {
-                console.log(`[FlowOrchestrator] Triggering Flow 2 (enrichment < ${this.config.flow2Threshold * 100}%)`);
+            const flow2Decision = this.shouldTriggerFlow2(flow1Result);
+            console.log(`[FlowOrchestrator] Flow 2 decision: trigger=${flow2Decision.trigger} — ${flow2Decision.reason}`);
 
+            if (flow2Decision.trigger) {
                 this.updateState(jobId, FLOW_STATE.FLOW2_RUNNING);
 
-                flow2Result = await this.executeFlow2(job, flow1Result);
+                flow2Result = await this.executeFlow2(job, flow1Result, {
+                    maxWebsites: flow2Decision.maxWebsites || this.config.maxFlow2Websites,
+                    concurrency: flow2Decision.concurrency || undefined,
+                });
 
                 this.updateState(jobId, FLOW_STATE.FLOW2_COMPLETE);
 
@@ -518,11 +522,13 @@ class FlowOrchestrator {
                     enrichmentRate: flow1Result.enrichmentRate,
                     pagination: flow1Result.paginationStats || null
                 },
-                flow2: flow2Result ? {
-                    triggered: flow1Result.enrichmentRate < this.config.flow2Threshold,
-                    savedCount: flow2Result.savedCount || flow2Result.stats?.saved || 0
+                flow2: flow2Decision.trigger ? {
+                    triggered: true,
+                    reason: flow2Decision.reason,
+                    savedCount: flow2Result?.savedCount || flow2Result?.stats?.saved || 0
                 } : {
-                    triggered: false
+                    triggered: false,
+                    reason: flow2Decision.reason
                 },
                 cost: costSummary,
                 blockDetected
@@ -1068,13 +1074,19 @@ class FlowOrchestrator {
 
     /**
      * Execute Flow 2: WebsiteScraper → Aggregator V2 → DB
+     * @param {Object} limits - Optional OOM protection limits { maxWebsites, concurrency }
      */
-    async executeFlow2(job, flow1Result) {
+    async executeFlow2(job, flow1Result, limits = {}) {
         const jobId = job.id;
+        const maxWebsites = limits.maxWebsites || this.config.maxFlow2Websites;
 
-        // Get website URLs from Flow 1
+        // Get website URLs from Flow 1 (with OOM-safe limit)
         const websiteUrls = (flow1Result.websiteUrls || [])
-            .slice(0, this.config.maxFlow2Websites);
+            .slice(0, maxWebsites);
+
+        if (limits.maxWebsites || limits.concurrency) {
+            console.log(`[Flow2] OOM protection active: max ${maxWebsites} URLs, concurrency ${limits.concurrency || 'default'}`);
+        }
 
         if (websiteUrls.length === 0) {
             console.log('[Flow2] No website URLs to scrape');
@@ -1109,23 +1121,57 @@ class FlowOrchestrator {
 
     /**
      * Check if Flow 2 should be triggered
+     * Returns { trigger, maxWebsites?, concurrency?, reason }
+     *
+     * OOM Protection Rules:
+     *   - Contact > 500 AND enrichment >= 50% → SKIP Flow 2
+     *   - Contact > 500 AND enrichment < 50% → Limited Flow 2 (max 50 URLs, concurrency 1)
+     *   - Contact <= 500 → Normal Flow 2 (existing behavior)
      */
     shouldTriggerFlow2(flow1Result) {
         if (!this.config.enableFlow2) {
-            return false;
+            return { trigger: false, reason: 'Flow 2 disabled in config' };
         }
 
-        // Trigger if enrichment rate is below threshold
-        if (flow1Result.enrichmentRate < this.config.flow2Threshold) {
-            return true;
+        const contactCount = flow1Result.contactCount || 0;
+        const enrichmentRate = flow1Result.enrichmentRate || 0;
+        const enrichPct = (enrichmentRate * 100).toFixed(0);
+
+        // === OOM PROTECTION: Large dataset rules ===
+        if (contactCount > 500) {
+            if (enrichmentRate >= 0.5) {
+                // Rule 1: Large dataset + good enrichment → skip
+                return {
+                    trigger: false,
+                    reason: `OOM protection: ${contactCount} contacts with ${enrichPct}% enrichment — skipping Flow 2`
+                };
+            } else {
+                // Rule 2: Large dataset + low enrichment → limited Flow 2
+                return {
+                    trigger: true,
+                    maxWebsites: 50,
+                    concurrency: 1,
+                    reason: `OOM protection: ${contactCount} contacts with ${enrichPct}% enrichment — limited Flow 2 (max 50 URLs, concurrency 1)`
+                };
+            }
         }
 
-        // Trigger if we have websites to scrape and few contacts
-        if (flow1Result.websiteUrls?.length > 0 && flow1Result.contactCount < 10) {
-            return true;
+        // === Normal dataset (≤ 500 contacts) — existing logic ===
+        if (enrichmentRate < this.config.flow2Threshold) {
+            return {
+                trigger: true,
+                reason: `Enrichment ${enrichPct}% < threshold ${this.config.flow2Threshold * 100}%`
+            };
         }
 
-        return false;
+        if (flow1Result.websiteUrls?.length > 0 && contactCount < 10) {
+            return {
+                trigger: true,
+                reason: `Websites found with few contacts (${contactCount})`
+            };
+        }
+
+        return { trigger: false, reason: `Enrichment sufficient (${enrichPct}%)` };
     }
 
     /**
