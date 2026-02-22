@@ -27,8 +27,9 @@
 | A17 | Stuck job cleanup on startup | P1 | ✅ DONE |
 | A18 | Flow 2 OOM protection — contact count + enrichment rate rules (skip/limit Flow 2) | P1 | ✅ DONE |
 | A19 | Enrich Remaining button — POST /api/mining/jobs/:id/enrich + UI button | P1 | ✅ DONE |
-| A20 | Node.js heap limit (NODE_OPTIONS env var) | P1 | TODO (manual Render config) |
-| A21 | Excel mining quality — column mapping improvement | P2 | TODO |
+| A20 | NaN enrichment guard — shouldTriggerFlow2 undefined/NaN default to 100% (safe skip) | P1 | ✅ DONE |
+| A21 | Node.js heap limit (NODE_OPTIONS env var) | P1 | TODO (manual Render config) |
+| A22 | Excel mining quality — column mapping improvement | P2 | TODO |
 
 ## B. UI TASKS
 
@@ -107,3 +108,4 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | H1 | Re-mine butonu — mevcut job'u tekrar başlat (aynı URL + config ile yeni job) | P2 | ✅ DONE |
 | H2 | New Mining Job formunda Free mode default olsun (şu an AI mode default) | P1 | ✅ DONE |
 | H3 | Campaign scheduling — gün ve saat seçerek otomatik gönderim | P2 | TODO |
+| H4 | Mining Jobs Strategy kolonu — miner_used, mining_mode, flow2_status detaylı gösterim | P1 | ✅ DONE |

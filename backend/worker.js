@@ -371,6 +371,22 @@ async function processNextJob() {
 if (shouldUseSuperMiner(job)) {
   const smResult = await superMiner.runMiningJob(job, db);
 
+  // Save strategy metadata (miner_used, mining_mode, flow2_status) to stats JSONB
+  if (smResult?.minerUsed || smResult?.flow2Status) {
+    try {
+      await db.query(
+        `UPDATE mining_jobs SET stats = COALESCE(stats, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+        [job.id, JSON.stringify({
+          miner_used: smResult.minerUsed || null,
+          mining_mode: smResult.miningMode || job.config?.mining_mode || 'full',
+          flow2_status: smResult.flow2Status || 'not_needed'
+        })]
+      );
+    } catch (statsErr) {
+      console.warn(`[Worker] Failed to save strategy stats: ${statsErr.message}`);
+    }
+  }
+
   // Block detection for unified engine: check actual DB results
   // smResult.blockDetected covers BLOCKED/FAILED miner statuses
   // Also check for 0 results in DB (covers empty pages, Cloudflare, etc.)

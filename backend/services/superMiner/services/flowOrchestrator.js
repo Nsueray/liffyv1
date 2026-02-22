@@ -518,10 +518,25 @@ class FlowOrchestrator {
             // Block detection: 0 contacts + miner failures indicate possible block
             const blockDetected = flow1Result.contactCount === 0 && (flow1Result.hasBlockedMiner || flow1Result.allMinersFailed);
 
+            // Compute flow2Status for UI display
+            let flow2Status = 'not_needed';
+            if (flow2Decision.trigger) {
+                if (flow2Decision.maxWebsites) {
+                    flow2Status = 'limited';
+                } else {
+                    flow2Status = 'completed';
+                }
+            } else if (flow2Decision.reason?.includes('OOM protection')) {
+                flow2Status = 'skipped';
+            }
+
             const finalResult = {
                 status: 'COMPLETED',
                 jobId,
                 totalTime,
+                minerUsed: flow1Result.minerUsed || 'unknown',
+                miningMode: job.config?.mining_mode || 'full',
+                flow2Status,
                 flow1: {
                     contactCount: flow1Result.contactCount,
                     enrichmentRate: flow1Result.enrichmentRate,
@@ -832,6 +847,7 @@ class FlowOrchestrator {
                     : [];
 
                 if (executablePlan.length > 0) {
+                    const minerUsedName = executablePlan[0]?.miner || 'unknown';
                     console.log(`[Flow1] Execution plan: ${executablePlan.map((step) => step.miner).join(' → ')}`);
 
                     if (this.circuitBreaker) {
@@ -975,6 +991,7 @@ class FlowOrchestrator {
                         websiteUrls: (aggregationResult.websiteUrlCount > 0 && this.storage?.enabled) ?
                             (await this.storage.getFlowResults(jobId))?.websiteUrls || [] : [],
                         minerStats: aggregationResult.minerStats,
+                        minerUsed: minerUsedName,
                         paginationStats: paginationInfo.isPaginated ? {
                             totalPages: paginationInfo.totalPages,
                             pageUrls: paginationInfo.pageUrls.length
@@ -1072,6 +1089,7 @@ class FlowOrchestrator {
             websiteUrls: aggregationResult.websiteUrlCount > 0 ?
                 (await this.storage.getFlowResults(jobId))?.websiteUrls : [],
             minerStats: aggregationResult.minerStats,
+            minerUsed: selectedMiner || 'unknown',
             paginationStats: paginationInfo.isPaginated ? {
                 totalPages: paginationInfo.totalPages,
                 pageUrls: paginationInfo.pageUrls.length
@@ -1138,7 +1156,7 @@ class FlowOrchestrator {
      *   - Contact <= 500 → Normal Flow 2 (existing behavior)
      */
     shouldTriggerFlow2(flow1Result) {
-        console.log(`[FlowOrchestrator] shouldTriggerFlow2: contacts=${flow1Result.contactCount || 0} enrichment=${flow1Result.enrichmentRate || 0} enableFlow2=${this.config.enableFlow2}`);
+        console.log(`[FlowOrchestrator] shouldTriggerFlow2: contacts=${flow1Result.contactCount || 0} enrichment=${flow1Result.enrichmentRate} enableFlow2=${this.config.enableFlow2}`);
 
         if (!this.config.enableFlow2) {
             console.log(`[FlowOrchestrator] shouldTriggerFlow2 → SKIP (disabled in config)`);
@@ -1146,7 +1164,13 @@ class FlowOrchestrator {
         }
 
         const contactCount = flow1Result.contactCount || 0;
-        const enrichmentRate = flow1Result.enrichmentRate || 0;
+
+        // NaN/undefined guard — if enrichment is unknown, assume 100% (safe skip)
+        let enrichmentRate = flow1Result.enrichmentRate;
+        if (enrichmentRate === undefined || enrichmentRate === null || Number.isNaN(enrichmentRate)) {
+            console.log(`[FlowOrchestrator] Enrichment rate undefined/NaN, defaulting to 100% (safe skip)`);
+            enrichmentRate = 1.0;
+        }
         const enrichPct = (enrichmentRate * 100).toFixed(0);
 
         // === OOM PROTECTION: Large dataset rules ===
