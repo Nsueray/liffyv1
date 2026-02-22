@@ -449,6 +449,8 @@ async function runSpaNetworkMiner(page, url, config = {}) {
     const remaining = itemsToProcess.slice(learnCount);
     console.log(`[spaNetworkMiner] Fetching ${remaining.length} details via browser fetch (fast path)...`);
 
+    let fastPathFailed = false;
+
     // Process in batches to avoid overwhelming the server
     const batchSize = 5;
     for (let batchStart = 0; batchStart < remaining.length; batchStart += batchSize) {
@@ -457,49 +459,147 @@ async function runSpaNetworkMiner(page, url, config = {}) {
         break;
       }
 
+      if (fastPathFailed) break;
+
       const batch = remaining.slice(batchStart, batchStart + batchSize);
 
-      const batchResults = await page.evaluate(async (params) => {
-        const { items, apiTemplate, idField, delayMs } = params;
-        const results = {};
+      let batchPayload = {};
+      try {
+        batchPayload = await page.evaluate(async (params) => {
+          const { items, apiTemplate, idField, delayMs } = params;
+          const results = {};
+          const errors = [];
 
-        for (const item of items) {
-          const itemId = item[idField];
-          if (!itemId) continue;
+          for (const item of items) {
+            const itemId = item[idField];
+            if (!itemId) continue;
 
-          const apiUrl = apiTemplate.replace('{id}', itemId);
+            const apiUrl = apiTemplate.replace('{id}', itemId);
 
-          try {
-            const resp = await fetch(apiUrl, { credentials: 'include' });
-            if (resp.ok) {
-              const json = await resp.json();
-              results[String(itemId)] = json;
+            try {
+              const resp = await fetch(apiUrl, { credentials: 'include' });
+              if (resp.ok) {
+                const json = await resp.json();
+                results[String(itemId)] = json;
+              } else {
+                errors.push({ id: String(itemId), status: resp.status, statusText: resp.statusText });
+              }
+            } catch (e) {
+              errors.push({ id: String(itemId), error: e.message || String(e) });
             }
-          } catch { /* ignore fetch errors */ }
 
-          // Small delay between requests
-          if (delayMs > 0) {
-            await new Promise(r => setTimeout(r, delayMs));
+            if (delayMs > 0) {
+              await new Promise(r => setTimeout(r, delayMs));
+            }
           }
-        }
 
-        return results;
-      }, {
-        items: batch,
-        apiTemplate: detailApiPattern.template,
-        idField: bestFieldMap.id || 'id',
-        delayMs: Math.max(200, delayMs / 2), // Faster in browser context
-      });
+          return { results, errors };
+        }, {
+          items: batch,
+          apiTemplate: detailApiPattern.template,
+          idField: bestFieldMap.id || 'id',
+          delayMs: Math.max(200, delayMs / 2),
+        });
+      } catch (evalErr) {
+        console.error(`[spaNetworkMiner] page.evaluate crashed: ${evalErr.message}`);
+        fastPathFailed = true;
+        break;
+      }
 
-      for (const [id, data] of Object.entries(batchResults)) {
+      const { results = {}, errors = [] } = batchPayload || {};
+
+      if (errors.length > 0) {
+        console.warn(`[spaNetworkMiner] Fast path batch errors (${errors.length}): ${JSON.stringify(errors.slice(0, 3))}`);
+      }
+
+      const resultCount = Object.keys(results).length;
+
+      // If first batch returned 0 results, fast path is broken — fall back
+      if (batchStart === 0 && resultCount === 0) {
+        console.warn('[spaNetworkMiner] Fast path returned 0 results on first batch — switching to slow path');
+        fastPathFailed = true;
+        break;
+      }
+
+      for (const [id, data] of Object.entries(results)) {
         detailDataMap.set(id, data);
       }
 
-      // Pause between batches
       await sleep(delayMs);
 
       const progress = Math.min(batchStart + batchSize, remaining.length);
-      console.log(`[spaNetworkMiner] Detail progress: ${learnCount + progress}/${itemsToProcess.length}`);
+      if (progress % 50 === 0 || batchStart + batchSize >= remaining.length) {
+        console.log(`[spaNetworkMiner] Fast-path progress: ${learnCount + progress}/${itemsToProcess.length}`);
+      }
+    }
+
+    // ── Fallback: if fast path failed, use browser navigation for remaining items ──
+    if (fastPathFailed) {
+      const processedIds = new Set(detailDataMap.keys());
+      const fallbackItems = remaining.filter(item => {
+        const id = getItemId(item, bestFieldMap);
+        return id && !processedIds.has(String(id));
+      });
+      console.log(`[spaNetworkMiner] Slow-path fallback for ${fallbackItems.length} remaining items...`);
+
+      for (let i = 0; i < fallbackItems.length; i++) {
+        if (Date.now() - startTime > totalTimeout) {
+          console.log('[spaNetworkMiner] Total timeout reached during fallback');
+          break;
+        }
+
+        const item = fallbackItems[i];
+        const itemId = getItemId(item, bestFieldMap);
+        if (!itemId) continue;
+
+        const fbDetailUrl = buildDetailUrl(detailUrlPattern, itemId);
+        const fbResponses = [];
+
+        const fbHandler = async (response) => {
+          try {
+            const respUrl = response.url();
+            const contentType = response.headers()['content-type'] || '';
+            if (!contentType.includes('json')) return;
+            const status = response.status();
+            if (status < 200 || status >= 300) return;
+            if (/getModelConfigurations|puimodel|logsaccess|insertAudit|puidocument/i.test(respUrl)) return;
+
+            const text = await response.text().catch(() => null);
+            if (!text || text.length < 50) return;
+
+            let body;
+            try { body = JSON.parse(text); } catch { return; }
+
+            if (body && typeof body === 'object' && !Array.isArray(body)) {
+              const keys = Object.keys(body);
+              const stringValueCount = keys.filter(k => typeof body[k] === 'string' || typeof body[k] === 'number').length;
+              if (stringValueCount < 3) return;
+              const hasIndicator = keys.some(k => /email|phone|web|contact/i.test(k));
+              if (hasIndicator) fbResponses.push({ url: respUrl, body });
+            }
+          } catch { /* ignore */ }
+        };
+
+        page.on('response', fbHandler);
+
+        try {
+          await page.goto(fbDetailUrl, { waitUntil: 'networkidle', timeout: 10000 });
+          await sleep(2000);
+        } catch { /* ignore */ }
+
+        page.off('response', fbHandler);
+
+        if (fbResponses.length > 0) {
+          const best = pickBestDetailResponse(fbResponses);
+          detailDataMap.set(String(itemId), best.body);
+        }
+
+        if (i < fallbackItems.length - 1) await sleep(delayMs);
+
+        if ((i + 1) % 50 === 0) {
+          console.log(`[spaNetworkMiner] Fallback progress: ${i + 1}/${fallbackItems.length}`);
+        }
+      }
     }
   } else if (!detailApiPattern && itemsToProcess.length > learnCount) {
     // No API pattern learned — continue with browser navigation (slow path)
@@ -557,15 +657,13 @@ async function runSpaNetworkMiner(page, url, config = {}) {
       page.off('response', detailHandler);
 
       if (detailResponses.length > 0) {
-        const best = detailResponses.sort((a, b) =>
-          Object.keys(b.body).length - Object.keys(a.body).length
-        )[0];
+        const best = pickBestDetailResponse(detailResponses);
         detailDataMap.set(String(itemId), best.body);
       }
 
       if (i < itemsToProcess.length - 1) await sleep(delayMs);
 
-      if ((i + 1) % 20 === 0) {
+      if ((i + 1) % 50 === 0) {
         console.log(`[spaNetworkMiner] Detail progress: ${i + 1}/${itemsToProcess.length}`);
       }
     }
@@ -680,6 +778,24 @@ function detectApiPattern(apiUrl, itemId) {
   const template = apiUrl.replace(idStr, '{id}');
 
   return { template };
+}
+
+/**
+ * Pick the best detail response: prioritise actual email values, then string field count.
+ */
+function pickBestDetailResponse(detailResponses) {
+  return detailResponses.sort((a, b) => {
+    const aKeys = Object.keys(a.body);
+    const bKeys = Object.keys(b.body);
+    // Priority 1: has actual email value
+    const aHasEmail = aKeys.some(k => /email|mail/i.test(k) && typeof a.body[k] === 'string' && EMAIL_REGEX.test(a.body[k].trim()));
+    const bHasEmail = bKeys.some(k => /email|mail/i.test(k) && typeof b.body[k] === 'string' && EMAIL_REGEX.test(b.body[k].trim()));
+    if (aHasEmail !== bHasEmail) return bHasEmail ? 1 : -1;
+    // Priority 2: more string/number fields (actual data, not nested config)
+    const aStrings = aKeys.filter(k => typeof a.body[k] === 'string' || typeof a.body[k] === 'number').length;
+    const bStrings = bKeys.filter(k => typeof b.body[k] === 'string' || typeof b.body[k] === 'number').length;
+    return bStrings - aStrings;
+  })[0];
 }
 
 /**
