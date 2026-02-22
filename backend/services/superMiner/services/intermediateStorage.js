@@ -336,7 +336,7 @@ class IntermediateStorage {
                 status: 'healthy',
                 tempResultsCount: keys.length,
                 ttlDefault: TEMP_RESULTS_TTL,
-                maxPayloadMB: MAX_PAYLOAD_SIZE / 1024 / 1024
+                warnPayloadMB: PAYLOAD_WARN_SIZE / 1024 / 1024
             };
         } catch (err) {
             return { status: 'unhealthy', message: err.message };
@@ -359,6 +359,6 @@ module.exports = {
     IntermediateStorage,
     getIntermediateStorage,
     TEMP_RESULTS_TTL,
-    MAX_PAYLOAD_SIZE,
+    PAYLOAD_WARN_SIZE,
     KEY_PREFIX
 };
