@@ -32,7 +32,7 @@ const FIELD_PATTERNS = {
   email:   { nameMatch: /email|mail|correo|e-?mail/i,   valueTest: (v) => typeof v === 'string' && EMAIL_REGEX.test(v.trim()) },
   company: { nameMatch: /name|company|firm|nombre|exhiname|razonsocial|empresa/i, valueTest: null },
   phone:   { nameMatch: /phone|tel|fax|telefono|movil|mobile/i,  valueTest: null },
-  website: { nameMatch: /web|url|website|sitio|homepage/i, valueTest: null },
+  website: { nameMatch: /web|url|website|sitio|homepage/i, nameExclude: /image|logo|img|photo|thumbnail|icon|banner|avatar/i, valueTest: null },
   contact: { nameMatch: /contact|person|contacto|contactperson|responsable/i, valueTest: null },
   country: { nameMatch: /country|pais|countryid|nationality|nacion/i, valueTest: null },
   address: { nameMatch: /address|direccion|domicilio|street|calle/i, valueTest: null },
@@ -52,7 +52,11 @@ function sleep(ms) {
  */
 function detectFieldByName(key) {
   for (const [field, pattern] of Object.entries(FIELD_PATTERNS)) {
-    if (pattern.nameMatch.test(key)) return field;
+    if (pattern.nameMatch.test(key)) {
+      // Check exclusion pattern (e.g. "imageurl" should NOT match website)
+      if (pattern.nameExclude && pattern.nameExclude.test(key)) continue;
+      return field;
+    }
   }
   return null;
 }
@@ -192,9 +196,9 @@ function extractArrays(body) {
  * @returns {Promise<Array>} Raw contact cards
  */
 async function runSpaNetworkMiner(page, url, config = {}) {
-  const delayMs = config.delay_ms || 1000;
+  const delayMs = config.delay_ms || 500;
   const maxDetails = config.max_details || 300;
-  const totalTimeout = config.total_timeout || 600000; // 10 min
+  const totalTimeout = config.total_timeout || 480000; // 8 min (Render free plan 15min limit)
   const startTime = Date.now();
 
   console.log(`[spaNetworkMiner] Starting: ${url}`);
@@ -373,16 +377,25 @@ async function runSpaNetworkMiner(page, url, config = {}) {
         const status = response.status();
         if (status < 200 || status >= 300) return;
 
+        // Skip known config/registry endpoints that pollute detail detection
+        if (/getModelConfigurations|puimodel|logsaccess|insertAudit|puidocument/i.test(respUrl)) return;
+
         const text = await response.text().catch(() => null);
         if (!text || text.length < 50) return;
 
         let body;
         try { body = JSON.parse(text); } catch { return; }
 
-        // Look for detail-like responses (object with email-like fields)
+        // Look for detail-like responses (flat object with string values, not a config registry)
         if (body && typeof body === 'object' && !Array.isArray(body)) {
-          const hasEmailIndicator = Object.keys(body).some(k => /email|mail|correo/i.test(k));
-          const hasContactIndicator = Object.keys(body).some(k => /phone|tel|web|address|contact/i.test(k));
+          const keys = Object.keys(body);
+
+          // Exclude registry-like objects: too many keys that are ALL nested objects
+          const stringValueCount = keys.filter(k => typeof body[k] === 'string' || typeof body[k] === 'number').length;
+          if (stringValueCount < 3) return; // Config registries have only nested objects as values
+
+          const hasEmailIndicator = keys.some(k => /email|mail|correo/i.test(k));
+          const hasContactIndicator = keys.some(k => /phone|tel|web|address|contact/i.test(k));
 
           if (hasEmailIndicator || hasContactIndicator) {
             detailResponses.push({ url: respUrl, body });
@@ -394,7 +407,7 @@ async function runSpaNetworkMiner(page, url, config = {}) {
     page.on('response', detailHandler);
 
     try {
-      await page.goto(detailUrl, { waitUntil: 'networkidle', timeout: 30000 });
+      await page.goto(detailUrl, { waitUntil: 'networkidle', timeout: 10000 });
       await sleep(2000);
     } catch (err) {
       console.warn(`[spaNetworkMiner] Detail navigation failed for ${itemId}: ${err.message}`);
@@ -403,10 +416,19 @@ async function runSpaNetworkMiner(page, url, config = {}) {
     page.off('response', detailHandler);
 
     if (detailResponses.length > 0) {
-      // Pick the best detail response (most fields)
-      const best = detailResponses.sort((a, b) =>
-        Object.keys(b.body).length - Object.keys(a.body).length
-      )[0];
+      // Pick the best detail response: prefer responses with actual email VALUES, then most string fields
+      const best = detailResponses.sort((a, b) => {
+        const aKeys = Object.keys(a.body);
+        const bKeys = Object.keys(b.body);
+        // Priority 1: has actual email value
+        const aHasEmailVal = aKeys.some(k => /email|mail/i.test(k) && typeof a.body[k] === 'string' && EMAIL_REGEX.test(a.body[k].trim()));
+        const bHasEmailVal = bKeys.some(k => /email|mail/i.test(k) && typeof b.body[k] === 'string' && EMAIL_REGEX.test(b.body[k].trim()));
+        if (aHasEmailVal !== bHasEmailVal) return bHasEmailVal ? 1 : -1;
+        // Priority 2: more string/number fields (actual data, not nested config)
+        const aStrings = aKeys.filter(k => typeof a.body[k] === 'string' || typeof a.body[k] === 'number').length;
+        const bStrings = bKeys.filter(k => typeof b.body[k] === 'string' || typeof b.body[k] === 'number').length;
+        return bStrings - aStrings;
+      })[0];
 
       detailDataMap.set(String(itemId), best.body);
 
@@ -504,6 +526,9 @@ async function runSpaNetworkMiner(page, url, config = {}) {
           const status = response.status();
           if (status < 200 || status >= 300) return;
 
+          // Skip known config/registry endpoints
+          if (/getModelConfigurations|puimodel|logsaccess|insertAudit|puidocument/i.test(respUrl)) return;
+
           const text = await response.text().catch(() => null);
           if (!text || text.length < 50) return;
 
@@ -511,7 +536,12 @@ async function runSpaNetworkMiner(page, url, config = {}) {
           try { body = JSON.parse(text); } catch { return; }
 
           if (body && typeof body === 'object' && !Array.isArray(body)) {
-            const hasIndicator = Object.keys(body).some(k => /email|phone|web|contact/i.test(k));
+            const keys = Object.keys(body);
+            // Exclude registry-like objects
+            const stringValueCount = keys.filter(k => typeof body[k] === 'string' || typeof body[k] === 'number').length;
+            if (stringValueCount < 3) return;
+
+            const hasIndicator = keys.some(k => /email|phone|web|contact/i.test(k));
             if (hasIndicator) detailResponses.push({ url: respUrl, body });
           }
         } catch { /* ignore */ }
@@ -520,7 +550,7 @@ async function runSpaNetworkMiner(page, url, config = {}) {
       page.on('response', detailHandler);
 
       try {
-        await page.goto(detailUrl, { waitUntil: 'networkidle', timeout: 30000 });
+        await page.goto(detailUrl, { waitUntil: 'networkidle', timeout: 10000 });
         await sleep(2000);
       } catch { /* ignore */ }
 
