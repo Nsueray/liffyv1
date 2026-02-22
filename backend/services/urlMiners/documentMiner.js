@@ -80,6 +80,41 @@ class DocumentMiner {
         };
 
         try {
+            // Direct PDF URL — download as binary and extract text directly
+            try {
+                const urlPath = new URL(url).pathname.toLowerCase();
+                if (urlPath.endsWith('.pdf')) {
+                    console.log(`[DocumentMiner] Direct PDF URL detected, downloading as binary...`);
+
+                    if (!fileMiner || !fileMiner.extractTextFromPDF) {
+                        console.log('[DocumentMiner] PDF mining not yet supported — fileMiner not available');
+                        result.errors.push('PDF mining requires fileMiner module');
+                        result.stats.duration = Date.now() - startTime;
+                        return result;
+                    }
+
+                    const extracted = await this.extractFromPdf(url, url);
+                    if (extracted && extracted.text && extracted.text.length >= CONFIG.MIN_TEXT_LENGTH) {
+                        result.success = true;
+                        result.extractedText = extracted.text;
+                        result.textBlocks = extracted.textBlocks || [];
+                        result.extractionMethod = EXTRACTION_METHODS.PDF_DELEGATION;
+                        result.pageCount = extracted.pageCount || null;
+                        console.log(`[DocumentMiner] ✅ PDF extracted: ${result.extractedText.length} chars`);
+                    } else {
+                        result.errors.push('PDF text extraction returned insufficient text');
+                        console.log(`[DocumentMiner] PDF extraction returned too little text`);
+                    }
+
+                    result.stats.duration = Date.now() - startTime;
+                    return result;
+                }
+            } catch (pdfErr) {
+                console.log(`[DocumentMiner] PDF direct extraction error: ${pdfErr.message}`);
+                result.errors.push(`PDF direct: ${pdfErr.message}`);
+                // Fall through to normal HTML-based flow
+            }
+
             const html = await this.fetchPage(url);
             if (!html) {
                 result.errors.push('Failed to fetch page');

@@ -21,6 +21,9 @@
 | A11 | Block detection email notification (commits: 2a7ecd2, fb9e7d5) | P1 | DONE |
 | A12 | spaNetworkMiner v1 complete — token capture, fast path, 257/259 coverage | P1 | ✅ DONE |
 | A13 | Generic SPA detection in pageAnalyzer — hostname bağımlılığını kaldır | P1 | ✅ DONE |
+| A14 | PDF URL routing — .pdf URL'leri documentMiner'a yönlendir | P1 | ✅ DONE |
+| A15 | PDF mining — documentMiner'da PDF text extraction (pdfjs/pdf-parse) | P2 | TODO |
+| A16 | Cloudflare partial block — site yükleniyor ama data eksik (AFMT India pattern) | P2 | TODO |
 
 ## B. UI TASKS
 

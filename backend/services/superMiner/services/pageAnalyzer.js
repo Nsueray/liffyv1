@@ -117,8 +117,31 @@ class PageAnalyzer {
         const startTime = Date.now();
         
         console.log(`[PageAnalyzer] Analyzing: ${url}`);
-        
+
         try {
+            // Early URL pattern check — .pdf URLs cannot be HTML-analyzed
+            // Must happen BEFORE fetchPage() to prevent binary download
+            try {
+                const urlPath = new URL(url).pathname.toLowerCase();
+                if (urlPath.endsWith('.pdf')) {
+                    console.log(`[PageAnalyzer] PDF URL detected, skipping HTML analysis: ${url}`);
+                    return {
+                        url,
+                        pageType: PAGE_TYPES.DOCUMENT_VIEWER,
+                        isPdfUrl: true,
+                        contentLength: 0,
+                        analysisTime: Date.now() - startTime,
+                        recommendation: {
+                            miner: 'documentMiner',
+                            useCache: false,
+                            reason: 'Direct PDF URL, using documentMiner'
+                        }
+                    };
+                }
+            } catch (e) {
+                // Invalid URL, continue with normal analysis
+            }
+
             // Try to get cached HTML first
             let html = null;
             let fromCache = false;
