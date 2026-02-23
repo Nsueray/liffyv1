@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { sendEmail } = require('../mailer');
+const multer = require('multer');
+const upload = multer();
 
 // ============================================================
 // IMPORT SHARED UNSUBSCRIBE UTILITY
@@ -583,7 +585,10 @@ async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyT
  * 7. Forward reply to organizer's inbox (wrapper email)
  * 8. Do NOT update campaign_recipients.status
  */
-router.post('/api/webhooks/inbound/:secret', async (req, res) => {
+router.post(
+  '/api/webhooks/inbound/:secret',
+  upload.none(),
+  async (req, res) => {
   try {
     // Security: validate secret from URL path
     const expectedSecret = process.env.INBOUND_WEBHOOK_SECRET;
