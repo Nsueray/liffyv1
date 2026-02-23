@@ -191,3 +191,4 @@ No partial snippets, no "rest stays the same" shortcuts.
 Active refactor in progress. See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for full 10-step plan.
 Steps 1-6 ✅ DONE. Steps 7-8 DEFERRED. Step 9 (directoryMiner) phases 1-5 ✅ DONE. Step 10 ✅ DONE.
 messeFrankfurtMiner ✅ DONE — Messe Frankfurt exhibition exhibitor catalogs (API + detail page extraction).
+memberTableMiner ✅ DONE — HTML table member/exhibitor lists (associations, chambers, federations).

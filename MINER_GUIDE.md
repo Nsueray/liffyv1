@@ -393,6 +393,7 @@ triggerCanonicalAggregation():
 | `documentMiner` | HTTP + PDF | Flipbook/PDF/document parsing | ACTIVE |
 | `directoryMiner` | Playwright | Business directories (card-based layouts, Yellow Pages, etc.) | ACTIVE |
 | `messeFrankfurtMiner` | Playwright + API | Messe Frankfurt exhibition exhibitor catalogs (Techtextil, Automechanika, Heimtextil, ISH, etc.) | ACTIVE |
+| `memberTableMiner` | Playwright | HTML table member/exhibitor lists (associations, chambers, federations) | ACTIVE |
 | `httpBasicMiner` | HTTP | Basic HTTP fetch + regex (alias for playwrightTableMiner) | ACTIVE (alias) |
 | `fullMiner` | Composite | Runs playwrightTableMiner only (aiMiner removed from free mode) | ACTIVE |
 | `playwrightMiner` | Playwright | General Playwright crawl (alias for fullMiner) | ACTIVE (alias) |
@@ -416,6 +417,20 @@ triggerCanonicalAggregation():
 - Detail page extraction: mailto: links (filtered share links), tel: links, website (strict label matching), address selectors
 - Config: `max_pages` (default 50), `max_details` (default 300), `delay_ms` (default 1500ms), `page_size` (default 100)
 - Covers all Messe Frankfurt events: Techtextil, Automechanika, Heimtextil, ISH, Ambiente, etc. (same SPA platform)
+
+**memberTableMiner details:**
+- Single-phase: navigates to page, finds HTML `<table>` elements, parses rows with column mapping
+- Header-based detection: analyzes header row keywords (company, email, phone, contact, city, address, country, website)
+- Multi-language keywords: EN + TR support
+- Scoring: longer keyword match = higher specificity (e.g., "contact details" → email, "contact person" → contact_name)
+- Content-based fallback: if no header row, samples data rows to infer column types (email regex, company suffixes, name prefixes)
+- Does NOT handle its own pagination (ownPagination: false) — flowOrchestrator handles external pagination
+- Browser lifecycle managed by flowOrchestrator wrapper
+- Detects: `MEMBER_TABLE_DOMAINS` hostname + 'member' in URL
+- Extracts: company_name (bold text), email, phone (prefix cleaning), contact_name, city, address (lines below company), website
+- HTML entity decoding for company names (&amp; → &)
+- Config: `delay_ms` (default 2000ms)
+- Test case: AIACRA patron-members → 38 contacts, 100% email+company+contact+city
 
 ---
 
