@@ -188,7 +188,8 @@ class FlowOrchestrator {
                         let browser = null;
                         try {
                             browser = await chromium.launch({ headless: true });
-                            const page = await browser.newPage();
+                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            const page = await context.newPage();
                             const rawCards = await runDirectoryMiner(page, job.input, job.config || {});
                             await browser.close();
                             browser = null;
@@ -239,7 +240,8 @@ class FlowOrchestrator {
                         let browser = null;
                         try {
                             browser = await chromium.launch({ headless: true });
-                            const page = await browser.newPage();
+                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            const page = await context.newPage();
                             const rawCards = await runSpaNetworkMiner(page, job.input, job.config || {});
                             await browser.close();
                             browser = null;
