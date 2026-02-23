@@ -76,24 +76,26 @@
 
 | # | Task | Priority | Status |
 |---|------|----------|--------|
-| G1 | Reply detection — campaign reply'ları tespit et, prospect'e dönüştür | P1 | TODO |
-| G2 | Reply webhook/polling — SendGrid inbound parse veya IMAP polling ile reply algılama | P1 | TODO |
-| G3 | Unsubscribe tracking — unsubscribe olanları UI'da göster | P1 | TODO |
-| G4 | Unsubscribe listesi sayfası — kim, ne zaman, hangi campaign'den unsubscribe oldu | P2 | TODO |
-| G5 | Prospect conversion — reply detected → lead becomes prospect | P2 | TODO |
+| G1 | Reply detection Stage 1 — inbound webhook endpoint, VERP parser, auto-reply filter (commit: e1e05f8) | P1 | ✅ DONE |
+| G2 | Reply detection Stage 2 — VERP reply-to generation in mailer.js + DNS (reply.liffy.app MX) + SendGrid Inbound Parse config | P1 | TODO |
+| G3 | Reply detection Stage 3 — reply forwarding to original sender + reply count in analytics UI | P2 | TODO |
+| G4 | Unsubscribe tracking — unsubscribe olanları UI'da göster | P1 | TODO |
+| G5 | Unsubscribe listesi sayfası — kim, ne zaman, hangi campaign'den unsubscribe oldu | P2 | TODO |
+| G6 | Prospect conversion — reply detected → lead becomes prospect | P2 | TODO |
 
 ### Context
 
 **Current state:**
 - ✅ Click tracking works (campaign_events, event_type='click')
 - ✅ Open tracking works (campaign_events, event_type='open')
-- ❌ Reply detection NOT working — replies not detected, prospects not created
+- ✅ Reply detection Stage 1 DONE — inbound webhook endpoint ready (commit: e1e05f8)
+- ⏳ Reply detection Stage 2 TODO — VERP generation + DNS + SendGrid config (endpoint inactive until this)
 - ❌ Unsubscribe list NOT visible — unsubscribes happen but no UI to see them
 
-**Reply detection options:**
-1. SendGrid Inbound Parse webhook — forwards replies to our endpoint
-2. IMAP polling — check sender inbox periodically
-3. SendGrid Event Webhook — reply events (limited)
+**Reply detection approach:** Hybrid VERP + SendGrid Inbound Parse
+- VERP format: `c-{campaign_id}-r-{recipient_id}@reply.liffy.app`
+- Endpoint: `POST /api/webhooks/inbound` (with shared secret auth)
+- Auto-reply filter: RFC 3834 headers, OOO subjects, mailer-daemon from patterns
 
 **Unsubscribe:**
 - SendGrid handles unsubscribe links in emails

@@ -155,6 +155,48 @@ SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → 
 
 ---
 
+## Reply Detection — Stage 1 Backend (Hybrid VERP + SendGrid Inbound Parse)
+
+**Status:** Stage 1 DONE (backend endpoint ready). VERP generation + DNS + SendGrid config NOT active yet.
+
+**Architecture:** Hybrid VERP + SendGrid Inbound Parse
+- **VERP format:** `c-{campaign_id}-r-{recipient_id}@reply.liffy.app` (both UUIDs)
+- **Inbound Parse:** SendGrid receives reply at VERP address → POSTs to `/api/webhooks/inbound`
+- **Result:** Reply recorded as `campaign_event` (event_type='reply') + `prospect_intent` (intent_type='reply')
+
+**Endpoint:** `POST /api/webhooks/inbound` (`backend/routes/webhooks.js`)
+
+**Flow:**
+```
+Inbound email → validate secret → parse VERP from envelope/to
+  → filter auto-replies → lookup campaign_recipient by VERP
+  → recordCampaignEvent(reply) → recordProspectIntent(reply)
+```
+
+**Security:** Shared secret via `process.env.INBOUND_WEBHOOK_SECRET` + `x-liffy-inbound-secret` header. If env var not set, processes with warning log (dev/testing mode).
+
+**VERP parser** (`parseVerpAddress()`):
+- Extracts campaign_id + recipient_id from VERP address
+- UUID validation on both IDs — rejects malformed input
+- Checks envelope.to first (preferred), falls back to to field
+
+**Auto-reply filter** (`isAutoReply()`):
+- **Headers:** RFC 3834 `Auto-Submitted` (not "no"), `X-Auto-Response-Suppress`, `Precedence: bulk/junk/auto_reply`
+- **Subject:** "out of office", "automatic reply", "auto-reply", "delivery failure", OOO, etc.
+- **From:** mailer-daemon, noreply, no-reply, postmaster, mail-daemon
+
+**Stage 1 constraints (deliberately NOT implemented yet):**
+- VERP reply-to generation in mailer.js (Stage 2)
+- `reply.liffy.app` DNS MX record
+- SendGrid Inbound Parse configuration
+- campaign_recipients.status update on reply
+- Reply forwarding to original sender (Stage 3)
+- Reply count in campaign analytics UI
+
+**Commit:** e1e05f8
+
+---
+
 ## Email Campaign Features
 
 ### Template Preview & Clone (`backend/routes/emailTemplates.js`)
