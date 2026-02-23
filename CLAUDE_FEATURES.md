@@ -157,7 +157,7 @@ SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → 
 
 ## Reply Detection — Full Pipeline (Hybrid VERP + SendGrid Inbound Parse)
 
-**Status:** Backend COMPLETE. All stages implemented. Requires DNS (reply.liffy.app MX) + SendGrid Inbound Parse config to go live.
+**Status:** LIVE. All stages implemented. DNS, SendGrid Inbound Parse, and env vars configured.
 
 **Architecture:** Hybrid VERP + SendGrid Inbound Parse
 - **VERP format (short):** `c-{8 hex}-r-{8 hex}@reply.liffy.app` (first 8 chars of each UUID, RFC 5321 safe — 22 char local-part)
@@ -217,10 +217,7 @@ WHERE LEFT(cr.campaign_id::text, 8) = $1 AND LEFT(cr.id::text, 8) = $2 LIMIT 2
 | `FORWARD_FROM_EMAIL` | No | FROM address for forwarded replies (default: `notify@liffy.app`) |
 | `FORWARD_FROM_NAME` | No | FROM name for forwarded replies (default: `Liffy Reply Notification`) |
 
-**Remaining to go live:**
-- `reply.liffy.app` DNS MX record pointing to SendGrid
-- SendGrid Inbound Parse configuration (URL: `https://api.liffy.app/api/webhooks/inbound/{secret}`)
-- Set `INBOUND_WEBHOOK_SECRET` env var on Render
+**Remaining:**
 - Reply count in campaign analytics UI
 
 **Commits:** e1e05f8 (Stage 1), 03e7a0d (VERP + forwarding + collision guard), 878a28a (URL path secret), bf88167 (multer multipart fix)

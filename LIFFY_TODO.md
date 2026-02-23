@@ -79,7 +79,7 @@
 | G1 | Reply detection Stage 1 — inbound webhook endpoint, VERP parser, auto-reply filter (commit: e1e05f8) | P1 | ✅ DONE |
 | G2 | Reply detection Stage 2 — VERP reply-to generation in campaignSend.js + worker.js (short format, RFC 5321 safe) | P1 | ✅ DONE |
 | G3 | Reply detection Stage 3 — wrapper forward to organizer inbox + collision guard + URL path secret + multer multipart (commits: 03e7a0d, 878a28a, bf88167) | P1 | ✅ DONE |
-| G4 | Reply detection DNS + SendGrid config — reply.liffy.app MX record + Inbound Parse URL + INBOUND_WEBHOOK_SECRET env var | P1 | TODO (manual config) |
+| G4 | Reply detection DNS + SendGrid config — reply.liffy.app MX record + Inbound Parse URL + INBOUND_WEBHOOK_SECRET env var | P1 | ✅ DONE |
 | G5 | Reply count in campaign analytics UI | P2 | TODO |
 | G6 | Unsubscribe tracking — unsubscribe olanları UI'da göster | P1 | TODO |
 | G7 | Unsubscribe listesi sayfası — kim, ne zaman, hangi campaign'den unsubscribe oldu | P2 | TODO |
@@ -95,7 +95,7 @@
 - ✅ Inbound webhook with URL path secret + envelope domain validation + multer multipart
 - ✅ Wrapper forward to organizer inbox (FROM notify@liffy.app, reply-to = original sender)
 - ✅ Collision guard on VERP prefix lookup (LIMIT 2 + >1 match = skip)
-- ⏳ DNS + SendGrid config TODO — reply.liffy.app MX + Inbound Parse URL (manual config)
+- ✅ DNS + SendGrid config DONE — reply.liffy.app MX + Inbound Parse URL + env var configured
 - ❌ Unsubscribe list NOT visible — unsubscribes happen but no UI to see them
 
 **Reply detection approach:** Hybrid VERP + SendGrid Inbound Parse
@@ -104,7 +104,7 @@
 - Auto-reply filter: RFC 3834 headers, OOO subjects, mailer-daemon from patterns
 - Forward: wrapper email FROM notify@liffy.app TO organizer (reply-to = original sender)
 
-**To go live:** Set `INBOUND_WEBHOOK_SECRET` env var on Render, configure reply.liffy.app MX → SendGrid, configure SendGrid Inbound Parse URL.
+**Live:** Reply detection is fully operational. DNS, SendGrid Inbound Parse, and env vars all configured.
 
 **Unsubscribe:**
 - SendGrid handles unsubscribe links in emails
