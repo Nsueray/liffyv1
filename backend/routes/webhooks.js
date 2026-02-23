@@ -564,13 +564,14 @@ async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyT
 }
 
 /**
- * POST /api/webhooks/inbound
+ * POST /api/webhooks/inbound/:secret
  * Receives inbound emails from SendGrid Inbound Parse.
  * SendGrid POSTs multipart/form-data with fields: from, to, subject, text, html, headers, envelope, etc.
  *
- * Security: Requires INBOUND_WEBHOOK_SECRET env var to be set.
- * SendGrid Inbound Parse must send matching value in x-liffy-inbound-secret header
- * (configured via SendGrid's custom headers or URL query param forwarding).
+ * Security: Secret is embedded in the URL path (INBOUND_WEBHOOK_SECRET env var).
+ * SendGrid Inbound Parse URL must be configured as:
+ *   https://api.liffy.app/api/webhooks/inbound/{INBOUND_WEBHOOK_SECRET}
+ * Envelope domain validation ensures only @reply.liffy.app emails are processed.
  *
  * Flow:
  * 1. Validate shared secret
@@ -582,48 +583,53 @@ async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyT
  * 7. Forward reply to organizer's inbox (wrapper email)
  * 8. Do NOT update campaign_recipients.status
  */
-router.post('/api/webhooks/inbound', async (req, res) => {
+router.post('/api/webhooks/inbound/:secret', async (req, res) => {
   try {
-    // Security: validate shared secret
+    // Security: validate secret from URL path
     const expectedSecret = process.env.INBOUND_WEBHOOK_SECRET;
-    if (expectedSecret) {
-      const providedSecret = req.headers['x-liffy-inbound-secret'];
-      if (providedSecret !== expectedSecret) {
-        console.log('⚠️ Inbound webhook: invalid or missing secret — rejecting');
-        return res.status(200).send('OK'); // 200 to avoid retry storms
-      }
-    } else {
-      console.log('⚠️ Inbound webhook: INBOUND_WEBHOOK_SECRET not configured — processing without auth');
+    if (!expectedSecret || req.params.secret !== expectedSecret) {
+      console.warn('⚠️ Inbound webhook: invalid secret in URL path');
+      return res.status(200).send('OK');
     }
 
-    const { from, to, subject, text, headers, envelope } = req.body;
+    // Envelope domain validation — only accept emails to @reply.liffy.app
+    const envelope = typeof req.body.envelope === 'string'
+      ? JSON.parse(req.body.envelope || '{}')
+      : req.body.envelope || {};
+
+    const toAddresses = Array.isArray(envelope?.to)
+      ? envelope.to
+      : [envelope?.to].filter(Boolean);
+
+    const validDomain = toAddresses.some(addr =>
+      typeof addr === 'string' &&
+      addr.toLowerCase().endsWith('@reply.liffy.app')
+    );
+
+    if (!validDomain) {
+      console.warn('⚠️ Inbound webhook: invalid envelope domain');
+      return res.status(200).send('OK');
+    }
+
+    const { from, to, subject, text, headers } = req.body;
 
     console.log(`📨 Inbound email received — from: ${from}, to: ${to}, subject: ${subject}`);
 
     // 1. Extract VERP address from envelope (preferred) or to field
     let verpAddress = null;
-    if (envelope) {
-      try {
-        const env = typeof envelope === 'string' ? JSON.parse(envelope) : envelope;
-        // envelope.to is an array of addresses
-        const toAddrs = Array.isArray(env.to) ? env.to : [env.to];
-        for (const addr of toAddrs) {
-          const parsed = parseVerpAddress(addr);
-          if (parsed) {
-            verpAddress = parsed;
-            break;
-          }
-        }
-      } catch (e) {
-        console.log('  ⚠️ Failed to parse envelope:', e.message);
+    for (const addr of toAddresses) {
+      const parsed = parseVerpAddress(addr);
+      if (parsed) {
+        verpAddress = parsed;
+        break;
       }
     }
 
     // Fallback: try the to field directly
     if (!verpAddress && to) {
       // to field may contain "Name <email>" or just "email", possibly comma-separated
-      const toAddresses = to.split(',').map(a => a.trim());
-      for (const addr of toAddresses) {
+      const toFallback = to.split(',').map(a => a.trim());
+      for (const addr of toFallback) {
         const emailMatch = addr.match(/<([^>]+)>/) || [null, addr];
         const parsed = parseVerpAddress(emailMatch[1]);
         if (parsed) {
