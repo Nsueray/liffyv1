@@ -215,6 +215,10 @@ async function processSendingCampaigns() {
             `UPDATE campaign_recipients SET status='sent', sent_at=NOW() WHERE id=$1`,
             [r.id]
           );
+
+          // Record canonical 'sent' event to campaign_events
+          await recordSentEvent(client, campaign.organizer_id, campaign.id, r);
+
           console.log(`✅ Email sent to ${r.email} (with unsubscribe)`);
         } catch (e) {
           await client.query(
@@ -241,6 +245,33 @@ async function processSendingCampaigns() {
     }
   } finally {
     client.release();
+  }
+}
+
+/**
+ * Record a 'sent' event to canonical campaign_events table.
+ * Best-effort person_id lookup. Never breaks the send flow.
+ */
+async function recordSentEvent(client, organizerId, campaignId, recipient) {
+  try {
+    let personId = null;
+    const personRes = await client.query(
+      `SELECT id FROM persons WHERE organizer_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+      [organizerId, recipient.email]
+    );
+    if (personRes.rows.length > 0) {
+      personId = personRes.rows[0].id;
+    }
+
+    await client.query(`
+      INSERT INTO campaign_events (
+        organizer_id, campaign_id, recipient_id, person_id,
+        event_type, email, occurred_at
+      ) VALUES ($1, $2, $3, $4, 'sent', $5, NOW())
+    `, [organizerId, campaignId, recipient.id, personId, recipient.email]);
+  } catch (err) {
+    // Never break the send flow
+    console.error(`[campaign_events] sent event failed for ${recipient.email}:`, err.message);
   }
 }
 

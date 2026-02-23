@@ -886,6 +886,18 @@ router.get('/:id/analytics', authRequired, async (req, res) => {
     let deferred = counts.deferred || 0;
     let dataSource = 'campaign_events';
 
+    // Hybrid: if campaign_events has no 'sent' records, pull sent count from campaign_recipients
+    // This covers campaigns sent by worker.js before recordSentEvent was added
+    if (sent === 0) {
+      const sentFallback = await db.query(
+        `SELECT COUNT(*) as count FROM campaign_recipients
+         WHERE campaign_id = $1 AND organizer_id = $2
+           AND status IN ('sent','delivered','opened','clicked','bounced')`,
+        [campaignId, organizerId]
+      );
+      sent = parseInt(sentFallback.rows[0].count) || 0;
+    }
+
     // Fallback: if campaign_events is empty, aggregate from campaign_recipients
     if (summaryRes.rows.length === 0) {
       const fallbackRes = await db.query(
