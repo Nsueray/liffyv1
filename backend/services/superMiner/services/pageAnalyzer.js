@@ -154,6 +154,68 @@ class PageAnalyzer {
                 // Invalid URL, continue with normal analysis
             }
 
+            // Early hostname-based detection — runs BEFORE fetchPage() so that
+            // sites with SSL errors or other HTTP failures still get routed correctly.
+            // Without this, expired-SSL sites fall through to PAGE_TYPES.ERROR → playwrightMiner.
+            try {
+                const parsedUrl = new URL(url);
+                const hostname = parsedUrl.hostname.toLowerCase();
+                const fullUrl = url.toLowerCase();
+
+                // Member table sites
+                if (MEMBER_TABLE_DOMAINS.some(d => hostname.includes(d)) && fullUrl.includes('member')) {
+                    console.log(`[PageAnalyzer] Early detection: MEMBER_TABLE via hostname: ${hostname}`);
+                    return {
+                        url,
+                        pageType: PAGE_TYPES.MEMBER_TABLE,
+                        isMemberTable: true,
+                        analysisTime: Date.now() - startTime,
+                        recommendation: {
+                            miner: 'memberTableMiner',
+                            useCache: false,
+                            reason: 'HTML table member list detected (early hostname match)',
+                            ownPagination: false
+                        }
+                    };
+                }
+
+                // Directory sites
+                if (DIRECTORY_DOMAINS.some(d => hostname.includes(d))) {
+                    console.log(`[PageAnalyzer] Early detection: DIRECTORY via hostname: ${hostname}`);
+                    return {
+                        url,
+                        pageType: PAGE_TYPES.DIRECTORY,
+                        isDirectory: true,
+                        analysisTime: Date.now() - startTime,
+                        recommendation: {
+                            miner: 'directoryMiner',
+                            useCache: false,
+                            reason: 'Business directory detected (early hostname match)',
+                            ownPagination: true
+                        }
+                    };
+                }
+
+                // Messe Frankfurt sites
+                if (MESSE_FRANKFURT_DOMAINS.some(d => hostname.includes(d)) && parsedUrl.pathname.toLowerCase().includes('exhibitor')) {
+                    console.log(`[PageAnalyzer] Early detection: MESSE_FRANKFURT via hostname: ${hostname}`);
+                    return {
+                        url,
+                        pageType: PAGE_TYPES.MESSE_FRANKFURT,
+                        isMesseFrankfurt: true,
+                        analysisTime: Date.now() - startTime,
+                        recommendation: {
+                            miner: 'messeFrankfurtMiner',
+                            useCache: false,
+                            reason: 'Messe Frankfurt exhibitor catalog (early hostname match)',
+                            ownPagination: true
+                        }
+                    };
+                }
+            } catch (e) {
+                // Invalid URL, continue with normal analysis
+            }
+
             // Try to get cached HTML first
             let html = null;
             let fromCache = false;
