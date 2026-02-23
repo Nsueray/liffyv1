@@ -276,6 +276,54 @@ class FlowOrchestrator {
                 console.log('[FlowOrchestrator] spaNetworkMiner not available:', err.message);
             }
 
+            // messeFrankfurtMiner: try/catch load (Messe Frankfurt exhibition sites)
+            // Separate from main miners block so failure doesn't break other miners
+            // This miner manages its OWN browser lifecycle + pagination (ownBrowser: true, ownPagination: true)
+            try {
+                const { runMesseFrankfurtMiner } = require('../../urlMiners/messeFrankfurtMiner');
+                const { chromium } = require('playwright');
+
+                this.miners.messeFrankfurtMiner = {
+                    name: 'messeFrankfurtMiner',
+                    mine: async (job) => {
+                        console.log(`[messeFrankfurtMiner] Starting for: ${job.input}`);
+                        let browser = null;
+                        try {
+                            browser = await chromium.launch({ headless: true });
+                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            const page = await context.newPage();
+                            const rawCards = await runMesseFrankfurtMiner(page, job.input, job.config || {});
+                            await browser.close();
+                            browser = null;
+
+                            const contacts = rawCards.map(card => ({
+                                company_name: card.company_name,
+                                email: card.email || null,
+                                phone: card.phone,
+                                website: card.website,
+                                country: card.country,
+                                address: card.address,
+                                contact_name: card.contact_name || null,
+                                job_title: card.job_title || null
+                            }));
+                            const emails = rawCards
+                                .map(c => c.email)
+                                .filter(e => e && typeof e === 'string' && e.includes('@') && e.length > 5);
+
+                            console.log(`[messeFrankfurtMiner] Result: ${contacts.length} contacts, ${emails.length} emails`);
+
+                            return this.normalizeResult({ contacts, emails }, 'messeFrankfurtMiner');
+                        } catch (err) {
+                            if (browser) await browser.close().catch(() => {});
+                            throw err;
+                        }
+                    }
+                };
+                console.log('[FlowOrchestrator] messeFrankfurtMiner loaded ✅');
+            } catch (err) {
+                console.log('[FlowOrchestrator] messeFrankfurtMiner not available:', err.message);
+            }
+
             // Aliases
             this.miners.playwrightMiner = this.miners.fullMiner;
             this.miners.playwrightDetailMiner = this.miners.fullMiner;
@@ -828,6 +876,8 @@ class FlowOrchestrator {
 
                 if (analysis.pageType === PAGE_TYPES.DIRECTORY) {
                     inputType = 'directory';
+                } else if (analysis.pageType === PAGE_TYPES.MESSE_FRANKFURT) {
+                    inputType = 'messe_frankfurt';
                 } else if (analysis.pageType === PAGE_TYPES.SPA_CATALOG) {
                     inputType = 'spa_catalog';
                 } else if (analysis.pageType === PAGE_TYPES.DOCUMENT_VIEWER) {
@@ -866,6 +916,7 @@ class FlowOrchestrator {
                     const primaryStepMiner = executablePlan[0]?.miner;
                     const skipExternalPagination = (
                         primaryStepMiner === 'directoryMiner' || inputType === 'directory' ||
+                        primaryStepMiner === 'messeFrankfurtMiner' || inputType === 'messe_frankfurt' ||
                         primaryStepMiner === 'spaNetworkMiner' || inputType === 'spa_catalog'
                     );
                     const paginationInfo = skipExternalPagination
@@ -1027,6 +1078,7 @@ class FlowOrchestrator {
         // GUARD: directoryMiner and spaNetworkMiner handle their own data fetching — skip external pagination
         const skipPagination = (
             selectedMiner === 'directoryMiner' || routeDecision.pageType === PAGE_TYPES.DIRECTORY ||
+            selectedMiner === 'messeFrankfurtMiner' || routeDecision.pageType === PAGE_TYPES.MESSE_FRANKFURT ||
             selectedMiner === 'spaNetworkMiner' || routeDecision.pageType === PAGE_TYPES.SPA_CATALOG
         );
         const paginationInfo = skipPagination

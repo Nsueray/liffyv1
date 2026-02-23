@@ -27,6 +27,16 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
     return plan;
   }
 
+  // Messe Frankfurt exhibition sites — messeFrankfurtMiner handles API + detail crawl internally.
+  // No pagination wrapper needed (ownPagination: true).
+  if (resolvedInputType === 'messe_frankfurt') {
+    addStep('messeFrankfurtMiner', 'legacy', 'Messe Frankfurt exhibitor extraction');
+    if (resolvedMiningMode === 'ai') {
+      addStep('aiMiner', 'legacy', 'AI enrichment');
+    }
+    return plan;
+  }
+
   // SPA catalog sites — spaNetworkMiner handles its own data fetching via network interception.
   // No pagination wrapper needed (ownPagination: true).
   if (resolvedInputType === 'spa_catalog') {

@@ -27,6 +27,7 @@ const PAGE_TYPES = {
     DOCUMENT_VIEWER: 'document_viewer',    // Flipbook/PDF viewer
     DIRECTORY: 'directory',                // Business directory (Yellow Pages, etc.)
     SPA_CATALOG: 'spa_catalog',            // SPA/API-driven catalog (Vue/React, data from JSON API)
+    MESSE_FRANKFURT: 'messe_frankfurt',    // Messe Frankfurt exhibition exhibitor catalogs
     UNKNOWN: 'unknown'
 };
 
@@ -41,6 +42,11 @@ const DIRECTORY_DOMAINS = [
 // Known SPA catalog domains — data comes from JSON APIs, not DOM
 const SPA_CATALOG_DOMAINS = [
     'apps.feriavalencia.com',
+];
+
+// Messe Frankfurt domains — exhibitor data comes from dedicated API
+const MESSE_FRANKFURT_DOMAINS = [
+    'messefrankfurt.com'
 ];
 
 // Pagination types
@@ -561,7 +567,8 @@ module.exports = {
     PAGE_TYPES,
     PAGINATION_TYPES,
     DIRECTORY_DOMAINS,
-    SPA_CATALOG_DOMAINS
+    SPA_CATALOG_DOMAINS,
+    MESSE_FRANKFURT_DOMAINS
 };
 
 // ============================================
@@ -685,6 +692,21 @@ PageAnalyzer.prototype.analyzeHtml = function(html, url) {
     }
     result.isDirectory = false;
 
+    // Messe Frankfurt detection (hostname + exhibitor path)
+    try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        const pathname = new URL(url).pathname.toLowerCase();
+        if (MESSE_FRANKFURT_DOMAINS.some(d => hostname.includes(d)) && pathname.includes('exhibitor')) {
+            result.pageType = PAGE_TYPES.MESSE_FRANKFURT;
+            result.isMesseFrankfurt = true;
+            console.log(`[PageAnalyzer] Messe Frankfurt detected via hostname: ${hostname}`);
+            return result;
+        }
+    } catch (e) {
+        // Invalid URL, continue to other checks
+    }
+    result.isMesseFrankfurt = false;
+
     // SPA catalog detection — generic rules first, hostname as fallback
     const $ = cheerio.load(html);
     const spaDetection = this.detectSpaCatalog($, html, url);
@@ -720,6 +742,14 @@ PageAnalyzer.prototype.getRecommendation = function(analysis) {
             useCache: false, // Playwright-based, no cache
             reason: 'Business directory detected, using directoryMiner',
             ownPagination: true // directoryMiner handles its own pagination
+        };
+    }
+    if (analysis.pageType === PAGE_TYPES.MESSE_FRANKFURT) {
+        return {
+            miner: 'messeFrankfurtMiner',
+            useCache: false,
+            reason: 'Messe Frankfurt exhibitor catalog',
+            ownPagination: true
         };
     }
     if (analysis.pageType === PAGE_TYPES.SPA_CATALOG) {
