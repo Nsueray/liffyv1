@@ -47,6 +47,8 @@
 |---|------|----------|--------|
 | C1 | /api/stats 401 Unauthorized — sidebar polling | P2 | OPEN |
 | C2 | Prospects page search backend missing | P3 | OPEN |
+| C3 | Template editor HTML escaping — pasted raw HTML tags shown as text in emails | P1 | ✅ DONE |
+| C4 | Campaign analytics Sent=0 — worker not recording sent events to campaign_events | P1 | ✅ DONE |
 
 ## D. TECHNICAL DEBT
 

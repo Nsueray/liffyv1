@@ -149,7 +149,9 @@ SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → 
 | `reply` | `reply` | `prospect_intents` |
 | `click` | `click_through` | `prospect_intents` |
 
-**Campaign send** (`backend/routes/campaignSend.js`) also writes `sent` events to `campaign_events`.
+**Campaign send** (`backend/routes/campaignSend.js`) and **worker** (`backend/worker.js`) both write `sent` events to `campaign_events` via `recordSentEvent()`.
+
+> **Note:** Worker `recordSentEvent` was added in commit 0ad776a. Campaigns sent before this commit may have incomplete `sent` events in `campaign_events`. The analytics endpoint has a hybrid fallback that cross-checks `campaign_recipients` for the true sent count.
 
 ---
 
@@ -222,6 +224,15 @@ Native `contentEditable` div with lightweight toolbar — no external rich text 
 **Edit:** Existing `body_html` loaded into contentEditable div when modal opens
 **Empty state:** CSS `::before` placeholder via `data-placeholder` attribute
 
+**HTML / Visual Mode Toggle** (commit: 499457a in liffy-ui):
+- Two-mode editor with `[Visual]` / `[HTML]` toggle buttons above the body field
+- **Visual mode:** Existing contentEditable editor with rich text toolbar (default)
+- **HTML mode:** Plain `<textarea>` with monospace font — raw HTML input, no escaping
+- Switching Visual → HTML: `textarea.value = editor.innerHTML`
+- Switching HTML → Visual: `editor.innerHTML = textarea.value`
+- Save uses whichever mode is active (Visual: `innerHTML`, HTML: `textarea.value`)
+- Solves: contentEditable was escaping pasted HTML tags (`<table>` → `&lt;table&gt;`), causing raw HTML to appear as text in sent emails
+
 ---
 
 ## CSV Upload to Lists (`backend/routes/lists.js`)
@@ -254,7 +265,7 @@ Native `contentEditable` div with lightweight toolbar — no external rich text 
 | `/api/campaigns/:id/analytics` | GET | Full analytics from `campaign_events` table |
 
 Returns 4 sections:
-1. **Summary**: event counts + derived rates (open_rate, click_rate, bounce_rate, spam_rate, unsubscribe_rate)
+1. **Summary**: event counts + derived rates (open_rate, click_rate, bounce_rate, spam_rate, unsubscribe_rate). **Hybrid sent count:** if `campaign_events.sent` < `campaign_recipients` actual sent, uses the higher number (covers pre-fix worker campaigns).
 2. **Timeline**: `date_trunc` bucketed by `hour` or `day` (`?bucket=hour`), pivoted by event_type
 3. **Top Links**: top 10 clicked URLs with click counts
 4. **Bounce Breakdown**: hard/soft/unknown classification based on reason text
