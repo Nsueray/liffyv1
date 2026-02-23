@@ -30,6 +30,7 @@ const SOCIAL_HOSTS = [
 
 const SKIP_DOMAINS = [
     "messefrankfurt.com",
+    "messelogo.de",
     ...SOCIAL_HOSTS
 ];
 
@@ -175,8 +176,9 @@ function buildApiUrl(baseApiUrl, eventVariable, pageNumber, pageSize) {
 }
 
 /**
- * Extract exhibitor list items from API response.
- * Returns array of { name, rewriteId }.
+ * Extract full exhibitor cards from API response.
+ * The Messe Frankfurt API returns rich data: address, email, phone, homepage, country.
+ * Returns array of full card objects.
  */
 function parseExhibitorHits(apiResponse) {
     const hits = [];
@@ -187,9 +189,23 @@ function parseExhibitorHits(apiResponse) {
             const name = exhibitor?.name || exhibitor?.companyName || null;
             const rewriteId = exhibitor?.rewriteId || exhibitor?.id || null;
 
-            if (name && rewriteId) {
-                hits.push({ name: name.trim(), rewriteId: String(rewriteId) });
-            }
+            if (!name) continue;
+
+            const addr = exhibitor?.address || {};
+            const country = addr?.country?.label || addr?.country?.iso3 || null;
+            const addressParts = [addr.street, addr.zip, addr.city, country].filter(Boolean);
+
+            hits.push({
+                company_name: name.trim(),
+                rewriteId: rewriteId ? String(rewriteId) : null,
+                email: addr.email || null,
+                phone: addr.tel || null,
+                website: exhibitor.homepage || null,
+                country: country,
+                address: addressParts.length > 0 ? addressParts.join(' ') : null,
+                contact_name: null,
+                job_title: null
+            });
         }
     } catch (e) {
         console.warn(`[messeFrankfurtMiner] Hit parsing error: ${e.message}`);
@@ -217,53 +233,99 @@ async function fetchAllExhibitors(page, url, config) {
     if (firstResponse) {
         const firstHits = parseExhibitorHits(firstResponse);
         allExhibitors.push(...firstHits);
-        console.log(`[messeFrankfurtMiner] Page 1 (sniffed): ${firstHits.length} exhibitors`);
 
-        if (firstHits.length < pageSize) {
-            console.log(`[messeFrankfurtMiner] Single page result (${allExhibitors.length} total)`);
+        // Check total count from API response to decide if pagination needed
+        const totalHits = firstResponse?.result?.totalHits
+            || firstResponse?.result?.totalCount
+            || firstResponse?.result?.total
+            || null;
+
+        console.log(`[messeFrankfurtMiner] Page 1 (sniffed): ${firstHits.length} exhibitors` +
+            (totalHits ? ` (total: ${totalHits})` : ''));
+
+        // Only skip pagination if we know we got everything
+        if (totalHits !== null && allExhibitors.length >= totalHits) {
+            console.log(`[messeFrankfurtMiner] All ${totalHits} exhibitors fetched in page 1`);
+            return allExhibitors;
+        }
+        // If no total count, still paginate if we got a full page of results
+        if (totalHits === null && firstHits.length === 0) {
             return allExhibitors;
         }
     }
 
-    // Step 2: Paginate through remaining pages via fetch in browser context
+    // Step 2: Paginate by navigating to successive search page URLs.
+    // Direct fetch() fails due to CORS — navigating lets the SPA make its own API calls.
     const startPage = firstResponse ? 2 : 1;
 
-    for (let pageNum = startPage; pageNum <= maxPages; pageNum++) {
-        const apiPageUrl = buildApiUrl(baseApiUrl, eventVariable, pageNum, pageSize);
-
+    // Build page URL template from input URL
+    const pageUrlBase = (() => {
         try {
-            const result = await page.evaluate(async (fetchUrl) => {
-                try {
-                    const resp = await fetch(fetchUrl, {
-                        headers: { 'Accept': 'application/json' },
-                        credentials: 'include'
-                    });
-                    if (!resp.ok) return { error: resp.status };
-                    return { data: await resp.json() };
-                } catch (e) {
-                    return { error: e.message };
-                }
-            }, apiPageUrl);
-
-            if (result.error) {
-                console.warn(`[messeFrankfurtMiner] Page ${pageNum} fetch error: ${result.error}`);
-                break;
-            }
-
-            const hits = parseExhibitorHits(result.data);
-            if (hits.length === 0) {
-                console.log(`[messeFrankfurtMiner] Page ${pageNum}: empty — done.`);
-                break;
-            }
-
-            allExhibitors.push(...hits);
-            console.log(`[messeFrankfurtMiner] Page ${pageNum}: ${hits.length} exhibitors (total: ${allExhibitors.length})`);
-
-            // Small delay between API calls
-            await page.waitForTimeout(300 + Math.floor(Math.random() * 200));
+            const u = new URL(url);
+            u.searchParams.set('pagesize', String(pageSize));
+            return u;
         } catch (e) {
-            console.warn(`[messeFrankfurtMiner] Page ${pageNum} error: ${e.message}`);
-            break;
+            return null;
+        }
+    })();
+
+    if (pageUrlBase) {
+        for (let pageNum = startPage; pageNum <= maxPages; pageNum++) {
+            try {
+                let sniffedResponse = null;
+
+                const responseHandler = async (response) => {
+                    if (sniffedResponse) return;
+                    try {
+                        const respUrl = response.url();
+                        const contentType = response.headers()['content-type'] || '';
+                        if (!contentType.includes('json')) return;
+                        if (response.status() < 200 || response.status() >= 400) return;
+
+                        const isExhibitorApi = (
+                            respUrl.includes('exhibitor-service') ||
+                            respUrl.includes('exhibitor/search') ||
+                            (respUrl.includes('api.messefrankfurt.com') && respUrl.includes('search'))
+                        );
+                        if (!isExhibitorApi) return;
+
+                        const text = await response.text().catch(() => null);
+                        if (!text || text.length < 100) return;
+                        const body = JSON.parse(text);
+                        if (body.result && Array.isArray(body.result.hits)) {
+                            sniffedResponse = body;
+                        }
+                    } catch (e) { /* ignore */ }
+                };
+
+                page.on('response', responseHandler);
+
+                pageUrlBase.searchParams.set('page', String(pageNum));
+                await page.goto(pageUrlBase.toString(), { waitUntil: 'domcontentloaded', timeout: 20000 });
+                await page.waitForTimeout(5000); // Wait for SPA to trigger API call
+
+                page.off('response', responseHandler);
+
+                if (!sniffedResponse) {
+                    console.log(`[messeFrankfurtMiner] Page ${pageNum}: no API response — done.`);
+                    break;
+                }
+
+                const hits = parseExhibitorHits(sniffedResponse);
+                if (hits.length === 0) {
+                    console.log(`[messeFrankfurtMiner] Page ${pageNum}: empty — done.`);
+                    break;
+                }
+
+                allExhibitors.push(...hits);
+                console.log(`[messeFrankfurtMiner] Page ${pageNum}: ${hits.length} exhibitors (total: ${allExhibitors.length})`);
+
+                // Small delay between pages
+                await page.waitForTimeout(500 + Math.floor(Math.random() * 500));
+            } catch (e) {
+                console.warn(`[messeFrankfurtMiner] Page ${pageNum} error: ${e.message}`);
+                break;
+            }
         }
     }
 
@@ -275,30 +337,89 @@ async function fetchAllExhibitors(page, url, config) {
 
 /**
  * Extract exhibitor data from a detail page.
+ * Strategy: Intercept API response (primary) + DOM extraction (fallback).
  */
 async function extractDetailPage(page, detailUrl, delayMs) {
     try {
-        await page.goto(detailUrl, { waitUntil: 'networkidle', timeout: 20000 });
-        await page.waitForTimeout(1000);
+        // Strategy 1: Intercept the detail API response (SPA loads data via XHR)
+        let apiData = null;
 
-        const data = await page.evaluate((skipDomains) => {
-            const result = {
-                emails: [],
-                phones: [],
-                website: null,
-                address: null,
-                country: null
-            };
+        const detailResponseHandler = async (response) => {
+            if (apiData) return;
+            try {
+                const respUrl = response.url();
+                const contentType = response.headers()['content-type'] || '';
+                if (!contentType.includes('json')) return;
+                if (response.status() < 200 || response.status() >= 400) return;
 
-            // Emails: real mailto: links (filter out share/contact form links)
+                // Match detail API calls (exhibitor detail endpoint)
+                const isDetailApi = (
+                    respUrl.includes('exhibitor-service') &&
+                    !respUrl.includes('/search')
+                ) || (
+                    respUrl.includes('api.messefrankfurt.com') &&
+                    respUrl.includes('exhibitor') &&
+                    !respUrl.includes('search')
+                );
+                if (!isDetailApi) return;
+
+                const text = await response.text().catch(() => null);
+                if (!text || text.length < 50) return;
+                apiData = JSON.parse(text);
+            } catch (e) { /* ignore */ }
+        };
+
+        page.on('response', detailResponseHandler);
+
+        await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        // Wait for SPA to load and trigger API + render DOM
+        try {
+            await page.waitForSelector('a[href^="mailto:"], a[href^="tel:"], [class*="exhibitor"], [class*="detail"]', { timeout: 8000 });
+        } catch (e) {
+            await page.waitForTimeout(4000);
+        }
+
+        page.off('response', detailResponseHandler);
+
+        // Try to extract from API data first
+        const result = { emails: [], phones: [], website: null, address: null, country: null };
+
+        if (apiData) {
+            // Messe Frankfurt detail API typically returns exhibitor object
+            const exh = apiData?.result?.exhibitor || apiData?.result || apiData?.exhibitor || apiData;
+            if (exh) {
+                // Email from API
+                const apiEmail = exh.email || exh.eMail || exh.emailAddress || null;
+                if (apiEmail && apiEmail.includes('@')) result.emails.push(apiEmail.toLowerCase().trim());
+
+                // Phone from API
+                const apiPhone = exh.phone || exh.phoneNumber || exh.telephone || null;
+                if (apiPhone) result.phones.push(apiPhone);
+
+                // Website from API
+                const apiWeb = exh.website || exh.url || exh.homepage || exh.web || null;
+                if (apiWeb && apiWeb.startsWith('http')) result.website = apiWeb;
+
+                // Address from API
+                const parts = [exh.street, exh.zipCode || exh.zip, exh.city, exh.country].filter(Boolean);
+                if (parts.length > 0) result.address = parts.join(' ');
+                if (exh.country) result.country = exh.country;
+                if (exh.countryName) result.country = exh.countryName;
+            }
+        }
+
+        // Strategy 2: DOM extraction (fallback if API didn't provide data)
+        const domData = await page.evaluate((skipDomains) => {
+            const data = { emails: [], phones: [], website: null, address: null, country: null };
+
+            // Emails: real mailto: links
             const mailtoLinks = document.querySelectorAll('a[href^="mailto:"]');
             for (const a of mailtoLinks) {
                 const href = a.getAttribute('href') || '';
-                // Skip "mailto:?subject=" share links
                 if (href.startsWith('mailto:?')) continue;
                 const email = href.replace('mailto:', '').split('?')[0].trim().toLowerCase();
                 if (email && email.includes('@') && email.length > 5) {
-                    result.emails.push(email);
+                    data.emails.push(email);
                 }
             }
 
@@ -308,11 +429,11 @@ async function extractDetailPage(page, detailUrl, delayMs) {
                 const href = a.getAttribute('href') || '';
                 const phone = href.replace('tel:', '').trim();
                 if (phone && phone.replace(/\D/g, '').length >= 7) {
-                    result.phones.push(phone);
+                    data.phones.push(phone);
                 }
             }
 
-            // Website: external links (skip social, skip messefrankfurt)
+            // Website: external links — strict matching (only near "website" labels)
             const allAnchors = document.querySelectorAll('a[href^="http"]');
             for (const a of allAnchors) {
                 const href = (a.getAttribute('href') || '').trim();
@@ -320,31 +441,28 @@ async function extractDetailPage(page, detailUrl, delayMs) {
 
                 let skip = false;
                 for (const domain of skipDomains) {
-                    if (href.toLowerCase().includes(domain)) {
-                        skip = true;
-                        break;
-                    }
+                    if (href.toLowerCase().includes(domain)) { skip = true; break; }
                 }
                 if (skip) continue;
 
-                const target = a.getAttribute('target') || '';
+                // Only pick links that are clearly labeled as website
                 const text = (a.textContent || '').trim().toLowerCase();
                 const parentText = (a.parentElement?.textContent || '').toLowerCase();
+                const grandParentText = (a.parentElement?.parentElement?.textContent || '').toLowerCase();
 
-                if (
-                    target === '_blank' ||
-                    text.includes('website') ||
-                    text.includes('visit') ||
-                    text.includes('www') ||
-                    parentText.includes('website') ||
-                    parentText.includes('homepage')
-                ) {
-                    result.website = href;
+                const isWebsiteLink = (
+                    text.includes('website') || text.includes('www.') || text.includes('homepage') ||
+                    parentText.includes('website') || parentText.includes('homepage') ||
+                    grandParentText.includes('website:')
+                );
+
+                if (isWebsiteLink) {
+                    data.website = href;
                     break;
                 }
             }
 
-            // Address: look for address containers
+            // Address
             const addressSelectors = [
                 '.exhibitor-address', '[class*="address"]',
                 '.exhibitor-location', '[class*="location"]',
@@ -355,24 +473,30 @@ async function extractDetailPage(page, detailUrl, delayMs) {
                     const el = document.querySelector(sel);
                     if (el && el.innerText && el.innerText.trim().length > 10) {
                         const addrText = el.innerText.trim().replace(/\s+/g, ' ');
-                        result.address = addrText;
-                        // Country: typically last line/word in address
+                        data.address = addrText;
                         const lines = addrText.split(/\n|,/).map(l => l.trim()).filter(Boolean);
                         if (lines.length > 0) {
-                            result.country = lines[lines.length - 1].trim();
+                            data.country = lines[lines.length - 1].trim();
                         }
                         break;
                     }
                 } catch (e) { /* selector failed */ }
             }
 
-            return result;
+            return data;
         }, SKIP_DOMAINS);
+
+        // Merge: API data wins, DOM fills gaps
+        if (result.emails.length === 0 && domData.emails.length > 0) result.emails = domData.emails;
+        if (result.phones.length === 0 && domData.phones.length > 0) result.phones = domData.phones;
+        if (!result.website && domData.website) result.website = domData.website;
+        if (!result.address && domData.address) result.address = domData.address;
+        if (!result.country && domData.country) result.country = domData.country;
 
         // Polite delay
         await page.waitForTimeout(delayMs);
 
-        return data;
+        return result;
     } catch (e) {
         console.warn(`[messeFrankfurtMiner] Detail page error (${detailUrl}): ${e.message}`);
         return null;
@@ -397,66 +521,72 @@ async function runMesseFrankfurtMiner(page, url, config = {}) {
         return [];
     }
 
-    // Phase 2: Visit detail pages
+    // The API returns full data (email, phone, homepage, address, country).
+    // Use API data directly — only visit detail pages for exhibitors missing email.
+    const withEmailFromApi = exhibitors.filter(e => e.email).length;
+    console.log(`[messeFrankfurtMiner] API data: ${exhibitors.length} exhibitors, ${withEmailFromApi} with email`);
+
+    // Phase 2: Visit detail pages ONLY for exhibitors missing email
+    const missingEmail = exhibitors.filter(e => !e.email && e.rewriteId);
+    const detailLimit = Math.min(missingEmail.length, maxDetails);
     const baseUrl = deriveBaseUrl(url);
-    const cards = [];
-    const detailLimit = Math.min(exhibitors.length, maxDetails);
 
-    console.log(`[messeFrankfurtMiner] Phase 2: Detail pages (${detailLimit} of ${exhibitors.length})`);
+    if (detailLimit > 0) {
+        console.log(`[messeFrankfurtMiner] Phase 2: Detail pages for ${detailLimit} exhibitors missing email`);
 
-    let consecutiveErrors = 0;
+        let consecutiveErrors = 0;
+        let enriched = 0;
 
-    for (let i = 0; i < detailLimit; i++) {
-        // Timeout guard
-        if (Date.now() - startTime > totalTimeout) {
-            console.log(`[messeFrankfurtMiner] Timeout reached at ${i}/${detailLimit} — stopping.`);
-            break;
+        for (let i = 0; i < detailLimit; i++) {
+            if (Date.now() - startTime > totalTimeout) {
+                console.log(`[messeFrankfurtMiner] Timeout at ${i}/${detailLimit} — stopping.`);
+                break;
+            }
+            if (consecutiveErrors >= 5) {
+                console.log(`[messeFrankfurtMiner] 5 consecutive errors — stopping detail crawl.`);
+                break;
+            }
+
+            const exhibitor = missingEmail[i];
+            // Correct URL format: rewriteId.html (not bare rewriteId)
+            const detailUrl = `${baseUrl}/exhibitor-search.detail.html/${exhibitor.rewriteId}.html`;
+
+            const detail = await extractDetailPage(page, detailUrl, delayMs);
+
+            if (!detail) {
+                consecutiveErrors++;
+                continue;
+            }
+
+            consecutiveErrors = 0;
+
+            // Enrich the original exhibitor card
+            if (detail.emails.length > 0) { exhibitor.email = detail.emails[0]; enriched++; }
+            if (!exhibitor.phone && detail.phones.length > 0) exhibitor.phone = detail.phones[0];
+            if (!exhibitor.website && detail.website) exhibitor.website = detail.website;
+            if (!exhibitor.address && detail.address) exhibitor.address = detail.address;
+            if (!exhibitor.country && detail.country) exhibitor.country = detail.country;
+
+            if ((i + 1) % 25 === 0) {
+                const elapsed = Math.round((Date.now() - startTime) / 1000);
+                console.log(`[messeFrankfurtMiner] Detail progress: ${i + 1}/${detailLimit}, +${enriched} emails (${elapsed}s)`);
+            }
         }
 
-        // Consecutive error guard
-        if (consecutiveErrors >= 5) {
-            console.log(`[messeFrankfurtMiner] 5 consecutive errors — stopping detail crawl.`);
-            break;
-        }
-
-        const exhibitor = exhibitors[i];
-        const detailUrl = `${baseUrl}/exhibitor-search.detail.html/${exhibitor.rewriteId}`;
-
-        const detail = await extractDetailPage(page, detailUrl, delayMs);
-
-        if (!detail) {
-            consecutiveErrors++;
-            cards.push({
-                company_name: exhibitor.name,
-                email: null,
-                phone: null,
-                website: null,
-                country: null,
-                address: null,
-                contact_name: null,
-                job_title: null
-            });
-            continue;
-        }
-
-        consecutiveErrors = 0;
-
-        cards.push({
-            company_name: exhibitor.name,
-            email: detail.emails[0] || null,
-            phone: detail.phones[0] || null,
-            website: detail.website || null,
-            country: detail.country || null,
-            address: detail.address || null,
-            contact_name: null,
-            job_title: null
-        });
-
-        if ((i + 1) % 25 === 0) {
-            const elapsed = Math.round((Date.now() - startTime) / 1000);
-            console.log(`[messeFrankfurtMiner] Progress: ${i + 1}/${detailLimit} (${elapsed}s elapsed)`);
-        }
+        console.log(`[messeFrankfurtMiner] Phase 2 complete: ${enriched} new emails from detail pages`);
     }
+
+    // Build final cards (strip internal rewriteId field)
+    const cards = exhibitors.map(e => ({
+        company_name: e.company_name,
+        email: e.email || null,
+        phone: e.phone || null,
+        website: e.website || null,
+        country: e.country || null,
+        address: e.address || null,
+        contact_name: e.contact_name || null,
+        job_title: e.job_title || null
+    }));
 
     const withEmail = cards.filter(c => c.email).length;
     const elapsed = Math.round((Date.now() - startTime) / 1000);
