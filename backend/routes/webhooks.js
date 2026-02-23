@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
+const { sendEmail } = require('../mailer');
 
 // ============================================================
 // IMPORT SHARED UNSUBSCRIBE UTILITY
@@ -329,29 +330,19 @@ async function addToUnsubscribeList(organizerId, email, source = 'webhook') {
 // ============================================================
 
 /**
- * Validate UUID v4 format (lowercase hex with dashes).
- */
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function isValidUuid(value) {
-  return typeof value === 'string' && UUID_REGEX.test(value);
-}
-
-/**
  * Parse VERP (Variable Envelope Return Path) address.
- * Format: c-{campaign_id}-r-{recipient_id}@reply.liffy.app
- * Both IDs are UUIDs (campaign_recipients.id and campaigns.id are UUID).
- * Returns { campaignId, recipientId } or null if not a valid VERP address.
+ * Short format: c-{8 hex}-r-{8 hex}@reply.liffy.app
+ * The 8 hex chars are the first 8 chars of the UUID (campaign_id and recipient_id).
+ * RFC 5321 safe: local-part = 22 chars (well under 64 limit).
+ * Returns { campaignShort, recipientShort } or null if not a valid VERP address.
  */
 function parseVerpAddress(address) {
   if (!address || typeof address !== 'string') return null;
-  const match = address.match(/^c-([a-f0-9-]+)-r-([a-f0-9-]+)@reply\.liffy\.app$/i);
+  const match = address.match(/^c-([a-f0-9]{8})-r-([a-f0-9]{8})@reply\.liffy\.app$/i);
   if (!match) return null;
-  const campaignId = match[1];
-  const recipientId = match[2];
-  // Validate both are proper UUIDs — do not trust raw input
-  if (!isValidUuid(campaignId) || !isValidUuid(recipientId)) return null;
-  return { campaignId, recipientId };
+  const campaignShort = match[1].toLowerCase();
+  const recipientShort = match[2].toLowerCase();
+  return { campaignShort, recipientShort };
 }
 
 /**
@@ -408,6 +399,171 @@ function isAutoReply({ subject, headers, from }) {
 }
 
 /**
+ * Extract bare email address from "Name <email>" or plain "email" format.
+ */
+function extractEmail(fromField) {
+  if (!fromField) return null;
+  const match = fromField.match(/<([^>]+)>/);
+  return match ? match[1].trim() : fromField.trim();
+}
+
+/**
+ * Extract display name from "Name <email>" format. Returns email if no name.
+ */
+function extractName(fromField) {
+  if (!fromField) return null;
+  const match = fromField.match(/^([^<]+)<[^>]+>/);
+  return match ? match[1].trim().replace(/^"|"$/g, '') : extractEmail(fromField);
+}
+
+/**
+ * Build HTML body for the reply forward wrapper email.
+ * Clean, professional notification — no raw headers exposed.
+ */
+function buildReplyForwardHtml({ senderEmail, senderName, campaignName, replySubject, replyBody, replyTime }) {
+  const escapedBody = (replyBody || '(no content)')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br>');
+
+  return `
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
+  <div style="background: #f0f9ff; border-left: 4px solid #2563eb; padding: 16px 20px; margin-bottom: 20px; border-radius: 0 8px 8px 0;">
+    <div style="font-size: 16px; font-weight: 600; color: #1e40af; margin-bottom: 4px;">New Reply Received</div>
+    <div style="font-size: 13px; color: #64748b;">You can reply directly to this email to respond.</div>
+  </div>
+
+  <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px;">
+    <tr>
+      <td style="padding: 6px 12px; color: #64748b; width: 100px;">From</td>
+      <td style="padding: 6px 12px; font-weight: 500;">${senderName || senderEmail} &lt;${senderEmail}&gt;</td>
+    </tr>
+    <tr>
+      <td style="padding: 6px 12px; color: #64748b;">Campaign</td>
+      <td style="padding: 6px 12px;">${campaignName || '(unknown)'}</td>
+    </tr>
+    <tr>
+      <td style="padding: 6px 12px; color: #64748b;">Subject</td>
+      <td style="padding: 6px 12px;">${replySubject || '(no subject)'}</td>
+    </tr>
+    <tr>
+      <td style="padding: 6px 12px; color: #64748b;">Received</td>
+      <td style="padding: 6px 12px;">${replyTime.toISOString().replace('T', ' ').substring(0, 19)} UTC</td>
+    </tr>
+  </table>
+
+  <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;">
+
+  <div style="background: #fafafa; border-radius: 8px; padding: 16px 20px; font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;">
+${escapedBody}
+  </div>
+
+  <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; text-align: center;">
+    Forwarded by Liffy &mdash; <a href="https://liffy.app" style="color: #64748b;">liffy.app</a>
+  </div>
+</div>`;
+}
+
+/**
+ * Forward reply to the organizer's real inbox as a wrapper email.
+ * Uses the campaign's sender_identity to determine the forward target.
+ * Never throws — all errors are caught and logged.
+ *
+ * Mail loop prevention:
+ * - Wrapper is sent FROM notify@liffy.app (or FORWARD_FROM_EMAIL env var) — no VERP match possible
+ * - Auto-reply to notify@liffy.app will not match any VERP pattern
+ * - Even if it somehow arrives at /inbound, parseVerpAddress() returns null → skipped
+ *
+ * Multi-tenant safety:
+ * - Forward target derived from campaign → sender_identity (organizer-scoped)
+ * - SendGrid API key from the organizer's own account
+ */
+async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyTime }) {
+  try {
+    // Lookup campaign → sender_identity → organizer in one query
+    const res = await db.query(
+      `SELECT c.name as campaign_name,
+              s.reply_to, s.from_email, s.from_name,
+              o.sendgrid_api_key
+       FROM campaigns c
+       JOIN sender_identities s ON c.sender_id = s.id
+       JOIN organizers o ON c.organizer_id = o.id
+       WHERE c.id = $1`,
+      [campaignId]
+    );
+
+    if (res.rows.length === 0) {
+      console.log(`  ⚠️ Forward: campaign/sender not found for ${campaignId} — skipping`);
+      return;
+    }
+
+    const { campaign_name, reply_to, from_email, sendgrid_api_key } = res.rows[0];
+    const forwardTo = reply_to || from_email;
+
+    if (!forwardTo) {
+      console.log(`  ⚠️ Forward: no forward target (reply_to and from_email both null) — skipping`);
+      return;
+    }
+
+    if (!sendgrid_api_key) {
+      console.log(`  ⚠️ Forward: no SendGrid API key for organizer — skipping`);
+      return;
+    }
+
+    const senderEmail = extractEmail(from);
+    const senderName = extractName(from);
+    const replyBody = text ? text.substring(0, 500) : null;
+
+    const forwardSubject = `Re: ${subject || '(no subject)'} — Reply from ${senderName || senderEmail || 'unknown'}`;
+
+    const forwardHtml = buildReplyForwardHtml({
+      senderEmail,
+      senderName,
+      campaignName: campaign_name,
+      replySubject: subject,
+      replyBody,
+      replyTime,
+    });
+
+    const forwardText = [
+      `New Reply Received`,
+      `From: ${senderName || senderEmail} <${senderEmail}>`,
+      `Campaign: ${campaign_name || '(unknown)'}`,
+      `Subject: ${subject || '(no subject)'}`,
+      `Received: ${replyTime.toISOString().replace('T', ' ').substring(0, 19)} UTC`,
+      ``,
+      `---`,
+      ``,
+      replyBody || '(no content)',
+      ``,
+      `---`,
+      `Forwarded by Liffy — liffy.app`,
+    ].join('\n');
+
+    const result = await sendEmail({
+      to: forwardTo,
+      subject: forwardSubject,
+      html: forwardHtml,
+      text: forwardText,
+      from_email: process.env.FORWARD_FROM_EMAIL || 'notify@liffy.app',
+      from_name: process.env.FORWARD_FROM_NAME || 'Liffy Reply Notification',
+      reply_to: senderEmail, // Organizer can hit Reply to respond directly
+      sendgrid_api_key: sendgrid_api_key,
+    });
+
+    if (result && result.success) {
+      console.log(`  📤 Reply forwarded to ${forwardTo} (from: ${senderEmail})`);
+    } else {
+      console.log(`  ⚠️ Forward failed to ${forwardTo}: ${result?.error || 'unknown error'}`);
+    }
+  } catch (err) {
+    // Never break the inbound webhook flow
+    console.error(`  ❌ Forward error for campaign ${campaignId}:`, err.message);
+  }
+}
+
+/**
  * POST /api/webhooks/inbound
  * Receives inbound emails from SendGrid Inbound Parse.
  * SendGrid POSTs multipart/form-data with fields: from, to, subject, text, html, headers, envelope, etc.
@@ -423,7 +579,8 @@ function isAutoReply({ subject, headers, from }) {
  * 4. Look up campaign_recipient by VERP (campaign_id + recipient_id)
  * 5. Record reply as campaign_event (event_type='reply')
  * 6. Record prospect_intent (intent_type='reply')
- * 7. Do NOT update campaign_recipients.status (Stage 1 — no side effects)
+ * 7. Forward reply to organizer's inbox (wrapper email)
+ * 8. Do NOT update campaign_recipients.status
  */
 router.post('/api/webhooks/inbound', async (req, res) => {
   try {
@@ -481,7 +638,7 @@ router.post('/api/webhooks/inbound', async (req, res) => {
       return res.status(200).send('OK');
     }
 
-    console.log(`  🔗 VERP parsed — campaign: ${verpAddress.campaignId}, recipient: ${verpAddress.recipientId}`);
+    console.log(`  🔗 VERP parsed — campaign: ${verpAddress.campaignShort}, recipient: ${verpAddress.recipientShort}`);
 
     // 2. Filter auto-replies
     if (isAutoReply({ subject, headers, from })) {
@@ -489,16 +646,24 @@ router.post('/api/webhooks/inbound', async (req, res) => {
       return res.status(200).send('OK');
     }
 
-    // 3. Look up campaign_recipient by VERP
+    // 3. Look up campaign_recipient by VERP (short prefix match, LIMIT 2 for collision detection)
     const recipientRes = await db.query(
       `SELECT cr.id, cr.campaign_id, cr.organizer_id, cr.email, cr.status
        FROM campaign_recipients cr
-       WHERE cr.campaign_id = $1 AND cr.id = $2`,
-      [verpAddress.campaignId, verpAddress.recipientId]
+       WHERE LEFT(cr.campaign_id::text, 8) = $1
+         AND LEFT(cr.id::text, 8) = $2
+       LIMIT 2`,
+      [verpAddress.campaignShort, verpAddress.recipientShort]
     );
 
     if (recipientRes.rows.length === 0) {
-      console.log(`  ⚠️ No recipient found for VERP — campaign: ${verpAddress.campaignId}, recipient: ${verpAddress.recipientId}`);
+      console.log(`  ⚠️ No recipient found for VERP — campaign: ${verpAddress.campaignShort}, recipient: ${verpAddress.recipientShort}`);
+      return res.status(200).send('OK');
+    }
+
+    // Collision guard: if short prefix matches more than one row, refuse to process
+    if (recipientRes.rows.length > 1) {
+      console.error(`  ❌ VERP collision detected — short IDs not unique: campaignShort=${verpAddress.campaignShort}, recipientShort=${verpAddress.recipientShort}, matches=${recipientRes.rows.length}`);
       return res.status(200).send('OK');
     }
 
@@ -520,6 +685,15 @@ router.post('/api/webhooks/inbound', async (req, res) => {
     await recordProspectIntent(recipient, recipient.email, 'reply', replyTime);
 
     console.log(`  📝 Reply recorded for ${recipient.email} (campaign: ${recipient.campaign_id})`);
+
+    // 6. Forward reply to organizer's inbox (best-effort, never blocks response)
+    await forwardReplyToOrganizer({
+      campaignId: recipient.campaign_id,
+      from,
+      subject,
+      text,
+      replyTime,
+    });
 
     return res.status(200).send('OK');
 

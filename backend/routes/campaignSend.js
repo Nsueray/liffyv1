@@ -169,7 +169,10 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
         // C. RFC 8058 List-Unsubscribe headers (one-click unsubscribe in Gmail/Outlook)
         const unsubHeaders = getListUnsubscribeHeaders(r.email, organizer_id, sender.from_email);
 
-        // D. Gönderim (Mailer'a Dinamik Key Gönderiyoruz)
+        // D. VERP reply-to (short format — first 8 hex chars of each UUID for RFC 5321 compliance)
+        const verpReplyTo = `c-${campaign_id.slice(0,8)}-r-${r.id.slice(0,8)}@reply.liffy.app`;
+
+        // E. Gönderim (Mailer'a Dinamik Key Gönderiyoruz)
         const mailResp = await sendEmail({
           to: r.email,
           subject: personalizedSubject,
@@ -177,7 +180,7 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
           html: compliance.html,
           from_name: sender.from_name,
           from_email: sender.from_email,
-          reply_to: sender.reply_to || null,
+          reply_to: verpReplyTo,
           sendgrid_api_key: organizer.sendgrid_api_key, // ÖNEMLİ: Settings'den gelen key
           headers: unsubHeaders
         });

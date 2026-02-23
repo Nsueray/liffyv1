@@ -198,6 +198,9 @@ async function processSendingCampaigns() {
             campaign.sender_email
           );
 
+          // VERP reply-to (short format — first 8 hex chars of each UUID for RFC 5321 compliance)
+          const verpReplyTo = `c-${campaign.id.slice(0,8)}-r-${r.id.slice(0,8)}@reply.liffy.app`;
+
           await sendEmail({
             to: r.email,
             subject: processedSubject,
@@ -205,9 +208,8 @@ async function processSendingCampaigns() {
             text: complianceResult.text,
             fromEmail: campaign.sender_email,
             fromName: campaign.sender_name,
-            replyTo: campaign.sender_reply_to,
+            replyTo: verpReplyTo,
             sendgridApiKey: campaign.sendgrid_api_key,
-            // NEW: Pass List-Unsubscribe headers
             headers: listUnsubHeaders
           });
           
