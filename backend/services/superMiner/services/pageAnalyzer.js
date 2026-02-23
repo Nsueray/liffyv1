@@ -791,8 +791,87 @@ PageAnalyzer.prototype.analyzeHtml = function(html, url) {
     }
     result.isMemberTable = false;
 
-    // SPA catalog detection — generic rules first, hostname as fallback
+    // Content-based MEMBER_TABLE detection — generic, no hostname dependency.
+    // Looks for HTML tables with semantic <th> header rows that map to contact fields.
+    // Conditions (ALL must be true):
+    //   1. <table> exists
+    //   2. Table has a <th> header row
+    //   3. Header keywords match ≥3 distinct field types
+    //   4. ≥3 data rows contain email patterns
     const $ = cheerio.load(html);
+    try {
+        const MEMBER_HEADER_KEYWORDS = {
+            company_name: ['company', 'organization', 'organisation', 'firm', 'firma',
+                'şirket', 'member', 'üye', 'exhibitor', 'company name', 'member name'],
+            email: ['email', 'e-mail', 'mail', 'e mail', 'contact details',
+                'contact info', 'contact information', 'e-posta'],
+            phone: ['phone', 'tel', 'telephone', 'mobile', 'contact no', 'telefon'],
+            contact_name: ['contact person', 'person', 'representative',
+                'contact name', 'kişi', 'temsilci', 'yetkili', 'authorized person'],
+            city: ['city', 'location', 'place', 'şehir', 'town'],
+            address: ['address', 'adres'],
+            country: ['country', 'ülke'],
+            website: ['website', 'web', 'url', 'homepage']
+        };
+        const emailDetectRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/;
+
+        const tables = $('table');
+        for (let tIdx = 0; tIdx < tables.length; tIdx++) {
+            const table = $(tables[tIdx]);
+            const rows = table.find('tr');
+            if (rows.length < 4) continue; // need header + ≥3 data rows
+
+            // Find header row in first 3 rows
+            let headerRowIdx = -1;
+            let matchedFieldSet = new Set();
+
+            for (let rIdx = 0; rIdx < Math.min(3, rows.length); rIdx++) {
+                const ths = $(rows[rIdx]).find('th');
+                if (ths.length < 2) continue;
+
+                const fields = new Set();
+                ths.each((_, th) => {
+                    const cellText = $(th).text().toLowerCase().trim();
+                    if (!cellText) return;
+                    for (const [field, keywords] of Object.entries(MEMBER_HEADER_KEYWORDS)) {
+                        if (keywords.some(kw => cellText.includes(kw))) {
+                            fields.add(field);
+                        }
+                    }
+                });
+
+                if (fields.size >= 3) {
+                    headerRowIdx = rIdx;
+                    matchedFieldSet = fields;
+                    break;
+                }
+            }
+
+            if (headerRowIdx < 0) continue;
+
+            // Count data rows with email
+            let emailRowCount = 0;
+            for (let rIdx = headerRowIdx + 1; rIdx < rows.length; rIdx++) {
+                const rowText = $(rows[rIdx]).text();
+                if (emailDetectRegex.test(rowText)) {
+                    emailRowCount++;
+                }
+            }
+
+            if (emailRowCount >= 3) {
+                const fieldNames = Array.from(matchedFieldSet).join(', ');
+                result.pageType = PAGE_TYPES.MEMBER_TABLE;
+                result.isMemberTable = true;
+                console.log(`[PageAnalyzer] Member table detected via content: ${matchedFieldSet.size} fields (${fieldNames}), ${emailRowCount} email rows`);
+                return result;
+            }
+        }
+    } catch (e) {
+        // Content detection failed, continue to other checks
+    }
+
+    // SPA catalog detection — generic rules first, hostname as fallback
+    // (reuse $ from content-based detection above)
     const spaDetection = this.detectSpaCatalog($, html, url);
     if (spaDetection.isSpa) {
         result.pageType = PAGE_TYPES.SPA_CATALOG;
