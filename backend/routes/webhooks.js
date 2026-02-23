@@ -64,6 +64,7 @@ const CAMPAIGN_EVENT_TYPE_MAP = {
   'deferred': 'deferred',
   'spamreport': 'spam_report',
   'unsubscribe': 'unsubscribe',
+  'reply': 'reply',
 };
 
 /**
@@ -321,6 +322,212 @@ async function addToUnsubscribeList(organizerId, email, source = 'webhook') {
     console.error(`  ❌ Failed to add to unsubscribe list:`, err.message);
   }
 }
+
+
+// ============================================================
+// INBOUND EMAIL (REPLY DETECTION) — Stage 1 Backend Preparation
+// ============================================================
+
+/**
+ * Validate UUID v4 format (lowercase hex with dashes).
+ */
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidUuid(value) {
+  return typeof value === 'string' && UUID_REGEX.test(value);
+}
+
+/**
+ * Parse VERP (Variable Envelope Return Path) address.
+ * Format: c-{campaign_id}-r-{recipient_id}@reply.liffy.app
+ * Both IDs are UUIDs (campaign_recipients.id and campaigns.id are UUID).
+ * Returns { campaignId, recipientId } or null if not a valid VERP address.
+ */
+function parseVerpAddress(address) {
+  if (!address || typeof address !== 'string') return null;
+  const match = address.match(/^c-([a-f0-9-]+)-r-([a-f0-9-]+)@reply\.liffy\.app$/i);
+  if (!match) return null;
+  const campaignId = match[1];
+  const recipientId = match[2];
+  // Validate both are proper UUIDs — do not trust raw input
+  if (!isValidUuid(campaignId) || !isValidUuid(recipientId)) return null;
+  return { campaignId, recipientId };
+}
+
+/**
+ * Detect auto-replies (OOO, mailer-daemon, noreply, etc.) to avoid
+ * creating false prospect intents.
+ *
+ * Checks:
+ * 1. Headers: Auto-Submitted, X-Auto-Response-Suppress, Precedence
+ * 2. Subject patterns: OOO, Out of Office, Automatic reply, etc.
+ * 3. From patterns: mailer-daemon, noreply, postmaster
+ */
+function isAutoReply({ subject, headers, from }) {
+  // Header checks (SendGrid Inbound Parse passes headers as a string blob)
+  if (headers) {
+    const h = headers.toLowerCase();
+    // RFC 3834 Auto-Submitted (any value other than "no" means auto)
+    if (/auto-submitted:\s*(?!no\b)\S+/i.test(h)) return true;
+    if (/x-auto-response-suppress:/i.test(h)) return true;
+    if (/precedence:\s*(bulk|junk|auto[_-]?reply)/i.test(h)) return true;
+  }
+
+  // Subject patterns
+  if (subject) {
+    const s = subject.toLowerCase();
+    const autoPatterns = [
+      'out of office',
+      'automatic reply',
+      'auto-reply',
+      'autoreply',
+      'away from office',
+      'on vacation',
+      'delivery status notification',
+      'undeliverable',
+      'mail delivery failed',
+      'delivery failure',
+    ];
+    for (const pattern of autoPatterns) {
+      if (s.includes(pattern)) return true;
+    }
+    // OOO shorthand (exact or at start)
+    if (/^ooo[\s:]/i.test(subject) || subject.trim().toLowerCase() === 'ooo') return true;
+  }
+
+  // From patterns
+  if (from) {
+    const f = from.toLowerCase();
+    const noReplyPatterns = ['mailer-daemon', 'noreply', 'no-reply', 'postmaster', 'mail-daemon'];
+    for (const pattern of noReplyPatterns) {
+      if (f.includes(pattern)) return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * POST /api/webhooks/inbound
+ * Receives inbound emails from SendGrid Inbound Parse.
+ * SendGrid POSTs multipart/form-data with fields: from, to, subject, text, html, headers, envelope, etc.
+ *
+ * Security: Requires INBOUND_WEBHOOK_SECRET env var to be set.
+ * SendGrid Inbound Parse must send matching value in x-liffy-inbound-secret header
+ * (configured via SendGrid's custom headers or URL query param forwarding).
+ *
+ * Flow:
+ * 1. Validate shared secret
+ * 2. Extract VERP from envelope.to or to field
+ * 3. Filter auto-replies
+ * 4. Look up campaign_recipient by VERP (campaign_id + recipient_id)
+ * 5. Record reply as campaign_event (event_type='reply')
+ * 6. Record prospect_intent (intent_type='reply')
+ * 7. Do NOT update campaign_recipients.status (Stage 1 — no side effects)
+ */
+router.post('/api/webhooks/inbound', async (req, res) => {
+  try {
+    // Security: validate shared secret
+    const expectedSecret = process.env.INBOUND_WEBHOOK_SECRET;
+    if (expectedSecret) {
+      const providedSecret = req.headers['x-liffy-inbound-secret'];
+      if (providedSecret !== expectedSecret) {
+        console.log('⚠️ Inbound webhook: invalid or missing secret — rejecting');
+        return res.status(200).send('OK'); // 200 to avoid retry storms
+      }
+    } else {
+      console.log('⚠️ Inbound webhook: INBOUND_WEBHOOK_SECRET not configured — processing without auth');
+    }
+
+    const { from, to, subject, text, headers, envelope } = req.body;
+
+    console.log(`📨 Inbound email received — from: ${from}, to: ${to}, subject: ${subject}`);
+
+    // 1. Extract VERP address from envelope (preferred) or to field
+    let verpAddress = null;
+    if (envelope) {
+      try {
+        const env = typeof envelope === 'string' ? JSON.parse(envelope) : envelope;
+        // envelope.to is an array of addresses
+        const toAddrs = Array.isArray(env.to) ? env.to : [env.to];
+        for (const addr of toAddrs) {
+          const parsed = parseVerpAddress(addr);
+          if (parsed) {
+            verpAddress = parsed;
+            break;
+          }
+        }
+      } catch (e) {
+        console.log('  ⚠️ Failed to parse envelope:', e.message);
+      }
+    }
+
+    // Fallback: try the to field directly
+    if (!verpAddress && to) {
+      // to field may contain "Name <email>" or just "email", possibly comma-separated
+      const toAddresses = to.split(',').map(a => a.trim());
+      for (const addr of toAddresses) {
+        const emailMatch = addr.match(/<([^>]+)>/) || [null, addr];
+        const parsed = parseVerpAddress(emailMatch[1]);
+        if (parsed) {
+          verpAddress = parsed;
+          break;
+        }
+      }
+    }
+
+    if (!verpAddress) {
+      console.log('  ⚠️ No VERP address found in inbound email — skipping');
+      return res.status(200).send('OK');
+    }
+
+    console.log(`  🔗 VERP parsed — campaign: ${verpAddress.campaignId}, recipient: ${verpAddress.recipientId}`);
+
+    // 2. Filter auto-replies
+    if (isAutoReply({ subject, headers, from })) {
+      console.log(`  🤖 Auto-reply detected — skipping (subject: "${subject}", from: ${from})`);
+      return res.status(200).send('OK');
+    }
+
+    // 3. Look up campaign_recipient by VERP
+    const recipientRes = await db.query(
+      `SELECT cr.id, cr.campaign_id, cr.organizer_id, cr.email, cr.status
+       FROM campaign_recipients cr
+       WHERE cr.campaign_id = $1 AND cr.id = $2`,
+      [verpAddress.campaignId, verpAddress.recipientId]
+    );
+
+    if (recipientRes.rows.length === 0) {
+      console.log(`  ⚠️ No recipient found for VERP — campaign: ${verpAddress.campaignId}, recipient: ${verpAddress.recipientId}`);
+      return res.status(200).send('OK');
+    }
+
+    const recipient = recipientRes.rows[0];
+    const replyTime = new Date();
+
+    console.log(`  ✅ Reply matched — ${recipient.email} → campaign ${recipient.campaign_id}`);
+
+    // 4. Record reply as campaign_event
+    const rawEvent = {
+      from,
+      to,
+      subject,
+      text: text ? text.substring(0, 500) : null, // Truncate body for storage
+    };
+    await recordCampaignEvent(recipient, recipient.email, 'reply', replyTime, rawEvent);
+
+    // 5. Record prospect_intent (intent_type='reply')
+    await recordProspectIntent(recipient, recipient.email, 'reply', replyTime);
+
+    console.log(`  📝 Reply recorded for ${recipient.email} (campaign: ${recipient.campaign_id})`);
+
+    return res.status(200).send('OK');
+
+  } catch (err) {
+    console.error('❌ Inbound webhook error:', err.message, err.stack);
+    return res.status(200).send('OK'); // Always 200 to prevent retries
+  }
+});
 
 
 // ============================================================
