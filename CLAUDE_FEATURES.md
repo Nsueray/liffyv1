@@ -521,6 +521,69 @@ persons + affiliations → mapPersonToZoho() → Zoho CRM v7 API (batch 100/requ
 
 ---
 
+## Messe Frankfurt Miner
+
+Specialized miner for Messe Frankfurt exhibition exhibitor catalogs. All Messe Frankfurt events (Techtextil, Automechanika, Heimtextil, ISH, Ambiente, etc.) share the same SPA platform and API.
+
+**Triggering condition:**
+- URL hostname includes `messefrankfurt.com`
+- URL path includes `exhibitor`
+- Page type: `PAGE_TYPES.MESSE_FRANKFURT` → `messeFrankfurtMiner`
+
+**API endpoint pattern:**
+```
+GET https://api.messefrankfurt.com/service/esb_api/exhibitor-service/api/2.1/public/exhibitor/search
+  ?language=en-GB&q=&orderBy=name&pageNumber={N}&pageSize=100
+  &showJumpLabels=false&findEventVariable={EVENT}
+```
+Event variable derived from subdomain (e.g. `techtextil.messefrankfurt.com` → `TECHTEXTIL`).
+
+**API response structure:**
+```json
+{
+  "success": true,
+  "result": {
+    "hits": [
+      {
+        "exhibitor": {
+          "name": "Company Name",
+          "rewriteId": "company-name-slug",
+          "homepage": "http://www.company.com",
+          "address": {
+            "email": "info@company.com",
+            "tel": "+49 123 456789",
+            "street": "Main St 1",
+            "zip": "12345",
+            "city": "Berlin",
+            "country": { "label": "Germany", "iso3": "DEU" }
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+**Detail page DOM selectors (Phase 2 — only for exhibitors missing email):**
+- Emails: `a[href^="mailto:"]` (filters `mailto:?subject=` share links)
+- Phones: `a[href^="tel:"]`
+- Website: `a[href^="http"]` near "website"/"homepage" labels (strict matching)
+- Address: `.exhibitor-address`, `[class*="address"]`, `.address`
+- Detail URL: `{baseUrl}/exhibitor-search.detail.html/{rewriteId}.html`
+
+**Config options:**
+| Key | Default | Description |
+|-----|---------|-------------|
+| `max_pages` | `50` | Maximum API pagination pages |
+| `max_details` | `300` | Maximum detail page visits (only for missing-email exhibitors) |
+| `delay_ms` | `1500` | Delay between detail page visits (ms) |
+| `page_size` | `100` | API page size |
+| `total_timeout` | `480000` | Total timeout (8 minutes) |
+
+**Performance:** ~60 exhibitors in 25 seconds (2 pages), ~88% with email from API alone.
+
+---
+
 ## Email Extraction Policy — B2B Context
 
 Role-based business emails (info@, contact@, sales@, office@, etc.) **ARE** valid discovery targets.

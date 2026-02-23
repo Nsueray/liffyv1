@@ -391,7 +391,8 @@ triggerCanonicalAggregation():
 | `playwrightTableMiner` | Playwright | Table/list extraction from structured HTML | ACTIVE |
 | `aiMiner` | Claude AI | Intelligent extraction using AI analysis | ACTIVE |
 | `documentMiner` | HTTP + PDF | Flipbook/PDF/document parsing | ACTIVE |
-| `directoryMiner` | Playwright | Business directories (card-based layouts, Yellow Pages, etc.) | PROTOTYPE |
+| `directoryMiner` | Playwright | Business directories (card-based layouts, Yellow Pages, etc.) | ACTIVE |
+| `messeFrankfurtMiner` | Playwright + API | Messe Frankfurt exhibition exhibitor catalogs (Techtextil, Automechanika, Heimtextil, ISH, etc.) | ACTIVE |
 | `httpBasicMiner` | HTTP | Basic HTTP fetch + regex (alias for playwrightTableMiner) | ACTIVE (alias) |
 | `fullMiner` | Composite | Runs playwrightTableMiner only (aiMiner removed from free mode) | ACTIVE |
 | `playwrightMiner` | Playwright | General Playwright crawl (alias for fullMiner) | ACTIVE (alias) |
@@ -403,6 +404,18 @@ triggerCanonicalAggregation():
 - Detects business cards via DOM selectors + repeated parent pattern
 - Extracts: company_name, phone, address, email, website, detail_url, country
 - Detail page enrichment: emails (mailto, data-email, obfuscated, RTL), phones, address (JSON-LD, microdata), website
+
+**messeFrankfurtMiner details:**
+- Two-phase pipeline: (1) API discovery + pagination via network interception, (2) detail page DOM extraction for exhibitors missing email
+- Intercepts `api.messefrankfurt.com` exhibitor search API response during page load
+- Extracts full data from API: company_name, email, phone, website, country, address
+- Handles own pagination: navigates to successive search pages, sniffs API responses
+- Handles own browser lifecycle (ownPagination: true, ownBrowser: true)
+- Detects: `messefrankfurt.com` hostname + `exhibitor` in URL path
+- Detail pages only visited for exhibitors missing email (most data comes from API)
+- Detail page extraction: mailto: links (filtered share links), tel: links, website (strict label matching), address selectors
+- Config: `max_pages` (default 50), `max_details` (default 300), `delay_ms` (default 1500ms), `page_size` (default 100)
+- Covers all Messe Frankfurt events: Techtextil, Automechanika, Heimtextil, ISH, Ambiente, etc. (same SPA platform)
 
 ---
 
