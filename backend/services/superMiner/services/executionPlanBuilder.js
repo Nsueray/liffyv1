@@ -27,6 +27,16 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
     return plan;
   }
 
+  // Member table sites — memberTableMiner extracts from HTML tables.
+  // Does NOT handle its own pagination (ownPagination: false).
+  if (resolvedInputType === 'member_table') {
+    addStep('memberTableMiner', 'legacy', 'HTML table member/exhibitor extraction');
+    if (resolvedMiningMode === 'ai') {
+      addStep('aiMiner', 'legacy', 'AI enrichment for member table');
+    }
+    return plan;
+  }
+
   // Messe Frankfurt exhibition sites — messeFrankfurtMiner handles API + detail crawl internally.
   // No pagination wrapper needed (ownPagination: true).
   if (resolvedInputType === 'messe_frankfurt') {

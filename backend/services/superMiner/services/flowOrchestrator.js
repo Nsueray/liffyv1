@@ -324,6 +324,55 @@ class FlowOrchestrator {
                 console.log('[FlowOrchestrator] messeFrankfurtMiner not available:', err.message);
             }
 
+            // memberTableMiner: try/catch load (HTML table member/exhibitor lists)
+            // Separate from main miners block so failure doesn't break other miners
+            // Browser lifecycle managed by wrapper (ownPagination: false)
+            try {
+                const { runMemberTableMiner } = require('../../urlMiners/memberTableMiner');
+                const { chromium } = require('playwright');
+
+                this.miners.memberTableMiner = {
+                    name: 'memberTableMiner',
+                    mine: async (job) => {
+                        console.log(`[memberTableMiner] Starting for: ${job.input}`);
+                        let browser = null;
+                        try {
+                            browser = await chromium.launch({ headless: true });
+                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            const page = await context.newPage();
+                            const rawCards = await runMemberTableMiner(page, job.input, job.config || {});
+                            await browser.close();
+                            browser = null;
+
+                            const contacts = rawCards.map(card => ({
+                                company_name: card.company_name,
+                                email: card.email || null,
+                                phone: card.phone,
+                                website: card.website,
+                                country: card.country,
+                                city: card.city || null,
+                                address: card.address,
+                                contact_name: card.contact_name || null,
+                                job_title: card.job_title || null
+                            }));
+                            const emails = rawCards
+                                .map(c => c.email)
+                                .filter(e => e && typeof e === 'string' && e.includes('@') && e.length > 5);
+
+                            console.log(`[memberTableMiner] Result: ${contacts.length} contacts, ${emails.length} emails`);
+
+                            return this.normalizeResult({ contacts, emails }, 'memberTableMiner');
+                        } catch (err) {
+                            if (browser) await browser.close().catch(() => {});
+                            throw err;
+                        }
+                    }
+                };
+                console.log('[FlowOrchestrator] memberTableMiner loaded ✅');
+            } catch (err) {
+                console.log('[FlowOrchestrator] memberTableMiner not available:', err.message);
+            }
+
             // Aliases
             this.miners.playwrightMiner = this.miners.fullMiner;
             this.miners.playwrightDetailMiner = this.miners.fullMiner;
@@ -876,6 +925,8 @@ class FlowOrchestrator {
 
                 if (analysis.pageType === PAGE_TYPES.DIRECTORY) {
                     inputType = 'directory';
+                } else if (analysis.pageType === PAGE_TYPES.MEMBER_TABLE) {
+                    inputType = 'member_table';
                 } else if (analysis.pageType === PAGE_TYPES.MESSE_FRANKFURT) {
                     inputType = 'messe_frankfurt';
                 } else if (analysis.pageType === PAGE_TYPES.SPA_CATALOG) {

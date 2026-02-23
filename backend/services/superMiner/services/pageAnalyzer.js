@@ -28,6 +28,7 @@ const PAGE_TYPES = {
     DIRECTORY: 'directory',                // Business directory (Yellow Pages, etc.)
     SPA_CATALOG: 'spa_catalog',            // SPA/API-driven catalog (Vue/React, data from JSON API)
     MESSE_FRANKFURT: 'messe_frankfurt',    // Messe Frankfurt exhibition exhibitor catalogs
+    MEMBER_TABLE: 'member_table',          // HTML table member/exhibitor lists (associations, chambers)
     UNKNOWN: 'unknown'
 };
 
@@ -47,6 +48,11 @@ const SPA_CATALOG_DOMAINS = [
 // Messe Frankfurt domains — exhibitor data comes from dedicated API
 const MESSE_FRANKFURT_DOMAINS = [
     'messefrankfurt.com'
+];
+
+// Member table domains — HTML table member/exhibitor lists
+const MEMBER_TABLE_DOMAINS = [
+    'aiacra.com'
 ];
 
 // Pagination types
@@ -568,7 +574,8 @@ module.exports = {
     PAGINATION_TYPES,
     DIRECTORY_DOMAINS,
     SPA_CATALOG_DOMAINS,
-    MESSE_FRANKFURT_DOMAINS
+    MESSE_FRANKFURT_DOMAINS,
+    MEMBER_TABLE_DOMAINS
 };
 
 // ============================================
@@ -707,6 +714,21 @@ PageAnalyzer.prototype.analyzeHtml = function(html, url) {
     }
     result.isMesseFrankfurt = false;
 
+    // Member table detection (hostname + 'member' in URL)
+    try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        const fullUrl = url.toLowerCase();
+        if (MEMBER_TABLE_DOMAINS.some(d => hostname.includes(d)) && fullUrl.includes('member')) {
+            result.pageType = PAGE_TYPES.MEMBER_TABLE;
+            result.isMemberTable = true;
+            console.log(`[PageAnalyzer] Member table detected via hostname: ${hostname}`);
+            return result;
+        }
+    } catch (e) {
+        // Invalid URL, continue to other checks
+    }
+    result.isMemberTable = false;
+
     // SPA catalog detection — generic rules first, hostname as fallback
     const $ = cheerio.load(html);
     const spaDetection = this.detectSpaCatalog($, html, url);
@@ -742,6 +764,14 @@ PageAnalyzer.prototype.getRecommendation = function(analysis) {
             useCache: false, // Playwright-based, no cache
             reason: 'Business directory detected, using directoryMiner',
             ownPagination: true // directoryMiner handles its own pagination
+        };
+    }
+    if (analysis.pageType === PAGE_TYPES.MEMBER_TABLE) {
+        return {
+            miner: 'memberTableMiner',
+            useCache: false,
+            reason: 'HTML table member list detected, using memberTableMiner',
+            ownPagination: false
         };
     }
     if (analysis.pageType === PAGE_TYPES.MESSE_FRANKFURT) {
