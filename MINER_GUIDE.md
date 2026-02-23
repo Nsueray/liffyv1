@@ -420,17 +420,25 @@ triggerCanonicalAggregation():
 
 **memberTableMiner details:**
 - Single-phase: navigates to page, finds HTML `<table>` elements, parses rows with column mapping
-- Header-based detection: analyzes header row keywords (company, email, phone, contact, city, address, country, website)
+- Header-based extraction: analyzes header row keywords (company, email, phone, contact, city, address, country, website)
 - Multi-language keywords: EN + TR support
 - Scoring: longer keyword match = higher specificity (e.g., "contact details" → email, "contact person" → contact_name)
-- Content-based fallback: if no header row, samples data rows to infer column types (email regex, company suffixes, name prefixes)
+- Content-based fallback within miner: if no header row, samples data rows to infer column types (email regex, company suffixes, name prefixes)
 - Does NOT handle its own pagination (ownPagination: false) — flowOrchestrator handles external pagination
 - Browser lifecycle managed by flowOrchestrator wrapper
-- Detects: `MEMBER_TABLE_DOMAINS` hostname + 'member' in URL
 - Extracts: company_name (bold text), email, phone (prefix cleaning), contact_name, city, address (lines below company), website
 - HTML entity decoding for company names (&amp; → &)
 - Config: `delay_ms` (default 2000ms)
 - Test case: AIACRA patron-members → 38 contacts, 100% email+company+contact+city
+- **Detection (dual):**
+  - *Hostname-based (early, pre-fetch):* `MEMBER_TABLE_DOMAINS` hostname + 'member' in URL — runs in `analyze()` before `fetchPage()`, catches SSL-broken sites that would otherwise fall to ERROR
+  - *Content-based (generic, in analyzeHtml):* Cheerio scans all `<table>` elements for `<th>` header rows, matches header text against keyword sets for 8 field types, requires ALL four conditions:
+    1. `<table>` exists
+    2. `<th>` header row found (first 3 rows checked)
+    3. ≥3 distinct field types matched (e.g., company + email + contact_name)
+    4. ≥3 data rows contain email patterns
+  - Content-based detection makes memberTableMiner generic — no need to add hostnames for new sites
+- **vs playwrightTableMiner:** Both target pages with tables + emails, but memberTableMiner uses column-level semantics (header mapping → cell-to-field assignment) while playwrightTableMiner treats each row as an opaque text block. memberTableMiner extracts contact_name and city (playwrightTableMiner cannot). memberTableMiner is selected with higher priority; playwrightTableMiner remains as fallback.
 
 ---
 
