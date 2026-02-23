@@ -80,7 +80,7 @@
 | G2 | Reply detection Stage 2 — VERP reply-to generation in campaignSend.js + worker.js (short format, RFC 5321 safe) | P1 | ✅ DONE |
 | G3 | Reply detection Stage 3 — wrapper forward to organizer inbox + collision guard + URL path secret + multer multipart (commits: 03e7a0d, 878a28a, bf88167) | P1 | ✅ DONE |
 | G4 | Reply detection DNS + SendGrid config — reply.liffy.app MX record + Inbound Parse URL + INBOUND_WEBHOOK_SECRET env var | P1 | ✅ DONE |
-| G5 | Reply count in campaign analytics UI | P2 | TODO |
+| G5 | Reply count in campaign analytics UI (commit: 9b88042 liffy-ui) | P2 | ✅ DONE |
 | G6 | Unsubscribe tracking — unsubscribe olanları UI'da göster | P1 | TODO |
 | G7 | Unsubscribe listesi sayfası — kim, ne zaman, hangi campaign'den unsubscribe oldu | P2 | TODO |
 | G8 | Prospect conversion — reply detected → lead becomes prospect | P2 | TODO |
