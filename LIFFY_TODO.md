@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-02-23*
+*Updated: 2026-02-24*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -77,25 +77,34 @@
 | # | Task | Priority | Status |
 |---|------|----------|--------|
 | G1 | Reply detection Stage 1 — inbound webhook endpoint, VERP parser, auto-reply filter (commit: e1e05f8) | P1 | ✅ DONE |
-| G2 | Reply detection Stage 2 — VERP reply-to generation in mailer.js + DNS (reply.liffy.app MX) + SendGrid Inbound Parse config | P1 | TODO |
-| G3 | Reply detection Stage 3 — reply forwarding to original sender + reply count in analytics UI | P2 | TODO |
-| G4 | Unsubscribe tracking — unsubscribe olanları UI'da göster | P1 | TODO |
-| G5 | Unsubscribe listesi sayfası — kim, ne zaman, hangi campaign'den unsubscribe oldu | P2 | TODO |
-| G6 | Prospect conversion — reply detected → lead becomes prospect | P2 | TODO |
+| G2 | Reply detection Stage 2 — VERP reply-to generation in campaignSend.js + worker.js (short format, RFC 5321 safe) | P1 | ✅ DONE |
+| G3 | Reply detection Stage 3 — wrapper forward to organizer inbox + collision guard + URL path secret + multer multipart (commits: 03e7a0d, 878a28a, bf88167) | P1 | ✅ DONE |
+| G4 | Reply detection DNS + SendGrid config — reply.liffy.app MX record + Inbound Parse URL + INBOUND_WEBHOOK_SECRET env var | P1 | TODO (manual config) |
+| G5 | Reply count in campaign analytics UI | P2 | TODO |
+| G6 | Unsubscribe tracking — unsubscribe olanları UI'da göster | P1 | TODO |
+| G7 | Unsubscribe listesi sayfası — kim, ne zaman, hangi campaign'den unsubscribe oldu | P2 | TODO |
+| G8 | Prospect conversion — reply detected → lead becomes prospect | P2 | TODO |
 
 ### Context
 
 **Current state:**
 - ✅ Click tracking works (campaign_events, event_type='click')
 - ✅ Open tracking works (campaign_events, event_type='open')
-- ✅ Reply detection Stage 1 DONE — inbound webhook endpoint ready (commit: e1e05f8)
-- ⏳ Reply detection Stage 2 TODO — VERP generation + DNS + SendGrid config (endpoint inactive until this)
+- ✅ Reply detection backend COMPLETE — all stages implemented (Stages 1-3)
+- ✅ VERP reply-to active in both campaignSend.js and worker.js (short format: 8 hex chars)
+- ✅ Inbound webhook with URL path secret + envelope domain validation + multer multipart
+- ✅ Wrapper forward to organizer inbox (FROM notify@liffy.app, reply-to = original sender)
+- ✅ Collision guard on VERP prefix lookup (LIMIT 2 + >1 match = skip)
+- ⏳ DNS + SendGrid config TODO — reply.liffy.app MX + Inbound Parse URL (manual config)
 - ❌ Unsubscribe list NOT visible — unsubscribes happen but no UI to see them
 
 **Reply detection approach:** Hybrid VERP + SendGrid Inbound Parse
-- VERP format: `c-{campaign_id}-r-{recipient_id}@reply.liffy.app`
-- Endpoint: `POST /api/webhooks/inbound` (with shared secret auth)
+- VERP format: `c-{8 hex}-r-{8 hex}@reply.liffy.app` (RFC 5321 safe, 22 char local-part)
+- Endpoint: `POST /api/webhooks/inbound/:secret` (multer multipart middleware)
 - Auto-reply filter: RFC 3834 headers, OOO subjects, mailer-daemon from patterns
+- Forward: wrapper email FROM notify@liffy.app TO organizer (reply-to = original sender)
+
+**To go live:** Set `INBOUND_WEBHOOK_SECRET` env var on Render, configure reply.liffy.app MX → SendGrid, configure SendGrid Inbound Parse URL.
 
 **Unsubscribe:**
 - SendGrid handles unsubscribe links in emails

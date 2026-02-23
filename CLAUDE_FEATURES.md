@@ -155,45 +155,75 @@ SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → 
 
 ---
 
-## Reply Detection — Stage 1 Backend (Hybrid VERP + SendGrid Inbound Parse)
+## Reply Detection — Full Pipeline (Hybrid VERP + SendGrid Inbound Parse)
 
-**Status:** Stage 1 DONE (backend endpoint ready). VERP generation + DNS + SendGrid config NOT active yet.
+**Status:** Backend COMPLETE. All stages implemented. Requires DNS (reply.liffy.app MX) + SendGrid Inbound Parse config to go live.
 
 **Architecture:** Hybrid VERP + SendGrid Inbound Parse
-- **VERP format:** `c-{campaign_id}-r-{recipient_id}@reply.liffy.app` (both UUIDs)
-- **Inbound Parse:** SendGrid receives reply at VERP address → POSTs to `/api/webhooks/inbound`
-- **Result:** Reply recorded as `campaign_event` (event_type='reply') + `prospect_intent` (intent_type='reply')
+- **VERP format (short):** `c-{8 hex}-r-{8 hex}@reply.liffy.app` (first 8 chars of each UUID, RFC 5321 safe — 22 char local-part)
+- **Inbound Parse:** SendGrid receives reply at VERP address → POSTs multipart/form-data to `/api/webhooks/inbound/:secret`
+- **Result:** Reply recorded as `campaign_event` (event_type='reply') + `prospect_intent` (intent_type='reply') + forwarded to organizer
 
-**Endpoint:** `POST /api/webhooks/inbound` (`backend/routes/webhooks.js`)
+**Endpoint:** `POST /api/webhooks/inbound/:secret` (`backend/routes/webhooks.js`)
 
 **Flow:**
 ```
-Inbound email → validate secret → parse VERP from envelope/to
-  → filter auto-replies → lookup campaign_recipient by VERP
-  → recordCampaignEvent(reply) → recordProspectIntent(reply)
+Inbound email → validate URL path secret → validate envelope domain (@reply.liffy.app)
+  → multer parses multipart body → parse VERP from envelope/to
+  → filter auto-replies → lookup campaign_recipient by VERP (LEFT prefix match, LIMIT 2)
+  → collision guard (>1 match = skip) → recordCampaignEvent(reply) → recordProspectIntent(reply)
+  → forwardReplyToOrganizer (wrapper email)
 ```
 
-**Security:** Shared secret via `process.env.INBOUND_WEBHOOK_SECRET` + `x-liffy-inbound-secret` header. If env var not set, processes with warning log (dev/testing mode).
+**Security:**
+- Secret embedded in URL path: `https://api.liffy.app/api/webhooks/inbound/{INBOUND_WEBHOOK_SECRET}`
+- Envelope domain validation: only `@reply.liffy.app` addresses accepted
+- If `INBOUND_WEBHOOK_SECRET` env var not set, ALL requests rejected (strict mode)
+
+**VERP generation** (campaignSend.js + worker.js):
+- Both send paths generate VERP reply-to: `c-${id.slice(0,8)}-r-${id.slice(0,8)}@reply.liffy.app`
+- Overrides `sender_identity.reply_to` — all campaign emails use VERP reply-to
 
 **VERP parser** (`parseVerpAddress()`):
-- Extracts campaign_id + recipient_id from VERP address
-- UUID validation on both IDs — rejects malformed input
+- Regex: `/^c-([a-f0-9]{8})-r-([a-f0-9]{8})@reply\.liffy\.app$/i`
+- Returns `{ campaignShort, recipientShort }` — 8-char hex prefixes
 - Checks envelope.to first (preferred), falls back to to field
+
+**DB lookup** (short prefix match):
+```sql
+WHERE LEFT(cr.campaign_id::text, 8) = $1 AND LEFT(cr.id::text, 8) = $2 LIMIT 2
+```
+- `LIMIT 2` enables collision detection without full table scan
+- If >1 match: logs collision, refuses to process (safety guard)
+
+**Reply forwarding** (`forwardReplyToOrganizer()`):
+- Wrapper email sent FROM `notify@liffy.app` (or `FORWARD_FROM_EMAIL` env var) TO organizer
+- Forward target: `sender_identity.reply_to || sender_identity.from_email`
+- Reply-to set to original sender email — organizer can reply directly
+- Uses organizer's own SendGrid API key (multi-tenant safe)
+- Mail loop prevention: FROM address has no VERP match → auto-replies die
 
 **Auto-reply filter** (`isAutoReply()`):
 - **Headers:** RFC 3834 `Auto-Submitted` (not "no"), `X-Auto-Response-Suppress`, `Precedence: bulk/junk/auto_reply`
 - **Subject:** "out of office", "automatic reply", "auto-reply", "delivery failure", OOO, etc.
 - **From:** mailer-daemon, noreply, no-reply, postmaster, mail-daemon
 
-**Stage 1 constraints (deliberately NOT implemented yet):**
-- VERP reply-to generation in mailer.js (Stage 2)
-- `reply.liffy.app` DNS MX record
-- SendGrid Inbound Parse configuration
-- campaign_recipients.status update on reply
-- Reply forwarding to original sender (Stage 3)
+**Multipart parsing:** `multer` middleware (`upload.none()`) on inbound route — SendGrid Inbound Parse sends multipart/form-data, not JSON.
+
+**Env vars:**
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `INBOUND_WEBHOOK_SECRET` | Yes | Secret in URL path for inbound webhook auth |
+| `FORWARD_FROM_EMAIL` | No | FROM address for forwarded replies (default: `notify@liffy.app`) |
+| `FORWARD_FROM_NAME` | No | FROM name for forwarded replies (default: `Liffy Reply Notification`) |
+
+**Remaining to go live:**
+- `reply.liffy.app` DNS MX record pointing to SendGrid
+- SendGrid Inbound Parse configuration (URL: `https://api.liffy.app/api/webhooks/inbound/{secret}`)
+- Set `INBOUND_WEBHOOK_SECRET` env var on Render
 - Reply count in campaign analytics UI
 
-**Commit:** e1e05f8
+**Commits:** e1e05f8 (Stage 1), 03e7a0d (VERP + forwarding + collision guard), 878a28a (URL path secret), bf88167 (multer multipart fix)
 
 ---
 
