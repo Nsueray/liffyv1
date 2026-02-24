@@ -263,7 +263,12 @@ Supports:
 | `{{first_name\|company_name\|"Partner"}}` | `{company_name: "Acme"}` | `Acme` |
 | `{{first_name\|company_name\|"Partner"}}` | `{}` | `Partner` |
 
-**Frontend:** Template editor has `{{display_name}}` as first placeholder chip (green, with tooltip). Tip text below chips explains pipe fallback syntax.
+**Frontend:** Template editor has two chip rows below the editor:
+- **Smart Placeholders (green):** 6 preset pipe-fallback chips that insert full `{{first_name|last_name|company_name|"fallback"}}` expressions. Each chip shows the fallback label and a tooltip explaining the cascade. Presets: Export Manager, Dear Exhibitor, Business Partner, Industry Professional, Valued Partner, Trade Representative.
+- **Insert (orange):** Simple field chips: `{{first_name}}`, `{{last_name}}`, `{{company_name}}`, `{{email}}`, `{{country}}`, `{{position}}`, `{{website}}`, `{{tag}}`
+- Tip text below explains pipe fallback syntax.
+- Placeholder insertion works in both Visual (contentEditable `insertText`) and HTML (textarea cursor splice) modes.
+- `{{display_name}}` chip removed from frontend (commit: 9bdebb2 liffy-ui). Backend `display_name` computed field still works for backward compatibility.
 
 ### Plain Text → HTML Auto-Convert (`backend/routes/campaignSend.js`)
 
@@ -288,7 +293,7 @@ Native `contentEditable` div with lightweight toolbar — no external rich text 
 
 **Toolbar buttons:** Bold, Italic, Underline, Font Size (Small/Normal/Large), Insert Link, Clear Formatting
 **Implementation:** `document.execCommand()` for all formatting commands
-**Placeholder insertion:** Clickable chips below editor insert `{{display_name}}`, `{{first_name}}`, `{{company_name}}`, etc. at cursor via `insertText`. `{{display_name}}` chip is green with tooltip. Tip text explains pipe fallback syntax.
+**Placeholder insertion:** Two chip rows below editor — Smart Placeholders (green, pipe-fallback presets) and Insert (orange, simple fields). Works in both Visual (`insertText`) and HTML (textarea cursor splice) modes.
 **Save:** `innerHTML` from contentEditable div sent as `body_html` to API
 **Edit:** Existing `body_html` loaded into contentEditable div when modal opens
 **Empty state:** CSS `::before` placeholder via `data-placeholder` attribute
