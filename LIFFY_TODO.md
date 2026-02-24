@@ -85,8 +85,8 @@
 | G3 | Reply detection Stage 3 — wrapper forward to organizer inbox + collision guard + URL path secret + multer multipart (commits: 03e7a0d, 878a28a, bf88167) | P1 | ✅ DONE |
 | G4 | Reply detection DNS + SendGrid config — reply.liffy.app MX record + Inbound Parse URL + INBOUND_WEBHOOK_SECRET env var | P1 | ✅ DONE |
 | G5 | Reply count in campaign analytics UI (commit: 9b88042 liffy-ui) | P2 | ✅ DONE |
-| G6 | Unsubscribe tracking — unsubscribe olanları UI'da göster | P1 | TODO |
-| G7 | Unsubscribe listesi sayfası — kim, ne zaman, hangi campaign'den unsubscribe oldu | P2 | TODO |
+| G6 | Unsubscribe tracking — unsubscribe olanları UI'da göster | P1 | ✅ DONE |
+| G7 | Unsubscribe listesi sayfası — kim, ne zaman, hangi campaign'den unsubscribe oldu | P2 | ✅ DONE |
 | G8 | Prospect conversion — reply detected → lead becomes prospect | P2 | TODO |
 
 ### Context
@@ -100,7 +100,7 @@
 - ✅ Wrapper forward to organizer inbox (FROM notify@liffy.app, reply-to = original sender)
 - ✅ Collision guard on VERP prefix lookup (LIMIT 2 + >1 match = skip)
 - ✅ DNS + SendGrid config DONE — reply.liffy.app MX + Inbound Parse URL + env var configured
-- ❌ Unsubscribe list NOT visible — unsubscribes happen but no UI to see them
+- ✅ Unsubscribe tracking UI — /campaigns/unsubscribes page with stats, search, source filter, campaign attribution
 
 **Reply detection approach:** Hybrid VERP + SendGrid Inbound Parse
 - VERP format: `c-{8 hex}-r-{8 hex}@reply.liffy.app` (RFC 5321 safe, 22 char local-part)
@@ -111,10 +111,10 @@
 **Live:** Reply detection is fully operational. DNS, SendGrid Inbound Parse, and env vars all configured.
 
 **Unsubscribe:**
-- SendGrid handles unsubscribe links in emails
-- campaign_events may have unsubscribe events from webhook
-- Need: UI page showing unsubscribed contacts with date + campaign
-- Need: Suppress unsubscribed contacts from future campaigns
+- ✅ SendGrid handles unsubscribe links in emails
+- ✅ campaign_events records unsubscribe events from webhook
+- ✅ UI page at /campaigns/unsubscribes — search, source filter, campaign attribution, pagination
+- ✅ Unsubscribed contacts already suppressed from future campaigns (campaign resolve filters them)
 
 **Prospect flow:** Lead (persons) → receives campaign → replies → becomes Prospect
 
