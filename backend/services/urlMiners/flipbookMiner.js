@@ -227,6 +227,16 @@ async function runFlipbookMiner(page, url, config = {}) {
 
 // ── Field extraction helpers ──
 
+// Katman 1: Skip patterns — lines that are clearly NOT company names
+const LABEL_SKIP_RE = /^(Mobile|Phone|Tel|Email|Fax|Address|City|Country|Website|Box|P\.?\s*O)/i;
+const ADDRESS_SKIP_RE = /^(No\.?\s*\d|Adj\.|Opp\.|Near\s|Behind\s|Off\s|Beside\s|Along\s|Next\s+to\s|Opposite\s|H\/No\.|Plot\s|Block\s|Km\s?\d)/i;
+const STREET_NUM_RE = /^\d+[\s,]+(Road|St|Street|Ave|Avenue|Lane|Drive|Rd|Blvd|Link|Loop|Close|Crescent)/i;
+const NUMBERS_ONLY_RE = /^[\d\s☎+\-().]+$/;
+
+// Katman 2: Scoring keywords
+const COMPANY_SUFFIXES_RE = /\b(Ltd|Limited|Co\.|Inc|Corp|GmbH|Enterprise|Enterprises|Services|Group|Associates|Partners|Ventures|Agency|Foundation|Ministry|S\.A\.|S\.r\.l\.|Pvt|Pty|PLC|LLC|LLP)\b/i;
+const ADDRESS_KEYWORDS_RE = /\b(Road|Street|Ave|Avenue|Lane|Estate|Junction|Roundabout|Highway|Blvd|Drive|Close|Crescent|Link|Loop)\b/i;
+
 function extractCompany(context, email) {
   // Look for labeled company
   const labeled = context.match(/Company[\s]*[:\-][\s]*([^\n]+)/i);
@@ -236,24 +246,57 @@ function extractCompany(context, email) {
   const emailPos = context.indexOf(email) || context.indexOf(email.toLowerCase());
   const textBefore = emailPos > 0 ? context.substring(0, emailPos) : context;
 
-  // Split into lines, look backwards for a capitalized line that looks like a company
+  // Split into lines, scan up to 10 lines backwards, collect ALL candidates with scores
   const lines = textBefore.split(/\n/).map(l => l.trim()).filter(l => l.length > 2);
+  const candidates = [];
 
-  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 8); i--) {
+  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 10); i--) {
     const line = lines[i];
-    // Skip label lines
-    if (/^(Mobile|Phone|Tel|Email|Fax|Address|City|Country|Website|Box|P\.?\s*O)/i.test(line)) continue;
-    // Skip lines that are just numbers/symbols
-    if (/^[\d\s☎+\-().]+$/.test(line)) continue;
-    // Must start with uppercase and be reasonable length
-    if (/^[A-Z]/.test(line) && line.length > 3 && line.length < 120) {
-      // Clean trailing page refs, dots, etc.
-      const cleaned = line.replace(/\.{2,}.*$/, '').replace(/\s*Pg\s*\d*$/, '').trim();
-      if (cleaned.length > 2) return cleaned;
-    }
+
+    // Katman 1: Hard skip — labels, pure numbers, address patterns
+    if (LABEL_SKIP_RE.test(line)) continue;
+    if (NUMBERS_ONLY_RE.test(line)) continue;
+    if (ADDRESS_SKIP_RE.test(line)) continue;
+    if (STREET_NUM_RE.test(line)) continue;
+
+    // Must start with uppercase
+    if (!/^[A-Z]/.test(line)) continue;
+    if (line.length <= 3) continue;
+
+    // Clean trailing page refs, dots
+    const cleaned = line.replace(/\.{2,}.*$/, '').replace(/\s*Pg\s*\d*$/, '').trim();
+    if (cleaned.length <= 2) continue;
+
+    // Katman 2: Score this candidate
+    let score = 0;
+
+    // Positive: company suffix
+    if (COMPANY_SUFFIXES_RE.test(cleaned)) score += 10;
+
+    // Positive: ALL CAPS line (3+ words)
+    const words = cleaned.split(/\s+/);
+    if (words.length >= 3 && cleaned === cleaned.toUpperCase()) score += 5;
+
+    // Positive: short line (likely a name, not a description)
+    if (cleaned.length < 60) score += 2;
+
+    // Negative: contains address keywords
+    if (ADDRESS_KEYWORDS_RE.test(cleaned)) score -= 10;
+
+    // Negative: starts with a number
+    if (/^\d/.test(cleaned)) score -= 5;
+
+    // Negative: very long line (likely a description or paragraph)
+    if (cleaned.length > 100) score -= 3;
+
+    candidates.push({ text: cleaned, score });
   }
 
-  return null;
+  if (candidates.length === 0) return null;
+
+  // Pick highest scoring candidate
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0].text;
 }
 
 function extractPhone(context) {
