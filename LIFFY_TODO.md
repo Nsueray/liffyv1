@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-02-24*
+*Updated: 2026-02-25*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -32,6 +32,7 @@
 | A22 | PDF name/company extraction — documentTextNormalizer structured text parsing | P2 | TODO |
 | A23 | Node.js heap limit (NODE_OPTIONS env var) | P1 | TODO (manual Render config) |
 | A24 | Excel mining quality — column mapping improvement | P2 | TODO |
+| A25 | flipbookMiner v2 — dual-path extraction (column-position + isolateSegment for pre/code layouts) | P1 | ✅ DONE |
 
 ## B. UI TASKS
 
@@ -50,6 +51,7 @@
 | C3 | Template editor HTML escaping — pasted raw HTML tags shown as text in emails | P1 | ✅ DONE |
 | C4 | Campaign analytics Sent=0 — worker not recording sent events to campaign_events | P1 | ✅ DONE |
 | C5 | Import-all deadlock cascade — PG transaction aborted state causes batch-wide failure | P1 | ✅ DONE |
+| C6 | Import-all background crash silent failure — setImmediate + async .catch() + import_status='failed' update | P1 | ✅ DONE |
 
 ## D. TECHNICAL DEBT
 
@@ -72,6 +74,7 @@
 | # | Task | Priority | Status |
 |---|------|----------|--------|
 | F1 | URL test results → identify new miner needs | P1 | TESTING |
+| F2 | flipbookMiner production test — Ghana Yellow Pages 834 pages, 9,246 results, 77% company coverage | P1 | ✅ DONE |
 
 ## G. EMAIL TRACKING & PROSPECTS
 

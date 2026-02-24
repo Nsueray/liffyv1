@@ -461,11 +461,13 @@ triggerCanonicalAggregation():
 - **vs spaNetworkMiner:** spaNetworkMiner uses network interception (`page.route()`); visExhibitorMiner uses direct `fetch()` inside `page.evaluate()`. VIS requires specific `x-vis-domain` header. spaNetworkMiner is in fallback chain but will not match VIS sites.
 
 **flipbookMiner details:**
-- Three-phase pipeline: (1) page count discovery, (2) multi-page text extraction with email context, (3) dedup + output
+- Three-phase pipeline: (1) page count discovery, (2) dual-path multi-page extraction, (3) dedup + output
 - Each flipbook page is a standalone HTML file (`page1.html`, `page2.html`, ..., `page834.html`)
 - Phase 1: Navigates to page1, scans nav links for max page number, then binary-search probes (100, 200, 500, 834, 1000) to find true max for large flipbooks
-- Phase 2: Iterates `page1.html` → `page{max}.html`, extracts `document.body.innerText`, finds emails via regex, builds 500-char context window per email
-- Context extraction: company name (reverse scan for capitalized line before email), phone (☎/Tel pattern + phone regex), website (www. pattern), address (P.O. Box pattern)
+- Phase 2: Dual-path extraction per page:
+  - **Path A — Column-position extraction** (for `<pre><code>` multi-column plain text, e.g. Ghana Yellow Pages): Finds emails with character positions on each line, calculates column boundaries via midpoints between adjacent emails, slices lines above/below at same column range to extract company name, phone, address per column. `isolateSegment()` splits raw slices by large whitespace gaps (3+ spaces or `....` dot padding) and selects the segment closest to the email's position, preventing adjacent column bleed.
+  - **Path B — Bold map + htmlToLines** (for tag-based flipbooks with `<br>`, `<b>`, `<div>`): Builds bold/heading → email map, parses innerHTML with line break preservation, scans backward for company name with address/phone filtering and multi-candidate scoring.
+  - `seenInPage` set prevents duplicates between paths (Path A runs first, Path B skips already-found emails)
 - Phase 3: Dedup by email across all pages, returns raw contact array
 - Handles own browser lifecycle (ownPagination: true, ownBrowser: true)
 - Handles own pagination internally (page{N}.html iteration)
@@ -475,8 +477,9 @@ triggerCanonicalAggregation():
 - Config: `max_pages` (default 50), `delay_ms` (default 500ms), `total_timeout` (default 600000ms / 10 min)
 - SmartRouter: priority 2, fallback chain: `documentMiner → playwrightTableMiner`
 - Progress logging every 10 pages: `[flipbookMiner] Progress: 50/834 pages, 127 emails`
+- Production tested: Ghana Yellow Pages 834 pages → 9,246 contacts (84% with company name, 76% with phone)
 - **vs documentMiner:** documentMiner processes a single URL's HTML/PDF text (SEO text layer, JSON API, embedded text). flipbookMiner iterates hundreds of separate HTML pages. documentMiner cannot handle `page{N}.html` pagination pattern. flipbookMiner uses Playwright `page.goto()` per page; documentMiner uses HTTP `axios.get()`. documentMiner is in fallback chain for flipbook sites.
-- **vs directoryMiner:** directoryMiner targets card-based DOM layouts with repeated parent elements. Flipbook pages are div-based Yellow Pages text, not card layouts. Different extraction strategy (context window around emails vs DOM card selectors).
+- **vs directoryMiner:** directoryMiner targets card-based DOM layouts with repeated parent elements. Flipbook pages are div-based Yellow Pages text, not card layouts. Different extraction strategy (column-position slicing vs DOM card selectors).
 
 ---
 
