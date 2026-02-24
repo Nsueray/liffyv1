@@ -184,11 +184,18 @@ async function processCSVRowsInBackground(validRows, organizerId, listId, tags) 
   let imported = 0, skipped = 0;
   const errors = [];
   let personsUpserted = 0, affiliationsUpserted = 0;
+  const startTime = Date.now();
+  const totalBatches = Math.ceil(validRows.length / CSV_BATCH_SIZE);
+
+  console.log(`[csv-import] Background processing started for list ${listId} — ${validRows.length} rows, ~${totalBatches} batches`);
 
   try {
     for (let batchStart = 0; batchStart < validRows.length; batchStart += CSV_BATCH_SIZE) {
       const batch = validRows.slice(batchStart, batchStart + CSV_BATCH_SIZE);
+      const batchNum = Math.floor(batchStart / CSV_BATCH_SIZE) + 1;
       const client = await db.connect();
+
+      console.log(`[csv-import] Batch ${batchNum}/${totalBatches} starting — ${batch.length} rows`);
 
       try {
         await client.query('BEGIN');
@@ -286,9 +293,11 @@ async function processCSVRowsInBackground(validRows, organizerId, listId, tags) 
         }
 
         await client.query('COMMIT');
+        console.log(`[csv-import] Batch ${batchNum}/${totalBatches} completed — ${imported} total imported so far`);
       } catch (batchErr) {
         await client.query('ROLLBACK').catch(() => {});
-        console.error(`CSV batch error for list ${listId}:`, batchErr.message);
+        console.error(`[csv-import] Batch ${batchNum}/${totalBatches} FAILED for list ${listId}:`, batchErr.message);
+        console.error(batchErr.stack);
         skipped += batch.length;
         errors.push({ batch_error: batchErr.message, from_row: batchStart + 1, to_row: batchStart + batch.length });
       } finally {
@@ -334,16 +343,18 @@ async function processCSVRowsInBackground(validRows, organizerId, listId, tags) 
       console.error('CSV background auto-queue verification error (non-fatal):', vErr.message);
     }
 
-    console.log(`CSV import completed for list ${listId}: ${imported} imported, ${skipped} skipped`);
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`[csv-import] Processing completed for list ${listId}: ${imported} imported, ${skipped} skipped in ${elapsed}s`);
   } catch (err) {
-    console.error(`Background CSV import fatal error for list ${listId}:`, err);
+    console.error(`[csv-import] FATAL: Background processing crashed for list ${listId}:`, err.message);
+    console.error(err.stack);
     try {
       await db.query(
         `UPDATE lists SET import_status = 'failed', import_progress = COALESCE(import_progress, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
         [listId, JSON.stringify({ error: err.message, failed_at: new Date().toISOString(), imported, skipped })]
       );
     } catch (updateErr) {
-      console.error(`Failed to update list import status for ${listId}:`, updateErr);
+      console.error(`[csv-import] Could not update import_status to failed for list ${listId}:`, updateErr.message);
     }
   }
 }
@@ -420,8 +431,17 @@ router.post('/upload-csv', authRequired, upload.single('file'), async (req, res)
       });
 
       setImmediate(() => {
-        processCSVRowsInBackground(validRows, organizerId, newList.id, tags).catch(err => {
-          console.error(`Background CSV import failed for list ${newList.id}:`, err);
+        processCSVRowsInBackground(validRows, organizerId, newList.id, tags).catch(async (err) => {
+          console.error(`[csv-import] FATAL: Unhandled rejection for list ${newList.id}:`, err.message);
+          console.error(err.stack);
+          try {
+            await db.query(
+              `UPDATE lists SET import_status = 'failed', import_progress = COALESCE(import_progress, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+              [newList.id, JSON.stringify({ error: err.message, failed_at: new Date().toISOString() })]
+            );
+          } catch (dbErr) {
+            console.error(`[csv-import] Could not update import_status to failed:`, dbErr.message);
+          }
         });
       });
       return;

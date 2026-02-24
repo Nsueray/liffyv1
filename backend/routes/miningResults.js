@@ -627,6 +627,8 @@ async function processImportInBackground(jobId, organizerId, tagsArray, listId) 
   let totalImported = 0, totalSkipped = 0, totalDuplicates = 0;
   let totalPersonsUpserted = 0, totalAffiliationsUpserted = 0;
   const allErrors = [];
+  const startTime = Date.now();
+  let batchNum = 0;
 
   try {
     // Get initial total for progress tracking
@@ -638,8 +640,13 @@ async function processImportInBackground(jobId, organizerId, tagsArray, listId) 
         AND COALESCE(mr.status, 'new') != 'imported'
     `, [jobId, organizerId]);
     const totalToProcess = totalRes.rows[0].total;
+    const totalBatches = Math.ceil(totalToProcess / IMPORT_BATCH_SIZE);
+
+    console.log(`[import-all] Background processing started for job ${jobId} — ${totalToProcess} results, ~${totalBatches} batches`);
 
     while (true) {
+      batchNum++;
+
       // Fetch next batch (status != 'imported' naturally skips already-processed rows)
       const batchRes = await db.query(`
         SELECT mr.id, mr.company_name, mr.contact_name, mr.job_title,
@@ -655,6 +662,8 @@ async function processImportInBackground(jobId, organizerId, tagsArray, listId) 
 
       if (batchRes.rows.length === 0) break;
 
+      console.log(`[import-all] Batch ${batchNum}/${totalBatches} starting — ${batchRes.rows.length} rows`);
+
       // Process batch in its own transaction
       const client = await db.connect();
       try {
@@ -668,9 +677,12 @@ async function processImportInBackground(jobId, organizerId, tagsArray, listId) 
         totalPersonsUpserted += result.personsUpserted;
         totalAffiliationsUpserted += result.affiliationsUpserted;
         if (result.errors.length > 0) allErrors.push(...result.errors);
+
+        console.log(`[import-all] Batch ${batchNum}/${totalBatches} completed — ${result.imported} imported, ${result.skipped} skipped, ${result.errors.length} errors`);
       } catch (batchErr) {
         await client.query('ROLLBACK').catch(() => {});
-        console.error(`Batch transaction error for job ${jobId}:`, batchErr.message);
+        console.error(`[import-all] Batch ${batchNum}/${totalBatches} FAILED for job ${jobId}:`, batchErr.message);
+        console.error(batchErr.stack);
         totalSkipped += batchRes.rows.length;
         allErrors.push({ batch_error: batchErr.message, affected_count: batchRes.rows.length });
       } finally {
@@ -720,9 +732,11 @@ async function processImportInBackground(jobId, organizerId, tagsArray, listId) 
       [jobId, JSON.stringify(finalProgress)]
     );
 
-    console.log(`Import completed for job ${jobId}: ${totalImported} imported, ${totalSkipped} skipped`);
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`[import-all] Processing completed for job ${jobId}: ${totalImported} imported, ${totalSkipped} skipped, ${totalDuplicates} duplicates in ${elapsed}s`);
   } catch (err) {
-    console.error(`Background import fatal error for job ${jobId}:`, err);
+    console.error(`[import-all] FATAL: Background processing crashed for job ${jobId}:`, err.message);
+    console.error(err.stack);
     try {
       await db.query(
         `UPDATE mining_jobs SET import_status = 'failed', import_progress = COALESCE(import_progress, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
@@ -734,7 +748,7 @@ async function processImportInBackground(jobId, organizerId, tagsArray, listId) 
         })]
       );
     } catch (updateErr) {
-      console.error(`Failed to update import status for job ${jobId}:`, updateErr);
+      console.error(`[import-all] Could not update import_status to failed for job ${jobId}:`, updateErr.message);
     }
   }
 }
@@ -868,8 +882,17 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
 
     // Launch background processing (non-blocking)
     setImmediate(() => {
-      processImportInBackground(jobId, organizerId, tagsArray, listId).catch(err => {
-        console.error(`Background import failed for job ${jobId}:`, err);
+      processImportInBackground(jobId, organizerId, tagsArray, listId).catch(async (err) => {
+        console.error(`[import-all] FATAL: Unhandled rejection for job ${jobId}:`, err.message);
+        console.error(err.stack);
+        try {
+          await db.query(
+            `UPDATE mining_jobs SET import_status = 'failed', import_progress = COALESCE(import_progress, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+            [jobId, JSON.stringify({ error: err.message, failed_at: new Date().toISOString() })]
+          );
+        } catch (dbErr) {
+          console.error(`[import-all] Could not update import_status to failed:`, dbErr.message);
+        }
       });
     });
   } catch (err) {
