@@ -395,6 +395,7 @@ triggerCanonicalAggregation():
 | `messeFrankfurtMiner` | Playwright + API | Messe Frankfurt exhibition exhibitor catalogs (Techtextil, Automechanika, Heimtextil, ISH, etc.) | ACTIVE |
 | `memberTableMiner` | Playwright | HTML table member/exhibitor lists (associations, chambers, federations) | ACTIVE |
 | `visExhibitorMiner` | Playwright + API | Messe Düsseldorf VIS platform exhibitor catalogs (Valve World Expo, wire, Tube, interpack, MEDICA, etc.) | ACTIVE |
+| `flipbookMiner` | Playwright | Flipbuilder/FlipHTML5 basic-html flipbook pages (Yellow Pages, catalogs, directories) | ACTIVE |
 | `httpBasicMiner` | HTTP | Basic HTTP fetch + regex (alias for playwrightTableMiner) | ACTIVE (alias) |
 | `fullMiner` | Composite | Runs playwrightTableMiner only (aiMiner removed from free mode) | ACTIVE |
 | `playwrightMiner` | Playwright | General Playwright crawl (alias for fullMiner) | ACTIVE (alias) |
@@ -458,6 +459,24 @@ triggerCanonicalAggregation():
 - SmartRouter: priority 2, fallback chain: `spaNetworkMiner → playwrightTableMiner`
 - **vs messeFrankfurtMiner:** Similar approach (API + detail) but different platform. messeFrankfurtMiner intercepts `api.messefrankfurt.com` network responses; visExhibitorMiner calls VIS API directly via `page.evaluate(fetch())`. VIS API uses `x-vis-domain` header + A-Z directory structure; Messe Frankfurt uses search API with pagination. Different data shapes (VIS: nested `profileAddress`, `links[]`, `phone.phone`; MF: flat exhibitor objects).
 - **vs spaNetworkMiner:** spaNetworkMiner uses network interception (`page.route()`); visExhibitorMiner uses direct `fetch()` inside `page.evaluate()`. VIS requires specific `x-vis-domain` header. spaNetworkMiner is in fallback chain but will not match VIS sites.
+
+**flipbookMiner details:**
+- Three-phase pipeline: (1) page count discovery, (2) multi-page text extraction with email context, (3) dedup + output
+- Each flipbook page is a standalone HTML file (`page1.html`, `page2.html`, ..., `page834.html`)
+- Phase 1: Navigates to page1, scans nav links for max page number, then binary-search probes (100, 200, 500, 834, 1000) to find true max for large flipbooks
+- Phase 2: Iterates `page1.html` → `page{max}.html`, extracts `document.body.innerText`, finds emails via regex, builds 500-char context window per email
+- Context extraction: company name (reverse scan for capitalized line before email), phone (☎/Tel pattern + phone regex), website (www. pattern), address (P.O. Box pattern)
+- Phase 3: Dedup by email across all pages, returns raw contact array
+- Handles own browser lifecycle (ownPagination: true, ownBrowser: true)
+- Handles own pagination internally (page{N}.html iteration)
+- `derivePageBase(url)` extracts base path + extension from input URL (`page1.html` → base: `page`, ext: `.html`)
+- Detects: `FLIPBOOK_DOMAINS` hostname match + `basic-html/page\d+` URL pattern
+- FLIPBOOK_DOMAINS: `flipbuilder.com`, `online.flipbuilder.com`, `fliphtml5.com`, `online.fliphtml5.com`, `online.anyflip.com`, `publuu.com`
+- Config: `max_pages` (default 50), `delay_ms` (default 500ms), `total_timeout` (default 600000ms / 10 min)
+- SmartRouter: priority 2, fallback chain: `documentMiner → playwrightTableMiner`
+- Progress logging every 10 pages: `[flipbookMiner] Progress: 50/834 pages, 127 emails`
+- **vs documentMiner:** documentMiner processes a single URL's HTML/PDF text (SEO text layer, JSON API, embedded text). flipbookMiner iterates hundreds of separate HTML pages. documentMiner cannot handle `page{N}.html` pagination pattern. flipbookMiner uses Playwright `page.goto()` per page; documentMiner uses HTTP `axios.get()`. documentMiner is in fallback chain for flipbook sites.
+- **vs directoryMiner:** directoryMiner targets card-based DOM layouts with repeated parent elements. Flipbook pages are div-based Yellow Pages text, not card layouts. Different extraction strategy (context window around emails vs DOM card selectors).
 
 ---
 
