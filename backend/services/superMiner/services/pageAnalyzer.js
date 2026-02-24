@@ -58,7 +58,14 @@ const MEMBER_TABLE_DOMAINS = [
 
 // VIS platform domains — Messe Düsseldorf VIS exhibitor catalogs
 const VIS_DOMAINS = [
-    'valveworldexpo.com'
+    'valveworldexpo.com',
+    'wire-tradefair.com',
+    'tube-tradefair.com',
+    'interpack.com',
+    'k-online.com',
+    'prowein.com',
+    'medica-tradefair.com',
+    'compamed-tradefair.com'
 ];
 
 // Pagination types
