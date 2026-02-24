@@ -452,7 +452,7 @@ triggerCanonicalAggregation():
 - Handles own browser lifecycle (ownPagination: true, ownBrowser: true)
 - Handles own pagination internally (A-Z letters = 26 directory requests)
 - Detects: `VIS_DOMAINS` hostname match + URL contains `/vis/` or `/directory/`
-- VIS_DOMAINS: `valveworldexpo.com` (extensible for other Messe Düsseldorf events sharing VIS platform)
+- VIS_DOMAINS: `valveworldexpo.com`, `wire-tradefair.com`, `tube-tradefair.com`, `interpack.com`, `k-online.com`, `prowein.com`, `medica-tradefair.com`, `compamed-tradefair.com`
 - Extracts: company_name, email, phone (`profile.phone.phone`), website (`profile.links[].link`), country (`profile.profileAddress.country`), city (`profile.profileAddress.city`), address (`profile.profileAddress.address[] + zip + city`)
 - Config: `max_details` (default 500), `delay_ms` (default 500ms), `total_timeout` (default 480000ms / 8 min)
 - SmartRouter: priority 2, fallback chain: `spaNetworkMiner → playwrightTableMiner`
