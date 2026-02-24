@@ -12,7 +12,7 @@ const router = express.Router();
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 const MANUAL_MINER_TOKEN = process.env.MANUAL_MINER_TOKEN;
-const IMPORT_BATCH_SIZE = 200;
+const IMPORT_BATCH_SIZE = 500;
 
 function authRequired(req, res, next) {
   try {
