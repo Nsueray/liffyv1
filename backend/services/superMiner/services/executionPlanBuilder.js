@@ -47,6 +47,16 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
     return plan;
   }
 
+  // Flipbook HTML sites — flipbookMiner handles page iteration internally.
+  // No pagination wrapper needed (ownPagination: true).
+  if (resolvedInputType === 'flipbook_html') {
+    addStep('flipbookMiner', 'legacy', 'Flipbook basic-html page extraction');
+    if (resolvedMiningMode === 'ai') {
+      addStep('aiMiner', 'legacy', 'AI enrichment');
+    }
+    return plan;
+  }
+
   // VIS platform sites — visExhibitorMiner handles API + detail crawl internally.
   // No pagination wrapper needed (ownPagination: true).
   if (resolvedInputType === 'vis_exhibitor') {

@@ -30,6 +30,7 @@ const PAGE_TYPES = {
     MESSE_FRANKFURT: 'messe_frankfurt',    // Messe Frankfurt exhibition exhibitor catalogs
     MEMBER_TABLE: 'member_table',          // HTML table member/exhibitor lists (associations, chambers)
     VIS_EXHIBITOR: 'vis_exhibitor',        // Messe Düsseldorf VIS platform exhibitor catalogs
+    FLIPBOOK_HTML: 'flipbook_html',        // Flipbuilder/FlipHTML5 basic-html flipbook pages
     UNKNOWN: 'unknown'
 };
 
@@ -54,6 +55,13 @@ const MESSE_FRANKFURT_DOMAINS = [
 // Member table domains — HTML table member/exhibitor lists
 const MEMBER_TABLE_DOMAINS = [
     'aiacra.com'
+];
+
+// Flipbook platform domains — basic-html flipbook pages
+const FLIPBOOK_DOMAINS = [
+    'flipbuilder.com', 'online.flipbuilder.com',
+    'fliphtml5.com', 'online.fliphtml5.com',
+    'online.anyflip.com', 'publuu.com'
 ];
 
 // VIS platform domains — Messe Düsseldorf VIS exhibitor catalogs
@@ -174,6 +182,23 @@ class PageAnalyzer {
                 const parsedUrl = new URL(url);
                 const hostname = parsedUrl.hostname.toLowerCase();
                 const fullUrl = url.toLowerCase();
+
+                // Flipbook basic-html pages (Flipbuilder, FlipHTML5, AnyFlip, Publuu)
+                if (FLIPBOOK_DOMAINS.some(d => hostname.includes(d)) && /basic-html\/page\d+/i.test(fullUrl)) {
+                    console.log(`[PageAnalyzer] Early detection: FLIPBOOK_HTML via hostname: ${hostname}`);
+                    return {
+                        url,
+                        pageType: PAGE_TYPES.FLIPBOOK_HTML,
+                        isFlipbookHtml: true,
+                        analysisTime: Date.now() - startTime,
+                        recommendation: {
+                            miner: 'flipbookMiner',
+                            useCache: false,
+                            reason: 'Flipbook basic-html pages (early hostname match)',
+                            ownPagination: true
+                        }
+                    };
+                }
 
                 // VIS platform sites (Messe Düsseldorf)
                 if (VIS_DOMAINS.some(d => hostname.includes(d)) && (fullUrl.includes('/vis/') || fullUrl.includes('/directory/'))) {
@@ -668,7 +693,8 @@ module.exports = {
     SPA_CATALOG_DOMAINS,
     MESSE_FRANKFURT_DOMAINS,
     MEMBER_TABLE_DOMAINS,
-    VIS_DOMAINS
+    VIS_DOMAINS,
+    FLIPBOOK_DOMAINS
 };
 
 // ============================================
@@ -806,6 +832,21 @@ PageAnalyzer.prototype.analyzeHtml = function(html, url) {
         // Invalid URL, continue to other checks
     }
     result.isMesseFrankfurt = false;
+
+    // Flipbook basic-html detection (hostname + page{N}.html pattern)
+    try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        const fullUrl = url.toLowerCase();
+        if (FLIPBOOK_DOMAINS.some(d => hostname.includes(d)) && /basic-html\/page\d+/i.test(fullUrl)) {
+            result.pageType = PAGE_TYPES.FLIPBOOK_HTML;
+            result.isFlipbookHtml = true;
+            console.log(`[PageAnalyzer] Flipbook HTML detected via hostname: ${hostname}`);
+            return result;
+        }
+    } catch (e) {
+        // Invalid URL, continue to other checks
+    }
+    result.isFlipbookHtml = false;
 
     // VIS platform detection (hostname + /vis/ or /directory/ in URL)
     try {
@@ -983,6 +1024,14 @@ PageAnalyzer.prototype.getRecommendation = function(analysis) {
             useCache: false, // Playwright-based, no cache
             reason: 'SPA catalog detected, using spaNetworkMiner',
             ownPagination: true // spaNetworkMiner handles its own data fetching
+        };
+    }
+    if (analysis.pageType === PAGE_TYPES.FLIPBOOK_HTML) {
+        return {
+            miner: 'flipbookMiner',
+            useCache: false,
+            reason: 'Flipbook basic-html pages detected, using flipbookMiner',
+            ownPagination: true
         };
     }
     if (analysis.pageType === PAGE_TYPES.DOCUMENT_VIEWER) {
