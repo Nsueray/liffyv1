@@ -15,11 +15,6 @@
  *   const cards = await runFlipbookMiner(page, url, config);
  */
 
-const EMAIL_RE = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
-const PHONE_RE = /(?:☎\s*)?(?:\+?\d{1,3}[\s\-.]?)?\(?\d{2,4}\)?[\s\-.]?\d{2,4}[\s\-.]?\d{2,8}/g;
-const WEBSITE_RE = /(?:https?:\/\/)?(?:www\.)[a-zA-Z0-9][-a-zA-Z0-9]*\.[a-zA-Z]{2,}(?:\/\S*)?/gi;
-const BOX_RE = /(?:P\.?\s*O\.?\s*Box\s*\w+[^\n]*)/i;
-
 const EMAIL_BLACKLIST = [
   '.png', '.jpg', '.jpeg', '.gif', '.svg',
   'example.com', 'test.com', 'wix.com', 'sentry.io',
@@ -164,43 +159,164 @@ async function runFlipbookMiner(page, url, config = {}) {
     try {
       await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-      const pageText = await page.evaluate(() => {
-        return document.body ? document.body.innerText : '';
+      // 3-layer extraction inside page.evaluate — runs in browser context
+      const pageResults = await page.evaluate(() => {
+        if (!document.body) return [];
+
+        // ── Katman 1: Build bold/heading → email map ──
+        const boldMap = new Map();
+        const bolds = document.querySelectorAll('b, strong, h3, h4, h5, h6');
+        for (const el of bolds) {
+          const companyCandidate = el.textContent.trim();
+          if (!companyCandidate || companyCandidate.length < 2 || companyCandidate.length > 200) continue;
+          if (companyCandidate.includes('@') || /^[\d☎+\(]/.test(companyCandidate)) continue;
+          if (/^(Box|P\.?O|Tel|Phone|Fax|Email|Website|www\.|http)/i.test(companyCandidate)) continue;
+
+          const container = el.closest('td, div, p, section, article') || el.parentElement;
+          if (!container) continue;
+
+          const containerText = container.textContent || '';
+          const emailMatches = containerText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+          if (emailMatches) {
+            for (const em of emailMatches) {
+              boldMap.set(em.toLowerCase(), companyCandidate);
+            }
+          }
+        }
+
+        // ── Katman 2: innerHTML → clean lines with line breaks preserved ──
+        function htmlToLines(html) {
+          let text = html
+            .replace(/<br\s*\/?>/gi, '\n')
+            .replace(/<\/?(p|div|tr|li|h[1-6]|blockquote|section|article)[^>]*>/gi, '\n')
+            .replace(/<[^>]+>/g, '')
+            .replace(/&nbsp;/g, ' ')
+            .replace(/&amp;/g, '&')
+            .replace(/&lt;/g, '<')
+            .replace(/&gt;/g, '>')
+            .replace(/&#?\w+;/g, '')
+            .replace(/[ \t]+/g, ' ');
+          return text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+        }
+
+        const lines = htmlToLines(document.body.innerHTML);
+        const emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+
+        // Skip patterns for company name candidates
+        const labelSkip = /^(Mobile|Phone|Tel|Email|Fax|Address|City|Country|Website|Box|P\.?\s*O)/i;
+        const addressSkip = /^(No\.?\s*\d|Adj\.|Opp\.|Near\s|Behind\s|Off\s|Beside\s|Along\s|Next\s+to\s|Opposite\s|H\/No\.|Plot\s|Block\s|Km\s?\d)/i;
+        const streetNum = /^\d+[\s,]+(Road|St|Street|Ave|Avenue|Lane|Drive|Rd|Blvd|Link|Loop|Close|Crescent)/i;
+        const companySuffix = /\b(Ltd|Limited|Co\.|Inc|Corp|GmbH|Enterprise|Enterprises|Services|Group|Associates|Partners|Ventures|Agency|Foundation|Ministry|S\.?A\.?|Pvt|Pty|PLC|LLC|LLP)\b/i;
+        const addressKeyword = /\b(Road|Street|Ave|Avenue|Lane|Estate|Junction|Roundabout|Highway|Blvd|Drive|Close|Crescent|Link|Loop)\b/i;
+
+        const results = [];
+
+        for (let i = 0; i < lines.length; i++) {
+          const lineEmails = lines[i].match(emailRe);
+          if (!lineEmails) continue;
+
+          for (const rawEmail of lineEmails) {
+            const emailLower = rawEmail.toLowerCase();
+            if (/^(noreply|no-reply|mailer-daemon|postmaster|hostmaster|abuse|webmaster|test)@/i.test(rawEmail)) continue;
+
+            // ── Company name: Katman 1 (bold map) → Katman 2 (line scan) ──
+            let company_name = boldMap.get(emailLower) || null;
+
+            if (!company_name) {
+              // Katman 2: scan backwards through REAL lines
+              const candidates = [];
+              for (let j = i - 1; j >= Math.max(0, i - 10); j--) {
+                const candidate = lines[j];
+                if (!candidate || candidate.length < 3 || candidate.length > 200) continue;
+                if (candidate.includes('@')) continue;
+                if (/^[\d\s☎+\-().]+$/.test(candidate)) continue;
+                if (labelSkip.test(candidate)) continue;
+                if (addressSkip.test(candidate)) continue;
+                if (streetNum.test(candidate)) continue;
+                if (!/^[A-Z]/.test(candidate)) continue;
+
+                const cleaned = candidate.replace(/\.{2,}.*$/, '').replace(/\s*Pg\s*\d*$/, '').trim();
+                if (cleaned.length < 3) continue;
+
+                let score = 0;
+                if (companySuffix.test(cleaned)) score += 10;
+                const words = cleaned.split(/\s+/);
+                if (words.length >= 2 && cleaned === cleaned.toUpperCase()) score += 5;
+                if (cleaned.length < 60) score += 2;
+                if (addressKeyword.test(cleaned)) score -= 10;
+                if (/^\d/.test(cleaned)) score -= 5;
+                if (cleaned.length > 100) score -= 3;
+
+                candidates.push({ text: cleaned, score });
+              }
+
+              if (candidates.length > 0) {
+                candidates.sort((a, b) => b.score - a.score);
+                if (candidates[0].score >= 0) {
+                  company_name = candidates[0].text;
+                }
+              }
+            }
+
+            // ── Phone: scan nearby lines (±3) ──
+            let phone = null;
+            for (let j = Math.max(0, i - 3); j <= Math.min(lines.length - 1, i + 3); j++) {
+              const pl = lines[j];
+              const telSymbol = pl.match(/☎\s*([\d\s\-+()]+)/);
+              if (telSymbol) { phone = telSymbol[1].trim(); break; }
+              const telLabel = pl.match(/(?:Tel|Phone|Mob)[:\s]*([\d\s\-+()]+)/i);
+              if (telLabel) { phone = telLabel[1].trim(); break; }
+              if (!pl.includes('@') && !/www\./i.test(pl)) {
+                const ghPhone = pl.match(/(?:^|\s)((?:\+?233|0)[234]\d[\s\-]?[\d\s\-]{6,})/);
+                if (ghPhone) { phone = ghPhone[1].trim(); break; }
+              }
+            }
+            // Validate phone digits
+            if (phone) {
+              const digits = phone.replace(/\D/g, '');
+              if (digits.length < 7 || digits.length > 15) phone = null;
+            }
+
+            // ── Website: scan nearby lines (±3) ──
+            let website = null;
+            for (let j = Math.max(0, i - 3); j <= Math.min(lines.length - 1, i + 3); j++) {
+              const wm = lines[j].match(/((?:https?:\/\/)?www\.[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[^\s]*)/i);
+              if (wm) { website = wm[1].trim(); break; }
+            }
+
+            // ── Address: scan nearby lines (±3) ──
+            let address = null;
+            for (let j = Math.max(0, i - 3); j <= Math.min(lines.length - 1, i + 3); j++) {
+              const boxMatch = lines[j].match(/(?:P\.?\s*O\.?\s*Box\s*\w+[^\n]*)/i);
+              if (boxMatch) { address = boxMatch[0].trim(); break; }
+            }
+
+            results.push({ email: emailLower, company_name, phone, website, address });
+          }
+        }
+
+        return results;
       });
 
-      if (!pageText || pageText.length < 20) continue;
+      // Dedup and collect
+      for (const r of pageResults) {
+        if (seenEmails.has(r.email)) continue;
+        if (EMAIL_BLACKLIST.some(bl => r.email.includes(bl))) continue;
 
-      // Find all emails on this page
-      const emails = pageText.match(EMAIL_RE) || [];
-
-      for (const rawEmail of emails) {
-        const email = rawEmail.toLowerCase();
-
-        if (seenEmails.has(email)) continue;
-        if (EMAIL_BLACKLIST.some(bl => email.includes(bl))) continue;
-
-        seenEmails.add(email);
+        seenEmails.add(r.email);
         totalEmailsFound++;
 
-        // Extract context around this email
-        const pos = pageText.indexOf(rawEmail);
-        const ctxStart = Math.max(0, pos - 500);
-        const ctxEnd = Math.min(pageText.length, pos + 200);
-        const context = pageText.substring(ctxStart, ctxEnd);
-
-        const card = {
-          company_name: extractCompany(context, rawEmail),
-          email: email,
-          phone: extractPhone(context),
-          website: extractWebsite(context, email),
-          address: extractAddress(context),
+        contacts.push({
+          company_name: r.company_name,
+          email: r.email,
+          phone: r.phone,
+          website: r.website,
+          address: r.address,
           country: null,
           contact_name: null,
           job_title: null,
           source_url: pageUrl,
-        };
-
-        contacts.push(card);
+        });
       }
     } catch (err) {
       console.warn(`[flipbookMiner] Page ${i} error: ${err.message}`);
@@ -223,137 +339,6 @@ async function runFlipbookMiner(page, url, config = {}) {
   console.log(`[flipbookMiner] Final: ${contacts.length} contacts from ${pagesToMine} pages`);
 
   return contacts;
-}
-
-// ── Field extraction helpers ──
-
-// Katman 1: Skip patterns — lines that are clearly NOT company names
-const LABEL_SKIP_RE = /^(Mobile|Phone|Tel|Email|Fax|Address|City|Country|Website|Box|P\.?\s*O)/i;
-const ADDRESS_SKIP_RE = /^(No\.?\s*\d|Adj\.|Opp\.|Near\s|Behind\s|Off\s|Beside\s|Along\s|Next\s+to\s|Opposite\s|H\/No\.|Plot\s|Block\s|Km\s?\d)/i;
-const STREET_NUM_RE = /^\d+[\s,]+(Road|St|Street|Ave|Avenue|Lane|Drive|Rd|Blvd|Link|Loop|Close|Crescent)/i;
-const NUMBERS_ONLY_RE = /^[\d\s☎+\-().]+$/;
-
-// Katman 2: Scoring keywords
-const COMPANY_SUFFIXES_RE = /\b(Ltd|Limited|Co\.|Inc|Corp|GmbH|Enterprise|Enterprises|Services|Group|Associates|Partners|Ventures|Agency|Foundation|Ministry|S\.A\.|S\.r\.l\.|Pvt|Pty|PLC|LLC|LLP)\b/i;
-const ADDRESS_KEYWORDS_RE = /\b(Road|Street|Ave|Avenue|Lane|Estate|Junction|Roundabout|Highway|Blvd|Drive|Close|Crescent|Link|Loop)\b/i;
-
-function extractCompany(context, email) {
-  // Look for labeled company
-  const labeled = context.match(/Company[\s]*[:\-][\s]*([^\n]+)/i);
-  if (labeled && labeled[1]) return cleanField(labeled[1]);
-
-  // Get text BEFORE the email — company name is usually above/before
-  const emailPos = context.indexOf(email) || context.indexOf(email.toLowerCase());
-  const textBefore = emailPos > 0 ? context.substring(0, emailPos) : context;
-
-  // Split into lines, scan up to 10 lines backwards, collect ALL candidates with scores
-  const lines = textBefore.split(/\n/).map(l => l.trim()).filter(l => l.length > 2);
-  const candidates = [];
-
-  for (let i = lines.length - 1; i >= Math.max(0, lines.length - 10); i--) {
-    const line = lines[i];
-
-    // Katman 1: Hard skip — labels, pure numbers, address patterns
-    if (LABEL_SKIP_RE.test(line)) continue;
-    if (NUMBERS_ONLY_RE.test(line)) continue;
-    if (ADDRESS_SKIP_RE.test(line)) continue;
-    if (STREET_NUM_RE.test(line)) continue;
-
-    // Must start with uppercase
-    if (!/^[A-Z]/.test(line)) continue;
-    if (line.length <= 3) continue;
-
-    // Clean trailing page refs, dots
-    const cleaned = line.replace(/\.{2,}.*$/, '').replace(/\s*Pg\s*\d*$/, '').trim();
-    if (cleaned.length <= 2) continue;
-
-    // Katman 2: Score this candidate
-    let score = 0;
-
-    // Positive: company suffix
-    if (COMPANY_SUFFIXES_RE.test(cleaned)) score += 10;
-
-    // Positive: ALL CAPS line (3+ words)
-    const words = cleaned.split(/\s+/);
-    if (words.length >= 3 && cleaned === cleaned.toUpperCase()) score += 5;
-
-    // Positive: short line (likely a name, not a description)
-    if (cleaned.length < 60) score += 2;
-
-    // Negative: contains address keywords
-    if (ADDRESS_KEYWORDS_RE.test(cleaned)) score -= 10;
-
-    // Negative: starts with a number
-    if (/^\d/.test(cleaned)) score -= 5;
-
-    // Negative: very long line (likely a description or paragraph)
-    if (cleaned.length > 100) score -= 3;
-
-    candidates.push({ text: cleaned, score });
-  }
-
-  if (candidates.length === 0) return null;
-
-  // Pick highest scoring candidate
-  candidates.sort((a, b) => b.score - a.score);
-  return candidates[0].text;
-}
-
-function extractPhone(context) {
-  // Labeled phone
-  const labeled = context.match(/(?:Mobile|Phone|Tel|GSM|Cell|☎)[\s]*[:\-]?\s*([+\d\s\-().]+)/i);
-  if (labeled && labeled[1]) {
-    const phone = labeled[1].trim();
-    const digits = phone.replace(/\D/g, '');
-    if (digits.length >= 7 && digits.length <= 15) return phone;
-  }
-
-  // Regex match
-  const matches = context.match(PHONE_RE) || [];
-  for (const m of matches) {
-    const digits = m.replace(/\D/g, '');
-    if (digits.length >= 7 && digits.length <= 15) return m.trim();
-  }
-
-  return null;
-}
-
-function extractWebsite(context, email) {
-  // Labeled website
-  const labeled = context.match(/(?:Website|Web|URL)[\s]*[:\-][\s]*((?:https?:\/\/)?(?:www\.)?[^\s]+)/i);
-  if (labeled && labeled[1]) {
-    let w = labeled[1].trim();
-    if (!w.startsWith('http')) w = 'https://' + w;
-    return w;
-  }
-
-  // www. pattern
-  const urls = context.match(WEBSITE_RE) || [];
-  for (const u of urls) {
-    if (!/facebook|twitter|linkedin|instagram|youtube/i.test(u)) {
-      return u.startsWith('http') ? u : 'https://' + u;
-    }
-  }
-
-  return null;
-}
-
-function extractAddress(context) {
-  // P.O. Box pattern
-  const boxMatch = context.match(BOX_RE);
-  if (boxMatch) return cleanField(boxMatch[0]);
-
-  // Labeled address
-  const labeled = context.match(/(?:Address|Location)[\s]*[:\-][\s]*([^\n]+)/i);
-  if (labeled && labeled[1]) return cleanField(labeled[1]);
-
-  return null;
-}
-
-function cleanField(value) {
-  if (!value) return null;
-  const cleaned = value.replace(/\.{2,}/g, '').replace(/\s+/g, ' ').trim();
-  return cleaned.length > 1 ? cleaned : null;
 }
 
 module.exports = { runFlipbookMiner };
