@@ -459,17 +459,40 @@ async function processImportBatch(client, batchRows, organizerId, jobId, tagsArr
   let personsUpserted = 0, affiliationsUpserted = 0;
   const errors = [];
 
+  // ── Dedup within batch: keep first occurrence of each email ──
+  const seenEmails = new Set();
+  const dedupedRows = [];
   for (const mr of batchRows) {
+    const emails = Array.isArray(mr.emails) ? mr.emails : [];
+    const primaryEmail = emails.find(e => e && typeof e === 'string' && e.includes('@'));
+    if (!primaryEmail) {
+      skipped++;
+      continue;
+    }
+    const key = primaryEmail.trim().toLowerCase();
+    if (seenEmails.has(key)) {
+      skipped++;
+      // Still mark as imported so it's not re-fetched in next batch
+      await client.query(
+        `UPDATE mining_results SET status = 'imported', updated_at = NOW() WHERE id = $1`,
+        [mr.id]
+      );
+      continue;
+    }
+    seenEmails.add(key);
+    dedupedRows.push({ ...mr, _primaryEmail: key });
+  }
+
+  // ── Sort by email for consistent lock ordering ──
+  dedupedRows.sort((a, b) => a._primaryEmail.localeCompare(b._primaryEmail));
+
+  for (const mr of dedupedRows) {
+    // ── SAVEPOINT per row: prevents single-row error from aborting entire transaction ──
+    const savepointName = `sp_${mr.id.replace(/-/g, '')}`;
+    await client.query(`SAVEPOINT ${savepointName}`);
+
     try {
-      const emails = Array.isArray(mr.emails) ? mr.emails : [];
-      const primaryEmail = emails.find(e => e && typeof e === 'string' && e.includes('@'));
-
-      if (!primaryEmail) {
-        skipped++;
-        continue;
-      }
-
-      const trimmedEmail = primaryEmail.trim().toLowerCase();
+      const trimmedEmail = mr._primaryEmail;
 
       // Legacy: prospects table check/upsert
       const existingProspect = await client.query(
@@ -496,7 +519,7 @@ async function processImportBatch(client, batchRows, organizerId, jobId, tagsArr
           mining_result_id: mr.id,
           job_id: jobId,
           job_title: mr.job_title,
-          all_emails: emails,
+          all_emails: Array.isArray(mr.emails) ? mr.emails : [],
           website: mr.website,
           phone: mr.phone,
           city: mr.city,
@@ -580,8 +603,12 @@ async function processImportBatch(client, batchRows, organizerId, jobId, tagsArr
         [mr.id]
       );
 
+      // Release savepoint on success
+      await client.query(`RELEASE SAVEPOINT ${savepointName}`);
       imported++;
     } catch (rowErr) {
+      // Rollback to savepoint — transaction stays valid for remaining rows
+      await client.query(`ROLLBACK TO SAVEPOINT ${savepointName}`);
       console.error(`Error importing result ${mr.id}:`, rowErr.message);
       errors.push({ id: mr.id, error: rowErr.message });
       skipped++;
