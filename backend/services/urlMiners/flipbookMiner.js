@@ -1,13 +1,17 @@
 /**
- * LIFFY Flipbook Miner v1.0
+ * LIFFY Flipbook Miner v2.0
  *
  * Extracts contact data from Flipbuilder/FlipHTML5/AnyFlip basic-html flipbook pages.
  * These flipbooks store each page as a standalone HTML file (page1.html, page2.html, ...).
- * Text is real (not image-based), embedded in div-based layouts.
+ *
+ * Two extraction paths:
+ *   Path A — Column-position extraction for <pre><code> multi-column layouts
+ *            (e.g. Ghana Yellow Pages: 4 columns side-by-side in plain text)
+ *   Path B — Bold map + htmlToLines for tag-based layouts (<br>, <b>, <div>)
  *
  * Strategy:
  *   Phase 1 — Discovery: navigate to page1, detect total page count from nav links
- *   Phase 2 — Extraction: iterate pages, extract text, find emails + context fields
+ *   Phase 2 — Extraction: iterate pages, dual-path extract, find emails + context fields
  *   Phase 3 — Dedup + output
  *
  * Usage (module only — browser lifecycle managed by flowOrchestrator wrapper):
@@ -159,11 +163,123 @@ async function runFlipbookMiner(page, url, config = {}) {
     try {
       await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
 
-      // 3-layer extraction inside page.evaluate — runs in browser context
+      // Dual-path extraction inside page.evaluate — runs in browser context
       const pageResults = await page.evaluate(() => {
         if (!document.body) return [];
 
-        // ── Katman 1: Build bold/heading → email map ──
+        const results = [];
+        const seenInPage = new Set();
+        const emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+        const skipPrefix = /^(noreply|no-reply|mailer-daemon|postmaster|hostmaster|abuse|webmaster|test)@/i;
+
+        // ═══════════════════════════════════════════════════
+        // PATH A: <pre>/<code> column-position extraction
+        // For flipbooks with multi-column plain text layouts
+        // (e.g. Ghana Yellow Pages: <pre><code> with 4 cols)
+        // ═══════════════════════════════════════════════════
+        const preElements = document.querySelectorAll('pre');
+        for (const pre of preElements) {
+          const text = pre.textContent || '';
+          if (!text.includes('@')) continue;
+
+          const lines = text.split('\n');
+
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (!line.includes('@')) continue;
+
+            // Find all emails on this line with their character positions
+            const emailsOnLine = [];
+            emailRe.lastIndex = 0;
+            let match;
+            while ((match = emailRe.exec(line)) !== null) {
+              const emLower = match[0].toLowerCase();
+              if (!skipPrefix.test(emLower) && !seenInPage.has(emLower)) {
+                emailsOnLine.push({ email: emLower, pos: match.index, len: match[0].length });
+              }
+            }
+            if (emailsOnLine.length === 0) continue;
+
+            // Determine column boundaries using midpoints between emails
+            for (let e = 0; e < emailsOnLine.length; e++) {
+              const em = emailsOnLine[e];
+              const colStart = e === 0 ? 0
+                : Math.floor((emailsOnLine[e - 1].pos + emailsOnLine[e - 1].len + em.pos) / 2);
+              const colEnd = e === emailsOnLine.length - 1 ? 9999
+                : Math.floor((em.pos + em.len + emailsOnLine[e + 1].pos) / 2);
+
+              let company_name = null;
+              let phone = null;
+              let address = null;
+              let website = null;
+
+              // Scan upward in the same column (up to 6 lines)
+              for (let j = i - 1; j >= Math.max(0, i - 6); j--) {
+                const rawSlice = lines[j].substring(colStart, colEnd);
+                const cleaned = (rawSlice || '').replace(/\.{2,}/g, ' ').trim();
+                if (!cleaned || cleaned.length < 2) continue;
+
+                // Phone detection (☎ symbol, tel/phone label, or Ghana number pattern)
+                if (!phone) {
+                  const phoneMatch = cleaned.match(/☎\s*([\d\s\-+()]+)/)
+                    || cleaned.match(/(?:Tel|Phone|Mob)[:\s]*([\d\s\-+()]+)/i);
+                  if (phoneMatch) {
+                    const digits = phoneMatch[1].replace(/\D/g, '');
+                    if (digits.length >= 7 && digits.length <= 15) {
+                      phone = phoneMatch[1].trim();
+                    }
+                  }
+                  if (!phone) {
+                    const numMatch = cleaned.match(/((?:\+?233|0)[234]\d[\s\-]?[\d\s\-]{6,})/);
+                    if (numMatch) {
+                      const digits = numMatch[1].replace(/\D/g, '');
+                      if (digits.length >= 7 && digits.length <= 15) phone = numMatch[1].trim();
+                    }
+                  }
+                }
+
+                // Address: P.O. Box / Box
+                if (!address) {
+                  const boxMatch = cleaned.match(/((?:P\.?\s*O\.?\s*)?Box\s+[\w]+[^☎]*)/i);
+                  if (boxMatch) {
+                    address = boxMatch[1].replace(/\s+/g, ' ').trim();
+                  }
+                }
+
+                // Company name: first non-phone, non-address, non-email line going upward
+                if (!company_name) {
+                  if (cleaned.includes('@')) continue;
+                  if (/☎/.test(cleaned)) continue;
+                  if (/^[\d\s+\-().]+$/.test(cleaned)) continue;
+                  if (/^(Box|P\.?\s*O)/i.test(cleaned)) continue;
+                  if (/\b(Road|Street|Rd\b|Ave\b|Avenue|Lane|Estate|Floor|Arcade|Close|Crescent|Highway|Blvd|Drive|Junction|Roundabout|Link|Loop)\b/i.test(cleaned)) continue;
+                  if (/^(No\.?\s*\d|Adj\.|Opp\.|Near\s|Behind\s|Off\s|Beside\s)/i.test(cleaned)) continue;
+                  if (/^\d+[\s,]+(Road|St|Street|Ave)/i.test(cleaned)) continue;
+                  company_name = cleaned;
+                }
+              }
+
+              // Look below (1-2 lines) for website
+              for (let j = i + 1; j <= Math.min(lines.length - 1, i + 2); j++) {
+                const rawSlice = lines[j].substring(colStart, colEnd);
+                const cleaned = (rawSlice || '').replace(/\.{2,}/g, ' ').trim();
+                if (!cleaned) continue;
+                const wm = cleaned.match(/((?:https?:\/\/)?www\.[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[^\s]*)/i);
+                if (wm) { website = wm[1].trim(); break; }
+              }
+
+              seenInPage.add(em.email);
+              results.push({ email: em.email, company_name, phone, website, address });
+            }
+          }
+        }
+
+        // ═══════════════════════════════════════════════════
+        // PATH B: Bold map + htmlToLines (regular HTML)
+        // For flipbooks with <br>/<b> tag-based layouts
+        // ═══════════════════════════════════════════════════
+
+        // Bold/heading → email map
         const boldMap = new Map();
         const bolds = document.querySelectorAll('b, strong, h3, h4, h5, h6');
         for (const el of bolds) {
@@ -184,7 +300,7 @@ async function runFlipbookMiner(page, url, config = {}) {
           }
         }
 
-        // ── Katman 2: innerHTML → clean lines with line breaks preserved ──
+        // innerHTML → clean lines (collapses whitespace — fine for tag-based layouts)
         function htmlToLines(html) {
           let text = html
             .replace(/<br\s*\/?>/gi, '\n')
@@ -200,16 +316,11 @@ async function runFlipbookMiner(page, url, config = {}) {
         }
 
         const lines = htmlToLines(document.body.innerHTML);
-        const emailRe = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-
-        // Skip patterns for company name candidates
         const labelSkip = /^(Mobile|Phone|Tel|Email|Fax|Address|City|Country|Website|Box|P\.?\s*O)/i;
         const addressSkip = /^(No\.?\s*\d|Adj\.|Opp\.|Near\s|Behind\s|Off\s|Beside\s|Along\s|Next\s+to\s|Opposite\s|H\/No\.|Plot\s|Block\s|Km\s?\d)/i;
         const streetNum = /^\d+[\s,]+(Road|St|Street|Ave|Avenue|Lane|Drive|Rd|Blvd|Link|Loop|Close|Crescent)/i;
         const companySuffix = /\b(Ltd|Limited|Co\.|Inc|Corp|GmbH|Enterprise|Enterprises|Services|Group|Associates|Partners|Ventures|Agency|Foundation|Ministry|S\.?A\.?|Pvt|Pty|PLC|LLC|LLP)\b/i;
         const addressKeyword = /\b(Road|Street|Ave|Avenue|Lane|Estate|Junction|Roundabout|Highway|Blvd|Drive|Close|Crescent|Link|Loop)\b/i;
-
-        const results = [];
 
         for (let i = 0; i < lines.length; i++) {
           const lineEmails = lines[i].match(emailRe);
@@ -217,13 +328,13 @@ async function runFlipbookMiner(page, url, config = {}) {
 
           for (const rawEmail of lineEmails) {
             const emailLower = rawEmail.toLowerCase();
-            if (/^(noreply|no-reply|mailer-daemon|postmaster|hostmaster|abuse|webmaster|test)@/i.test(rawEmail)) continue;
+            if (seenInPage.has(emailLower)) continue;
+            if (skipPrefix.test(rawEmail)) continue;
 
-            // ── Company name: Katman 1 (bold map) → Katman 2 (line scan) ──
+            // Company name: bold map → line scan
             let company_name = boldMap.get(emailLower) || null;
 
             if (!company_name) {
-              // Katman 2: scan backwards through REAL lines
               const candidates = [];
               for (let j = i - 1; j >= Math.max(0, i - 10); j--) {
                 const candidate = lines[j];
@@ -258,7 +369,7 @@ async function runFlipbookMiner(page, url, config = {}) {
               }
             }
 
-            // ── Phone: scan nearby lines (±3) ──
+            // Phone: scan nearby lines (+-3)
             let phone = null;
             for (let j = Math.max(0, i - 3); j <= Math.min(lines.length - 1, i + 3); j++) {
               const pl = lines[j];
@@ -271,26 +382,26 @@ async function runFlipbookMiner(page, url, config = {}) {
                 if (ghPhone) { phone = ghPhone[1].trim(); break; }
               }
             }
-            // Validate phone digits
             if (phone) {
               const digits = phone.replace(/\D/g, '');
               if (digits.length < 7 || digits.length > 15) phone = null;
             }
 
-            // ── Website: scan nearby lines (±3) ──
+            // Website: scan nearby lines (+-3)
             let website = null;
             for (let j = Math.max(0, i - 3); j <= Math.min(lines.length - 1, i + 3); j++) {
               const wm = lines[j].match(/((?:https?:\/\/)?www\.[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[^\s]*)/i);
               if (wm) { website = wm[1].trim(); break; }
             }
 
-            // ── Address: scan nearby lines (±3) ──
+            // Address: scan nearby lines (+-3)
             let address = null;
             for (let j = Math.max(0, i - 3); j <= Math.min(lines.length - 1, i + 3); j++) {
               const boxMatch = lines[j].match(/(?:P\.?\s*O\.?\s*Box\s*\w+[^\n]*)/i);
               if (boxMatch) { address = boxMatch[0].trim(); break; }
             }
 
+            seenInPage.add(emailLower);
             results.push({ email: emailLower, company_name, phone, website, address });
           }
         }
