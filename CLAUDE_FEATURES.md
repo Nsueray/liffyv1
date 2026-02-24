@@ -433,10 +433,22 @@ All import paths now dual-write to canonical tables. Large imports use **backgro
 **Background import flow (import-all + large CSV):**
 ```
 POST request → validate + count → return 202 Accepted → setImmediate()
-  → fetch batch (200 rows) → BEGIN transaction → process rows → COMMIT
-  → update progress in mining_jobs.import_progress / lists.import_progress
+  → fetch batch (500 rows) → BEGIN transaction
+    → dedup emails within batch (skip duplicates, mark imported)
+    → sort by email (consistent lock ordering)
+    → for each row: SAVEPOINT → process → RELEASE / ROLLBACK TO SAVEPOINT
+  → COMMIT → update progress in mining_jobs.import_progress
   → repeat until done → set import_status = 'completed'
 ```
+
+**Batch size:** 500 rows per transaction (increased from 200, commit: 944594b).
+
+**Deadlock prevention (3-layer fix, commit: 95f43e8):**
+1. **Batch-internal email dedup:** Same email appearing multiple times in a batch only processes once; duplicates are marked as `imported` immediately
+2. **Consistent lock ordering:** Rows sorted by email before processing — prevents cross-row lock ordering deadlocks on `persons`/`affiliations` UPSERT
+3. **Per-row SAVEPOINT:** Each row wrapped in `SAVEPOINT sp_{id}` / `RELEASE SAVEPOINT`. On error: `ROLLBACK TO SAVEPOINT` — single row failure does NOT abort the entire transaction. This prevents the PostgreSQL "current transaction is aborted, commands ignored until end of transaction block" cascade failure.
+
+**Root cause of original deadlock bug:** The `catch` block in `processImportBatch()` swallowed per-row errors but PostgreSQL had already moved the transaction to aborted state — all subsequent queries in the 200-row batch failed with "commands ignored until end of transaction block", causing hundreds of cascade errors.
 
 **Tracking columns** (migration 022):
 - `mining_jobs.import_status` — `NULL` | `processing` | `completed` | `failed`
