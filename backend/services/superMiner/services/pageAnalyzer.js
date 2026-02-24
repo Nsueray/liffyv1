@@ -29,6 +29,7 @@ const PAGE_TYPES = {
     SPA_CATALOG: 'spa_catalog',            // SPA/API-driven catalog (Vue/React, data from JSON API)
     MESSE_FRANKFURT: 'messe_frankfurt',    // Messe Frankfurt exhibition exhibitor catalogs
     MEMBER_TABLE: 'member_table',          // HTML table member/exhibitor lists (associations, chambers)
+    VIS_EXHIBITOR: 'vis_exhibitor',        // Messe Düsseldorf VIS platform exhibitor catalogs
     UNKNOWN: 'unknown'
 };
 
@@ -53,6 +54,11 @@ const MESSE_FRANKFURT_DOMAINS = [
 // Member table domains — HTML table member/exhibitor lists
 const MEMBER_TABLE_DOMAINS = [
     'aiacra.com'
+];
+
+// VIS platform domains — Messe Düsseldorf VIS exhibitor catalogs
+const VIS_DOMAINS = [
+    'valveworldexpo.com'
 ];
 
 // Pagination types
@@ -161,6 +167,23 @@ class PageAnalyzer {
                 const parsedUrl = new URL(url);
                 const hostname = parsedUrl.hostname.toLowerCase();
                 const fullUrl = url.toLowerCase();
+
+                // VIS platform sites (Messe Düsseldorf)
+                if (VIS_DOMAINS.some(d => hostname.includes(d)) && (fullUrl.includes('/vis/') || fullUrl.includes('/directory/'))) {
+                    console.log(`[PageAnalyzer] Early detection: VIS_EXHIBITOR via hostname: ${hostname}`);
+                    return {
+                        url,
+                        pageType: PAGE_TYPES.VIS_EXHIBITOR,
+                        isVisExhibitor: true,
+                        analysisTime: Date.now() - startTime,
+                        recommendation: {
+                            miner: 'visExhibitorMiner',
+                            useCache: false,
+                            reason: 'Messe Düsseldorf VIS exhibitor catalog (early hostname match)',
+                            ownPagination: true
+                        }
+                    };
+                }
 
                 // Member table sites
                 if (MEMBER_TABLE_DOMAINS.some(d => hostname.includes(d)) && fullUrl.includes('member')) {
@@ -637,7 +660,8 @@ module.exports = {
     DIRECTORY_DOMAINS,
     SPA_CATALOG_DOMAINS,
     MESSE_FRANKFURT_DOMAINS,
-    MEMBER_TABLE_DOMAINS
+    MEMBER_TABLE_DOMAINS,
+    VIS_DOMAINS
 };
 
 // ============================================
@@ -775,6 +799,21 @@ PageAnalyzer.prototype.analyzeHtml = function(html, url) {
         // Invalid URL, continue to other checks
     }
     result.isMesseFrankfurt = false;
+
+    // VIS platform detection (hostname + /vis/ or /directory/ in URL)
+    try {
+        const hostname = new URL(url).hostname.toLowerCase();
+        const fullUrl = url.toLowerCase();
+        if (VIS_DOMAINS.some(d => hostname.includes(d)) && (fullUrl.includes('/vis/') || fullUrl.includes('/directory/'))) {
+            result.pageType = PAGE_TYPES.VIS_EXHIBITOR;
+            result.isVisExhibitor = true;
+            console.log(`[PageAnalyzer] VIS exhibitor detected via hostname: ${hostname}`);
+            return result;
+        }
+    } catch (e) {
+        // Invalid URL, continue to other checks
+    }
+    result.isVisExhibitor = false;
 
     // Member table detection (hostname + 'member' in URL)
     try {
@@ -920,6 +959,14 @@ PageAnalyzer.prototype.getRecommendation = function(analysis) {
             miner: 'messeFrankfurtMiner',
             useCache: false,
             reason: 'Messe Frankfurt exhibitor catalog',
+            ownPagination: true
+        };
+    }
+    if (analysis.pageType === PAGE_TYPES.VIS_EXHIBITOR) {
+        return {
+            miner: 'visExhibitorMiner',
+            useCache: false,
+            reason: 'Messe Düsseldorf VIS exhibitor catalog',
             ownPagination: true
         };
     }

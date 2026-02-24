@@ -47,6 +47,16 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
     return plan;
   }
 
+  // VIS platform sites — visExhibitorMiner handles API + detail crawl internally.
+  // No pagination wrapper needed (ownPagination: true).
+  if (resolvedInputType === 'vis_exhibitor') {
+    addStep('visExhibitorMiner', 'legacy', 'VIS platform exhibitor extraction');
+    if (resolvedMiningMode === 'ai') {
+      addStep('aiMiner', 'legacy', 'AI enrichment');
+    }
+    return plan;
+  }
+
   // SPA catalog sites — spaNetworkMiner handles its own data fetching via network interception.
   // No pagination wrapper needed (ownPagination: true).
   if (resolvedInputType === 'spa_catalog') {
