@@ -394,6 +394,7 @@ triggerCanonicalAggregation():
 | `directoryMiner` | Playwright | Business directories (card-based layouts, Yellow Pages, etc.) | ACTIVE |
 | `messeFrankfurtMiner` | Playwright + API | Messe Frankfurt exhibition exhibitor catalogs (Techtextil, Automechanika, Heimtextil, ISH, etc.) | ACTIVE |
 | `memberTableMiner` | Playwright | HTML table member/exhibitor lists (associations, chambers, federations) | ACTIVE |
+| `visExhibitorMiner` | Playwright + API | Messe Düsseldorf VIS platform exhibitor catalogs (Valve World Expo, wire, Tube, interpack, MEDICA, etc.) | ACTIVE |
 | `httpBasicMiner` | HTTP | Basic HTTP fetch + regex (alias for playwrightTableMiner) | ACTIVE (alias) |
 | `fullMiner` | Composite | Runs playwrightTableMiner only (aiMiner removed from free mode) | ACTIVE |
 | `playwrightMiner` | Playwright | General Playwright crawl (alias for fullMiner) | ACTIVE (alias) |
@@ -439,6 +440,24 @@ triggerCanonicalAggregation():
     4. ≥3 data rows contain email patterns
   - Content-based detection makes memberTableMiner generic — no need to add hostnames for new sites
 - **vs playwrightTableMiner:** Both target pages with tables + emails, but memberTableMiner uses column-level semantics (header mapping → cell-to-field assignment) while playwrightTableMiner treats each row as an opaque text block. memberTableMiner extracts contact_name and city (playwrightTableMiner cannot). memberTableMiner is selected with higher priority; playwrightTableMiner remains as fallback.
+
+**visExhibitorMiner details:**
+- Three-phase pipeline: (1) A-Z directory fetch, (2) profile detail fetch, (3) merge list + profile data
+- Uses VIS platform REST API via `page.evaluate(fetch())` — browser only used for session cookies
+- Phase 1: Iterates letters a-z, fetches `/vis-api/vis/v1/{lang}/directory/{letter}` for each, collects exhibitor list (exh ID, name, country, city)
+- Phase 2: Fetches `/vis-api/vis/v1/{lang}/exhibitors/{exh}/slices/profile` for each exhibitor, 5-concurrent chunks via `Promise.all`
+- Phase 3: Merges directory list data with profile data to produce final contact cards
+- All API requests require `x-vis-domain` header (value = site origin, e.g. `https://www.valveworldexpo.com`)
+- `deriveApiBase(url)` extracts origin + basePath from input URL (pattern: `/vis/v1/{lang}/...` → `/vis-api/vis/v1/{lang}`)
+- Handles own browser lifecycle (ownPagination: true, ownBrowser: true)
+- Handles own pagination internally (A-Z letters = 26 directory requests)
+- Detects: `VIS_DOMAINS` hostname match + URL contains `/vis/` or `/directory/`
+- VIS_DOMAINS: `valveworldexpo.com` (extensible for other Messe Düsseldorf events sharing VIS platform)
+- Extracts: company_name, email, phone (`profile.phone.phone`), website (`profile.links[].link`), country (`profile.profileAddress.country`), city (`profile.profileAddress.city`), address (`profile.profileAddress.address[] + zip + city`)
+- Config: `max_details` (default 500), `delay_ms` (default 500ms), `total_timeout` (default 480000ms / 8 min)
+- SmartRouter: priority 2, fallback chain: `spaNetworkMiner → playwrightTableMiner`
+- **vs messeFrankfurtMiner:** Similar approach (API + detail) but different platform. messeFrankfurtMiner intercepts `api.messefrankfurt.com` network responses; visExhibitorMiner calls VIS API directly via `page.evaluate(fetch())`. VIS API uses `x-vis-domain` header + A-Z directory structure; Messe Frankfurt uses search API with pagination. Different data shapes (VIS: nested `profileAddress`, `links[]`, `phone.phone`; MF: flat exhibitor objects).
+- **vs spaNetworkMiner:** spaNetworkMiner uses network interception (`page.route()`); visExhibitorMiner uses direct `fetch()` inside `page.evaluate()`. VIS requires specific `x-vis-domain` header. spaNetworkMiner is in fallback chain but will not match VIS sites.
 
 ---
 
