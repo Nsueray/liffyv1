@@ -177,6 +177,41 @@ async function runFlipbookMiner(page, url, config = {}) {
         // For flipbooks with multi-column plain text layouts
         // (e.g. Ghana Yellow Pages: <pre><code> with 4 cols)
         // ═══════════════════════════════════════════════════
+
+        // Isolate the segment within a raw slice that belongs to THIS column.
+        // Raw slices often bleed into adjacent columns. Split by large
+        // whitespace gaps (3+ spaces) and return the segment whose position
+        // best overlaps with the email's position within the slice.
+        function isolateSegment(rawSlice, emailPosInSlice) {
+          // Replace dot-padding with spaces for splitting
+          const normalized = rawSlice.replace(/\.{2,}/g, '   ');
+          // Split by 3+ spaces
+          const parts = [];
+          let idx = 0;
+          for (const seg of normalized.split(/\s{3,}/)) {
+            const trimmed = seg.trim();
+            if (trimmed) {
+              const segStart = rawSlice.indexOf(seg.trim(), Math.max(0, idx - 5));
+              parts.push({ text: trimmed, start: segStart >= 0 ? segStart : idx });
+            }
+            idx += seg.length + 3;
+          }
+          if (parts.length <= 1) {
+            return rawSlice.replace(/\.{2,}/g, ' ').trim();
+          }
+          // Pick the segment closest to the email's position
+          let best = parts[0];
+          let bestDist = Math.abs(parts[0].start - emailPosInSlice);
+          for (let p = 1; p < parts.length; p++) {
+            const dist = Math.abs(parts[p].start - emailPosInSlice);
+            if (dist < bestDist) {
+              bestDist = dist;
+              best = parts[p];
+            }
+          }
+          return best.text;
+        }
+
         const preElements = document.querySelectorAll('pre');
         for (const pre of preElements) {
           const text = pre.textContent || '';
@@ -207,6 +242,8 @@ async function runFlipbookMiner(page, url, config = {}) {
                 : Math.floor((emailsOnLine[e - 1].pos + emailsOnLine[e - 1].len + em.pos) / 2);
               const colEnd = e === emailsOnLine.length - 1 ? 9999
                 : Math.floor((em.pos + em.len + emailsOnLine[e + 1].pos) / 2);
+              // Email's relative position within the column slice
+              const emailRelPos = em.pos - colStart;
 
               let company_name = null;
               let phone = null;
@@ -216,7 +253,7 @@ async function runFlipbookMiner(page, url, config = {}) {
               // Scan upward in the same column (up to 6 lines)
               for (let j = i - 1; j >= Math.max(0, i - 6); j--) {
                 const rawSlice = lines[j].substring(colStart, colEnd);
-                const cleaned = (rawSlice || '').replace(/\.{2,}/g, ' ').trim();
+                const cleaned = isolateSegment(rawSlice, emailRelPos);
                 if (!cleaned || cleaned.length < 2) continue;
 
                 // Phone detection (☎ symbol, tel/phone label, or Ghana number pattern)
@@ -262,7 +299,7 @@ async function runFlipbookMiner(page, url, config = {}) {
               // Look below (1-2 lines) for website
               for (let j = i + 1; j <= Math.min(lines.length - 1, i + 2); j++) {
                 const rawSlice = lines[j].substring(colStart, colEnd);
-                const cleaned = (rawSlice || '').replace(/\.{2,}/g, ' ').trim();
+                const cleaned = isolateSegment(rawSlice, emailRelPos);
                 if (!cleaned) continue;
                 const wm = cleaned.match(/((?:https?:\/\/)?www\.[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[^\s]*)/i);
                 if (wm) { website = wm[1].trim(); break; }
