@@ -132,23 +132,42 @@ class FlowOrchestrator {
                         console.log(`[documentMiner] Starting for: ${job.input}`);
                         const result = await documentMiner.mine(job.input);
 
-                        // Normalize rawText to contacts (Rule #3: Only here)
-                        // documentTextNormalizer handles chunking for large texts (>200K chars)
-                        const normalized = documentTextNormalizer.normalize(result, job.input);
+                        let contacts = [];
 
-                        console.log(`[documentMiner] Normalized: ${normalized.contacts.length} contacts`);
+                        // PDF direct extraction: fileMiner already extracted contacts
+                        if (result.pdfContacts && result.pdfContacts.length > 0) {
+                            contacts = result.pdfContacts.map(c => ({
+                                email: c.email || null,
+                                company_name: c.company || null,
+                                contact_name: c.name || null,
+                                job_title: c.title || null,
+                                phone: c.phone || null,
+                                website: c.website || null,
+                                country: c.country || null,
+                                city: c.city || null,
+                                confidence: c.confidence || 45,
+                                source_url: job.input,
+                            }));
+                            console.log(`[documentMiner] PDF contacts: ${contacts.length} (fileMiner direct)`);
+                        } else {
+                            // Normalize rawText to contacts (Rule #3: Only here)
+                            // documentTextNormalizer handles chunking for large texts (>200K chars)
+                            const normalized = documentTextNormalizer.normalize(result, job.input);
+                            contacts = normalized.contacts;
+                            console.log(`[documentMiner] Normalized: ${contacts.length} contacts`);
+                        }
 
                         const output = {
-                            contacts: normalized.contacts,
+                            contacts,
                             extractionMethod: result.extractionMethod,
                             pageCount: result.pageCount,
                             source: 'documentMiner',
-                            normalizationStats: normalized.stats
                         };
 
                         // Memory cleanup — release large text after normalization
                         result.extractedText = null;
                         result.textBlocks = null;
+                        result.pdfContacts = null;
 
                         return output;
                     }

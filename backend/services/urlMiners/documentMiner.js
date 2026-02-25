@@ -94,7 +94,13 @@ class DocumentMiner {
                     }
 
                     const extracted = await this.extractFromPdf(url, url);
-                    if (extracted && extracted.text && extracted.text.length >= CONFIG.MIN_TEXT_LENGTH) {
+                    if (extracted && extracted.pdfContacts && extracted.pdfContacts.length > 0) {
+                        result.success = true;
+                        result.extractedText = `[PDF: ${extracted.pdfContacts.length} contacts extracted]`;
+                        result.pdfContacts = extracted.pdfContacts;
+                        result.extractionMethod = EXTRACTION_METHODS.PDF_DELEGATION;
+                        console.log(`[DocumentMiner] ✅ PDF extracted: ${extracted.pdfContacts.length} contacts`);
+                    } else if (extracted && extracted.text && extracted.text.length >= CONFIG.MIN_TEXT_LENGTH) {
                         result.success = true;
                         result.extractedText = extracted.text;
                         result.textBlocks = extracted.textBlocks || [];
@@ -102,8 +108,8 @@ class DocumentMiner {
                         result.pageCount = extracted.pageCount || null;
                         console.log(`[DocumentMiner] ✅ PDF extracted: ${result.extractedText.length} chars`);
                     } else {
-                        result.errors.push('PDF text extraction returned insufficient text');
-                        console.log(`[DocumentMiner] PDF extraction returned too little text`);
+                        result.errors.push('PDF extraction returned no contacts or text');
+                        console.log(`[DocumentMiner] PDF extraction returned no results`);
                     }
 
                     result.stats.duration = Date.now() - startTime;
@@ -259,10 +265,6 @@ class DocumentMiner {
             throw new Error('fileMiner module not available');
         }
 
-        if (!fileMiner.extractTextFromPDF) {
-            throw new Error('fileMiner.extractTextFromPDF not available - PDF text extraction requires this function');
-        }
-
         const fullPdfUrl = pdfUrl.startsWith('http') ? pdfUrl : new URL(pdfUrl, baseUrl).href;
 
         const response = await axios.get(fullPdfUrl, {
@@ -274,18 +276,27 @@ class DocumentMiner {
         let buffer = Buffer.from(response.data);
         console.log(`[DocumentMiner] PDF downloaded: ${buffer.length} bytes`);
 
-        const pdfResult = await fileMiner.extractTextFromPDF(buffer);
+        // Full extraction: pdfplumber tables + columnar parser + email-centric
+        const fileResult = await fileMiner.processFile(buffer, 'download.pdf');
 
-        // Memory cleanup — release PDF binary buffer after extraction
+        // Memory cleanup
         buffer = null;
         if (response.data) response.data = null;
 
-        return {
-            text: pdfResult.text || '',
-            textBlocks: [{ page: 1, text: pdfResult.text || '' }],
+        const result = {
+            text: '', // Text not needed — contacts extracted directly
+            textBlocks: [],
             method: EXTRACTION_METHODS.PDF_DELEGATION,
             pageCount: null,
         };
+
+        // Pass pre-extracted contacts for the adapter to use directly
+        if (fileResult.contacts && fileResult.contacts.length > 0) {
+            result.pdfContacts = fileResult.contacts;
+            console.log(`[DocumentMiner] PDF contacts: ${fileResult.contacts.length} (method: ${fileResult.stats?.extraction_method})`);
+        }
+
+        return result;
     }
 
     extractEmbeddedText(html) {
