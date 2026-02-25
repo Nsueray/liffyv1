@@ -1111,10 +1111,16 @@ class FlowOrchestrator {
                         const paginatedResult = await this.mineAllPages(primaryMiner, job, paginationInfo.pageUrls);
 
                         if (primaryStep.normalizer === 'documentTextNormalizer') {
-                            const normalized = documentTextNormalizer.normalize(paginatedResult, job.input);
-                            paginatedResult.contacts = normalized.contacts || [];
-                            paginatedResult.emails = (normalized.contacts || []).map(c => c.email).filter(Boolean);
-                            if (normalized.stats) paginatedResult.normalizationStats = normalized.stats;
+                            // PDF direct extraction: contacts already extracted by fileMiner
+                            if (paginatedResult.contacts && paginatedResult.contacts.length > 0) {
+                                paginatedResult.emails = paginatedResult.contacts.map(c => c.email).filter(Boolean);
+                                console.log(`[Flow1] Paginated: skipping text normalizer, ${paginatedResult.contacts.length} contacts already extracted`);
+                            } else {
+                                const normalized = documentTextNormalizer.normalize(paginatedResult, job.input);
+                                paginatedResult.contacts = normalized.contacts || [];
+                                paginatedResult.emails = (normalized.contacts || []).map(c => c.email).filter(Boolean);
+                                if (normalized.stats) paginatedResult.normalizationStats = normalized.stats;
+                            }
                         }
 
                         minerResults.push(paginatedResult);
@@ -1137,10 +1143,16 @@ class FlowOrchestrator {
                             }
 
                             if (step.normalizer === 'documentTextNormalizer') {
-                                const normalized = documentTextNormalizer.normalize(minerResult, job.input);
-                                minerResult.contacts = normalized.contacts || [];
-                                minerResult.emails = (normalized.contacts || []).map(c => c.email).filter(Boolean);
-                                if (normalized.stats) minerResult.normalizationStats = normalized.stats;
+                                // PDF direct extraction: contacts already extracted by fileMiner
+                                if (minerResult.contacts && minerResult.contacts.length > 0) {
+                                    minerResult.emails = minerResult.contacts.map(c => c.email).filter(Boolean);
+                                    console.log(`[Flow1] Enrichment: skipping text normalizer, ${minerResult.contacts.length} contacts already extracted`);
+                                } else {
+                                    const normalized = documentTextNormalizer.normalize(minerResult, job.input);
+                                    minerResult.contacts = normalized.contacts || [];
+                                    minerResult.emails = (normalized.contacts || []).map(c => c.email).filter(Boolean);
+                                    if (normalized.stats) minerResult.normalizationStats = normalized.stats;
+                                }
                             }
 
                             minerResults.push(minerResult);
@@ -1173,18 +1185,24 @@ class FlowOrchestrator {
                             }
 
                             if (step.normalizer === 'documentTextNormalizer') {
-                                const normalized = documentTextNormalizer.normalize(minerResult, job.input);
+                                // PDF direct extraction: contacts already extracted by fileMiner
+                                if (minerResult.contacts && minerResult.contacts.length > 0) {
+                                    minerResult.emails = minerResult.contacts.map(c => c.email).filter(Boolean);
+                                    console.log(`[Flow1] Step: skipping text normalizer, ${minerResult.contacts.length} contacts already extracted`);
+                                } else {
+                                    const normalized = documentTextNormalizer.normalize(minerResult, job.input);
 
-                                // contacts (yeni sistem)
-                                minerResult.contacts = normalized.contacts || [];
+                                    // contacts (yeni sistem)
+                                    minerResult.contacts = normalized.contacts || [];
 
-                                // Legacy Aggregator uyumu icin
-                                minerResult.emails = (normalized.contacts || [])
-                                    .map(c => c.email)
-                                    .filter(Boolean);
+                                    // Legacy Aggregator uyumu icin
+                                    minerResult.emails = (normalized.contacts || [])
+                                        .map(c => c.email)
+                                        .filter(Boolean);
 
-                                if (normalized.stats) {
-                                    minerResult.normalizationStats = normalized.stats;
+                                    if (normalized.stats) {
+                                        minerResult.normalizationStats = normalized.stats;
+                                    }
                                 }
                             }
 
