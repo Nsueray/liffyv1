@@ -243,6 +243,13 @@ function extractContactsFromTables(tableData) {
                 if (processedEmails.has(emailLower)) continue;
                 if (/^(noreply|no-reply|mailer-daemon|postmaster|hostmaster|abuse|webmaster|test)@/i.test(email)) continue;
                 if (PATTERNS.emailBlacklist.some(bl => emailLower.includes(bl))) continue;
+                // Skip reversed/garbled emails (from rotated PDF tables)
+                const domain = emailLower.split('@')[1] || '';
+                const tldParts = domain.split('.');
+                const tld = tldParts[tldParts.length - 1] || '';
+                const VALID_TLDS = new Set(['com','org','net','gov','edu','io','co','ng','uk','de','fr','us','in','za','gh','ke','biz','info','app','tech','me','tv','cc','ai','dev']);
+                if (!VALID_TLDS.has(tld)) continue;
+
                 processedEmails.add(emailLower);
 
                 contacts.push({
@@ -563,6 +570,149 @@ function parseStructuredText(text) {
     }
     
     console.log(`   📊 Structured parser found ${contacts.length} potential contacts`);
+    return contacts;
+}
+
+// ============================================
+// 5b. COLUMNAR PDF TABLE PARSER
+// ============================================
+/**
+ * Parses pdftotext -layout output that has columnar table structure.
+ * Detects numbered entries (S/No) with company, email, location columns.
+ * Handles multi-line entries where company/email span multiple rows.
+ */
+function parseColumnarPdfText(text) {
+    // Split on form feeds first to separate pages, then split lines
+    const lines = text.replace(/\f/g, '\n\f\n').split(/\r?\n/);
+    const contacts = [];
+    const processedEmails = new Set();
+
+    // Detect if text looks like a columnar table:
+    // - Has numbered entries (1, 2, 3... at line start)
+    // - Has emails scattered through the text
+    // - Lines have significant whitespace gaps (column separators)
+    const numberedLinePattern = /^\s{0,5}\d{1,3}\s{1,4}[A-Z]/;
+    const numberedLines = lines.filter(l => numberedLinePattern.test(l));
+    const emailLines = lines.filter(l => PATTERNS.email.test(l));
+
+    if (numberedLines.length < 3 || emailLines.length < 3) {
+        return []; // Not a columnar table
+    }
+
+    console.log(`   📊 Columnar parser: ${numberedLines.length} numbered entries, ${emailLines.length} email lines`);
+
+    // Build entry blocks: each numbered line starts a new entry
+    // Collect all lines until the next numbered entry or page break
+    const entries = [];
+    let currentEntry = null;
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        // Page break (\f) ends current entry
+        if (line.includes('\f')) {
+            if (currentEntry) { entries.push(currentEntry); currentEntry = null; }
+            continue;
+        }
+
+        // Skip header lines (before first numbered entry)
+        if (!currentEntry && !numberedLinePattern.test(line)) continue;
+
+        // New numbered entry starts
+        if (numberedLinePattern.test(line)) {
+            if (currentEntry) entries.push(currentEntry);
+            currentEntry = { lines: [line], number: parseInt(line.match(/\d+/)[0], 10) };
+        } else if (currentEntry) {
+            // Double blank line = possible entry boundary
+            if (line.trim() === '') {
+                let nextNonBlank = i + 1;
+                while (nextNonBlank < lines.length && lines[nextNonBlank].trim() === '') nextNonBlank++;
+                if (nextNonBlank < lines.length && (numberedLinePattern.test(lines[nextNonBlank]) || lines[nextNonBlank].includes('\f'))) {
+                    entries.push(currentEntry);
+                    currentEntry = null;
+                } else {
+                    currentEntry.lines.push(line);
+                }
+            } else {
+                currentEntry.lines.push(line);
+            }
+        }
+    }
+    if (currentEntry) entries.push(currentEntry);
+
+    console.log(`   📊 Columnar parser: ${entries.length} entry blocks detected`);
+
+    // Extract company + emails from each entry block
+    for (const entry of entries) {
+        const blockText = entry.lines.join('\n');
+        const blockEmails = blockText.match(PATTERNS.email) || [];
+        if (blockEmails.length === 0) continue;
+
+        // Extract company name from the entry block.
+        // Company name appears in the left column (chars ~5-38), on the numbered line
+        // and possibly the line directly below (for long company names like "ITS Drilling Services Nigeria\nLimited").
+        let companyParts = [];
+        let foundCompanyLine = false;
+        for (const line of entry.lines) {
+            // Numbered line with company name: "   1 Nubian Nigeria Ltd   email@...   Location"
+            const numberedMatch = line.match(/^\s{0,5}\d{1,3}\s{1,4}([A-Z][A-Za-z\s&.,()'-]+?)(?:\s{3,}|$)/);
+            if (numberedMatch) {
+                const candidate = numberedMatch[1].trim();
+                if (candidate.length > 2 && !candidate.includes('@') &&
+                    !/^\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(candidate) &&
+                    !/^(Onshore|Offshore|Water|Hazardous|Tank|Thermal|Waste|Spent|WBM|Inciner|Secondary)/i.test(candidate)) {
+                    companyParts.push(candidate);
+                    foundCompanyLine = true;
+                    continue;
+                }
+            }
+            // Continuation line for company name (indented, no email, no date, appears right after numbered line)
+            if (foundCompanyLine && companyParts.length < 3) {
+                const contMatch = line.match(/^\s{5,10}([A-Z][A-Za-z\s&.,()'-]+?)(?:\s{3,}|$)/);
+                if (contMatch) {
+                    const candidate = contMatch[1].trim();
+                    if (candidate.length > 2 && candidate.length < 40 && !candidate.includes('@') &&
+                        !/^\d{1,2}\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)/i.test(candidate) &&
+                        !/^(Onshore|Offshore|Water|Hazardous|Tank|Thermal|Waste|Spent|WBM|Inciner|Secondary)/i.test(candidate)) {
+                        companyParts.push(candidate);
+                        continue;
+                    }
+                }
+                foundCompanyLine = false; // Stop looking after non-matching line
+            }
+        }
+
+        const companyName = companyParts.join(' ').replace(/\s+/g, ' ').trim();
+
+        // Extract location from the block
+        let location = '';
+        const locationMatch = blockText.match(/(?:Rivers|Lagos|Abuja|Delta|Bayelsa|Edo|Imo|Abia|Akwa\s*Ibom|Cross\s*River|Ondo|Ogun|Oyo|Kaduna|Kano|Enugu|Anambra)\s*State/i);
+        if (locationMatch) {
+            location = locationMatch[0].trim();
+        }
+
+        // Create contact for each unique email
+        for (const email of blockEmails) {
+            const emailLower = email.toLowerCase();
+            if (processedEmails.has(emailLower)) continue;
+            if (PATTERNS.emailBlacklist.some(bl => emailLower.includes(bl))) continue;
+            processedEmails.add(emailLower);
+
+            contacts.push({
+                email: emailLower,
+                company: companyName || null,
+                name: null,
+                phone: extractPhoneFromText(blockText),
+                country: detectCountry(blockText),
+                city: location || null,
+                website: extractWebsite(blockText, emailLower),
+                title: null,
+                address: null,
+            });
+        }
+    }
+
+    console.log(`   📊 Columnar parser found ${contacts.length} contacts`);
     return contacts;
 }
 
@@ -965,6 +1115,18 @@ async function processFile(buffer, filename) {
             c.source_type = 'file_mining';
         }
         contacts = contacts.concat(pdfTableContacts);
+    }
+
+    // Method 0b: Columnar PDF table parser (pdftotext -layout output)
+    if (ext === '.pdf' && text.length > 0) {
+        const columnarContacts = parseColumnarPdfText(text);
+        if (columnarContacts.length > 0) {
+            for (const c of columnarContacts) {
+                c.confidence = calculateConfidence(c);
+                c.source_type = 'file_mining';
+            }
+            contacts = contacts.concat(columnarContacts);
+        }
     }
 
     // Method 1: Excel structured mining
