@@ -85,6 +85,8 @@ See [LIFFY_TODO.md](./LIFFY_TODO.md) for full task tracking.
 - ~~**Campaign analytics Sent=0**~~ — FIXED: worker.js was not recording `sent` events to `campaign_events`. Added `recordSentEvent()` to worker + hybrid sent count fallback in analytics endpoint. (commits: 0ad776a, 9c29d73)
 - ~~**PDF mining 0 results from UI jobs**~~ — FIXED: documentMiner returned `pdfContacts` but execution plan path in flowOrchestrator overwrote them by calling `documentTextNormalizer.normalize()`. All 3 execution plan normalizer paths now check for existing contacts before applying text normalizer. (commit: 82fb4ea)
 
+- ~~**List detail page crash — "Application error: a client-side exception has occurred"**~~ — FIXED: Export feature commit (72d175f) placed `useState(false)` for `exporting` state and `handleExportAll` handler AFTER conditional early returns (loading/error guards), violating React's Rules of Hooks. Moved `useState(exporting)` to top-level state declarations and `handleExportAll` to handlers section, both before any early returns.
+
 ### Open
 - `/api/stats` 401 Unauthorized still repeating in console — sidebar polls every 30s, auth header was added but issue persists
 - ZeroBounce account not yet configured — settings UI untested against live API

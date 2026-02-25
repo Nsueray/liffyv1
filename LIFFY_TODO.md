@@ -53,6 +53,7 @@
 | C4 | Campaign analytics Sent=0 — worker not recording sent events to campaign_events | P1 | ✅ DONE |
 | C5 | Import-all deadlock cascade — PG transaction aborted state causes batch-wide failure | P1 | ✅ DONE |
 | C6 | Import-all background crash silent failure — setImmediate + async .catch() + import_status='failed' update | P1 | ✅ DONE |
+| C7 | List detail page crash — useState after early return violating React Rules of Hooks (export feature 72d175f) | P1 | ✅ DONE |
 
 ## D. TECHNICAL DEBT
 
