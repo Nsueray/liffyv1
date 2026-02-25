@@ -118,7 +118,7 @@ Upload → worker picks up pending job → miningService.processMiningJob()
 - `backend/services/miners/structuredMiner.js` — label:value text parsing
 - `backend/services/miners/unstructuredMiner.js` — regex around emails
 - `backend/services/validators/deduplicator.js` — merge + score
-- `backend/services/fileMiner.js` — LEGACY (only used by documentMiner for PDF delegation)
+- `backend/services/fileMiner.js` — Used by documentMiner for PDF delegation (pdfplumber tables + columnar text parser + email-centric extraction)
 
 **Header detection** (`excelExtractor.detectHeaders()`):
 - Scans first 5 rows for header keywords (multi-language: EN, TR, FR, DE, ES, IT, NL, PT, AR, RU, ZH, JA, KO)
@@ -598,6 +598,74 @@ Event variable derived from subdomain (e.g. `techtextil.messefrankfurt.com` → 
 | `total_timeout` | `480000` | Total timeout (8 minutes) |
 
 **Performance:** ~60 exhibitors in 25 seconds (2 pages), ~88% with email from API alone.
+
+---
+
+## PDF Table Extraction Pipeline (documentMiner + fileMiner)
+
+PDF mining uses a multi-method extraction cascade for tabular PDFs (exhibitor lists, waste management providers, etc.):
+
+```
+documentMiner.mine(url)
+  → detect .pdf URL → download as binary
+  → fileMiner.processFile(buffer, 'download.pdf')
+    → Method 0: pdfplumber (Python) — table detection + structured extraction
+    → Method 0b: pdftotext -layout → columnar text parser (parseColumnarPdfText)
+    → Method 1: pdftotext / mutool / pdf-parse — raw text extraction
+    → Method 2: email-centric extraction (regex around emails)
+    → mergeContacts() — dedup by email, pick best fields
+  → result.pdfContacts → flowOrchestrator (bypasses documentTextNormalizer)
+  → aggregator → mining_results → persons + affiliations
+```
+
+**Key components:**
+
+| Component | File | Role |
+|-----------|------|------|
+| `pdfTableExtractor.py` | `backend/services/extractors/pdfTableExtractor.py` | Python pdfplumber script — detects tables, extracts headers + rows |
+| `tryPdfPlumber()` | `backend/services/fileMiner.js` | Calls Python script, parses JSON output |
+| `extractContactsFromTables()` | `backend/services/fileMiner.js` | Maps table headers to contact fields (email, company, phone, etc.) |
+| `parseColumnarPdfText()` | `backend/services/fileMiner.js` | Parses pdftotext `-layout` output with numbered entries (S/No), column detection |
+| `extractFromPdf()` | `backend/services/urlMiners/documentMiner.js` | Downloads PDF, delegates to fileMiner.processFile() |
+
+**pdfContacts pipeline bypass:**
+When documentMiner returns `pdfContacts` (pre-extracted contacts from fileMiner), the flowOrchestrator skips `documentTextNormalizer.normalize()` and uses the contacts directly. This bypass is applied in all 4 code paths:
+1. Inline adapter (loadMiners documentMiner wrapper)
+2. Paginated execution plan path
+3. Enrichment miners path
+4. Non-paginated step execution path
+
+**TLD validation:** Emails from pdfplumber are validated against a TLD allowlist (`com`, `org`, `net`, `gov`, `edu`, `ng`, `uk`, etc.) to filter garbled/reversed emails from rotated PDF pages.
+
+**Dockerfile dependencies:**
+```dockerfile
+python3, python3-pip  # System packages
+pdfplumber            # pip install
+poppler-utils         # pdftotext
+mupdf-tools           # mutool
+```
+
+**Test case:** NUPRC Waste Management PDF → 50 contacts, 41 with company names (82%), completed in 1.9s.
+
+---
+
+## Unsubscribe Tracking
+
+Backend endpoint + frontend page for viewing unsubscribe history.
+
+**Backend:** `GET /api/unsubscribes` (`backend/routes/unsubscribes.js`)
+- Auth-protected with pagination (`page`, `limit`), search (email ILIKE), source filter
+- LATERAL join to `campaign_events` + `campaign_recipients` for campaign attribution
+- Uses `COALESCE(u.source, u.reason, 'unknown')` for source field
+- Returns `{ unsubscribes, pagination, stats: { total, by_source } }`
+- Registered in `server.js` as `app.use('/api/unsubscribes', unsubscribesRouter)`
+
+**Frontend:** `/campaigns/unsubscribes` (`liffy-ui/app/campaigns/unsubscribes/page.tsx`)
+- 4 summary cards: Total, Unsubscribe Link, Spam Reports, User Requests
+- Search input + source filter dropdown
+- Table: Email, Source (color-coded badge), Campaign (linked), Date
+- Source badges: sendgrid_unsubscribe=gray, spam_report=red, user_request=blue
+- Nav link added to campaigns page header (next to "Create Campaign")
 
 ---
 

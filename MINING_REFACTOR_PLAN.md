@@ -318,6 +318,14 @@ Not blocking. Can be done anytime after engine refactor is stable.
 - `normalizeMinerOutput()` → `aggregationTrigger.process()` → persons + affiliations UPSERT
 - Best-effort: aggregation failure never breaks the response
 
+**PDF Table Extraction + Execution Plan pdfContacts Fix** (commits: multiple):
+- `fileMiner.js`: Added `tryPdfPlumber()` (Python pdfplumber), `extractContactsFromTables()`, `parseColumnarPdfText()` (columnar text parser)
+- `documentMiner.js`: Changed from `extractTextFromPDF()` to `fileMiner.processFile()` — returns `pdfContacts` for pre-extracted contacts
+- `flowOrchestrator.js`: All 4 documentTextNormalizer paths (inline adapter + 3 execution plan paths) now check for `pdfContacts` before falling back to text normalizer
+- `pdfTableExtractor.py`: New Python script for pdfplumber table detection
+- `Dockerfile`: Added python3 + pdfplumber
+- Root cause of UI job failure: execution plan path called `documentTextNormalizer.normalize()` AFTER the inline adapter already extracted pdfContacts, overwriting contacts with 0 results
+
 **Free Mode aiMiner Exclusion** (commit 2a7ecd2):
 - `executionPlanBuilder.js`: aiMiner removed from all `'full'`/`'free'` mode branches
 - `flowOrchestrator.js`: `fullMiner` composite no longer runs aiMiner internally
@@ -342,8 +350,8 @@ miningService.js (thin router, ~200 lines)
                │    ├─ loadMiners() registry:
                │    │   ├─ playwrightTableMiner
                │    │   ├─ aiMiner
-               │    │   ├─ documentMiner
-               │    │   ├─ directoryMiner (NEW)
+               │    │   ├─ documentMiner (PDF: pdfContacts bypass)
+               │    │   ├─ directoryMiner
                │    │   ├─ httpBasicMiner
                │    │   └─ (future miners...)
                │    ├─ Pagination (paginationHandler)

@@ -47,6 +47,7 @@
 - **Templates Page Action Buttons Fix** — Preview/Edit/Delete buttons invisible due to `overflow-hidden` on table container + `whitespace-nowrap` on Subject column. Changed to `overflow-x-auto`, Subject gets `max-w-xs truncate`. (commit: f50b8ed in liffy-ui)
 - **Favicon + Browser Tab Title** — Resized 1024x1024 logo to 32x32 (favicon) + 180x180 (Apple touch icon), served from `public/`. CDN logo was 1.3MB + wrong path (404). Title "Liffy UI" → "Liffy". (commits: 7359a4c, dbafe9d in liffy-ui)
 - **Contacts Page Search/Filter Bug** — Page showed "0 total contacts" despite 3,379 in stats. Two fixes: (1) Backend `exclude_invalid` SQL filter used `NOT IN ('invalid','risky')` which silently excludes NULL rows (NULL NOT IN (...) = NULL = false). Added `IS NULL OR` clause. Stats unverified count also now includes NULL. (2) Frontend switched from Next.js rewrite proxy to direct API URL (`api.liffy.app`) matching campaigns page pattern. Added null-safe response parsing + better error messages. (commits: c156e3f backend, 41f14d2 liffy-ui)
+- **Unsubscribes Page** — Dedicated `/campaigns/unsubscribes` page showing who unsubscribed, when, from which campaign, and how. 4 summary cards (Total, Unsubscribe Link, Spam Reports, User Requests), search + source filter, table with color-coded source badges, campaign attribution links, pagination. Backend `GET /api/unsubscribes` endpoint with LATERAL join for campaign attribution. Nav link added to campaigns page header.
 
 ---
 
@@ -81,6 +82,7 @@ See [LIFFY_TODO.md](./LIFFY_TODO.md) for full task tracking.
 
 - ~~**Template editor HTML escaping**~~ — FIXED: pasted raw HTML was escaped by contentEditable (`<table>` → `&lt;table&gt;`). Added Visual/HTML mode toggle — HTML mode uses plain textarea. (commit: 499457a in liffy-ui)
 - ~~**Campaign analytics Sent=0**~~ — FIXED: worker.js was not recording `sent` events to `campaign_events`. Added `recordSentEvent()` to worker + hybrid sent count fallback in analytics endpoint. (commits: 0ad776a, 9c29d73)
+- ~~**PDF mining 0 results from UI jobs**~~ — FIXED: documentMiner returned `pdfContacts` but execution plan path in flowOrchestrator overwrote them by calling `documentTextNormalizer.normalize()`. All 3 execution plan normalizer paths now check for existing contacts before applying text normalizer. (commit: 82fb4ea)
 
 ### Open
 - `/api/stats` 401 Unauthorized still repeating in console — sidebar polls every 30s, auth header was added but issue persists

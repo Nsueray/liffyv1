@@ -390,7 +390,7 @@ triggerCanonicalAggregation():
 |-------|------|-----------|--------|
 | `playwrightTableMiner` | Playwright | Table/list extraction from structured HTML | ACTIVE |
 | `aiMiner` | Claude AI | Intelligent extraction using AI analysis | ACTIVE |
-| `documentMiner` | HTTP + PDF | Flipbook/PDF/document parsing | ACTIVE |
+| `documentMiner` | HTTP + PDF | Flipbook/PDF/document parsing (pdfplumber table extraction + columnar text parser) | ACTIVE |
 | `directoryMiner` | Playwright | Business directories (card-based layouts, Yellow Pages, etc.) | ACTIVE |
 | `messeFrankfurtMiner` | Playwright + API | Messe Frankfurt exhibition exhibitor catalogs (Techtextil, Automechanika, Heimtextil, ISH, etc.) | ACTIVE |
 | `memberTableMiner` | Playwright | HTML table member/exhibitor lists (associations, chambers, federations) | ACTIVE |
@@ -400,6 +400,20 @@ triggerCanonicalAggregation():
 | `fullMiner` | Composite | Runs playwrightTableMiner only (aiMiner removed from free mode) | ACTIVE |
 | `playwrightMiner` | Playwright | General Playwright crawl (alias for fullMiner) | ACTIVE (alias) |
 | `playwrightDetailMiner` | Playwright | Detail page enrichment (alias for fullMiner) | ACTIVE (alias) |
+
+**documentMiner details:**
+- Two extraction paths: (1) HTML-based (flipbook platforms — SEO text layer, JSON text API, embedded text), (2) PDF direct (downloads binary, delegates to fileMiner)
+- PDF delegation uses `fileMiner.processFile()` — returns pre-extracted contacts (`pdfContacts`) that bypass `documentTextNormalizer`
+- PDF extraction cascade: pdfplumber (Python tables) → pdftotext -layout (columnar text parser) → email-centric regex extraction → mergeContacts()
+- `pdfTableExtractor.py` — Python script using pdfplumber for structured table detection (headers + rows)
+- `parseColumnarPdfText()` — parses pdftotext `-layout` output with numbered entries (S/No pattern), detects column boundaries, extracts company/email/phone per entry block
+- TLD validation filters garbled emails from rotated/transposed PDF pages
+- Does NOT handle its own pagination (ownPagination: false)
+- Does NOT manage browser lifecycle — uses HTTP `axios.get()` (no Playwright)
+- flowOrchestrator bypass: when `pdfContacts` present, all 4 normalizer paths (inline adapter, paginated, enrichment, non-paginated step) skip `documentTextNormalizer.normalize()` and use contacts directly
+- Detects: document viewer platforms (FlipHTML5, Issuu, AnyFlip, Publuu) via SEO text patterns + JSON API indicators, or direct `.pdf` URL path
+- Config: uses `CONFIG.TIMEOUT` (30s), `CONFIG.MIN_TEXT_LENGTH` (300 chars)
+- Test case: NUPRC Waste Management PDF → 50 contacts, 41 with company names (82%)
 
 **directoryMiner details:**
 - Two-phase pipeline: (1) list page crawl with pagination, (2) detail page visits for enrichment

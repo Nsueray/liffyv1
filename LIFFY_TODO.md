@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-02-25*
+*Updated: 2026-02-26*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -22,14 +22,14 @@
 | A12 | spaNetworkMiner v1 complete — token capture, fast path, 257/259 coverage | P1 | ✅ DONE |
 | A13 | Generic SPA detection in pageAnalyzer — hostname bağımlılığını kaldır | P1 | ✅ DONE |
 | A14 | PDF URL routing — .pdf URL'leri documentMiner'a yönlendir | P1 | ✅ DONE |
-| A15 | PDF mining — documentMiner'da PDF text extraction (pdfjs/pdf-parse) | P2 | TODO |
+| A15 | PDF mining — pdfplumber table extraction + columnar text parser + fileMiner.processFile integration | P1 | ✅ DONE |
 | A16 | Cloudflare partial block — site yükleniyor ama data eksik (AFMT India pattern) | P2 | TODO |
 | A17 | Stuck job cleanup on startup | P1 | ✅ DONE |
 | A18 | Flow 2 OOM protection — contact count + enrichment rate rules (skip/limit Flow 2) | P1 | ✅ DONE |
 | A19 | Enrich Remaining button — POST /api/mining/jobs/:id/enrich + UI button | P1 | ✅ DONE |
 | A20 | NaN enrichment guard — shouldTriggerFlow2 undefined/NaN default to 100% (safe skip) | P1 | ✅ DONE |
 | A21 | Redis truncate limit kaldır (Starter plan upgrade) | P1 | ✅ DONE |
-| A22 | PDF name/company extraction — documentTextNormalizer structured text parsing | P2 | TODO |
+| A22 | PDF name/company extraction — pdfContacts bypass in execution plan path (all 3 normalizer calls fixed) | P1 | ✅ DONE |
 | A23 | Node.js heap limit (NODE_OPTIONS env var) | P1 | TODO (manual Render config) |
 | A24 | Excel mining quality — column mapping improvement | P2 | TODO |
 | A25 | flipbookMiner v2 — dual-path extraction (column-position + isolateSegment for pre/code layouts) | P1 | ✅ DONE |
