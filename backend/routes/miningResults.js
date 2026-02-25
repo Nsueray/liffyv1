@@ -7,6 +7,7 @@ const { validateContacts } = require('../services/validators/resultValidator');
 const { deduplicate } = require('../services/validators/deduplicator');
 const { normalizeMinerOutput } = require('../services/normalizer');
 const aggregationTrigger = require('../services/aggregationTrigger');
+const { generateExport } = require('../utils/exportHelper');
 
 const router = express.Router();
 
@@ -1076,6 +1077,87 @@ router.delete('/api/mining/results/:id', authRequired, validateResultId, async (
   } catch (err) {
     console.error("DELETE /mining/results/:id error:", err);
     return res.status(500).json({ error: "Failed to delete result" });
+  }
+});
+
+// GET /api/mining/jobs/:id/results/export — Export all results as XLSX or CSV
+router.get('/api/mining/jobs/:id/results/export', authRequired, validateJobId, async (req, res) => {
+  try {
+    const jobId = req.params.id;
+    const organizerId = req.auth.organizer_id;
+    const format = (req.query.format || 'xlsx').toLowerCase();
+
+    if (!['xlsx', 'csv'].includes(format)) {
+      return res.status(400).json({ error: 'Invalid format. Use xlsx or csv.' });
+    }
+
+    // Verify job ownership
+    const jobRes = await db.query(
+      `SELECT id, target_url FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      [jobId, organizerId]
+    );
+    if (jobRes.rowCount === 0) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    const resultsRes = await db.query(
+      `SELECT
+        mr.emails,
+        mr.company_name,
+        mr.contact_name,
+        mr.job_title,
+        mr.phone,
+        mr.website,
+        mr.country,
+        mr.city,
+        mr.address,
+        mr.confidence_score,
+        mr.verification_status,
+        mr.status,
+        mr.created_at
+      FROM mining_results mr
+      JOIN mining_jobs mj ON mj.id = mr.job_id
+      WHERE mj.organizer_id = $1 AND mr.job_id = $2
+      ORDER BY mr.created_at DESC`,
+      [organizerId, jobId]
+    );
+
+    // Flatten emails array to first email
+    const rows = resultsRes.rows.map(r => ({
+      ...r,
+      email: Array.isArray(r.emails) && r.emails.length > 0 ? r.emails[0] : '',
+      confidence_score: r.confidence_score != null ? Math.round(r.confidence_score) + '%' : '',
+      created_at: r.created_at ? new Date(r.created_at).toISOString().split('T')[0] : ''
+    }));
+
+    const columns = [
+      { header: 'Email', key: 'email', width: 30 },
+      { header: 'Company', key: 'company_name', width: 25 },
+      { header: 'Contact Name', key: 'contact_name', width: 22 },
+      { header: 'Job Title', key: 'job_title', width: 22 },
+      { header: 'Phone', key: 'phone', width: 18 },
+      { header: 'Website', key: 'website', width: 25 },
+      { header: 'Country', key: 'country', width: 15 },
+      { header: 'City', key: 'city', width: 15 },
+      { header: 'Address', key: 'address', width: 30 },
+      { header: 'Confidence', key: 'confidence_score', width: 12 },
+      { header: 'Verification', key: 'verification_status', width: 14 },
+      { header: 'Status', key: 'status', width: 12 },
+      { header: 'Found At', key: 'created_at', width: 14 }
+    ];
+
+    const buffer = await generateExport(rows, columns, 'Mining Results', format);
+    const ext = format === 'csv' ? 'csv' : 'xlsx';
+    const contentType = format === 'csv'
+      ? 'text/csv'
+      : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="mining-results-${jobId}.${ext}"`);
+    return res.send(buffer);
+  } catch (err) {
+    console.error('GET /mining/jobs/:id/results/export error:', err);
+    return res.status(500).json({ error: 'Export failed' });
   }
 });
 

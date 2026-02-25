@@ -6,6 +6,8 @@ const multer = require('multer');
 const csvParser = require('csv-parser');
 const { Readable } = require('stream');
 
+const { generateExport } = require('../utils/exportHelper');
+
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
 function authRequired(req, res, next) {
@@ -922,6 +924,115 @@ router.post('/', authRequired, async (req, res) => {
   } catch (err) {
     console.error('POST /api/lists error:', err);
     res.status(500).json({ error: err.message || 'Failed to create list' });
+  }
+});
+
+// GET /api/lists/:id/export — Export list members as XLSX or CSV
+router.get('/:id/export', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const listId = req.params.id;
+    const format = (req.query.format || 'xlsx').toLowerCase();
+
+    if (!['xlsx', 'csv'].includes(format)) {
+      return res.status(400).json({ error: 'Invalid format. Use xlsx or csv.' });
+    }
+
+    // Verify list ownership
+    const listRes = await db.query(
+      'SELECT id, name FROM lists WHERE id = $1 AND organizer_id = $2',
+      [listId, organizerId]
+    );
+    if (listRes.rows.length === 0) {
+      return res.status(404).json({ error: 'List not found' });
+    }
+
+    const listName = listRes.rows[0].name;
+
+    const membersRes = await db.query(
+      `SELECT
+        p.email,
+        COALESCE(
+          NULLIF(TRIM(CONCAT(COALESCE(pn.first_name, ''), ' ', COALESCE(pn.last_name, ''))), ''),
+          p.name
+        ) AS name,
+        p.company,
+        p.country,
+        COALESCE(pn.verification_status, p.verification_status, 'unknown') AS verification_status,
+        p.source_type,
+        p.tags,
+        p.created_at,
+        pn.first_name,
+        pn.last_name,
+        (SELECT a.company_name FROM affiliations a WHERE a.person_id = pn.id AND a.organizer_id = $2 AND (a.company_name IS NULL OR a.company_name NOT LIKE '%@%') ORDER BY a.created_at DESC LIMIT 1) AS affiliation_company,
+        (SELECT a.position FROM affiliations a WHERE a.person_id = pn.id AND a.organizer_id = $2 ORDER BY a.created_at DESC LIMIT 1) AS job_title,
+        (SELECT a.phone FROM affiliations a WHERE a.person_id = pn.id AND a.organizer_id = $2 ORDER BY a.created_at DESC LIMIT 1) AS phone,
+        (SELECT a.website FROM affiliations a WHERE a.person_id = pn.id AND a.organizer_id = $2 ORDER BY a.created_at DESC LIMIT 1) AS website,
+        EXISTS (SELECT 1 FROM campaign_events ce JOIN campaign_recipients cr ON cr.id = ce.recipient_id WHERE cr.email = p.email AND cr.organizer_id = $2 AND ce.event_type = 'open') AS has_opened,
+        EXISTS (SELECT 1 FROM campaign_events ce JOIN campaign_recipients cr ON cr.id = ce.recipient_id WHERE cr.email = p.email AND cr.organizer_id = $2 AND ce.event_type = 'click') AS has_clicked,
+        EXISTS (SELECT 1 FROM campaign_events ce JOIN campaign_recipients cr ON cr.id = ce.recipient_id WHERE cr.email = p.email AND cr.organizer_id = $2 AND ce.event_type = 'reply') AS has_replied,
+        EXISTS (SELECT 1 FROM campaign_events ce JOIN campaign_recipients cr ON cr.id = ce.recipient_id WHERE cr.email = p.email AND cr.organizer_id = $2 AND ce.event_type = 'bounce') AS has_bounced
+      FROM list_members lm
+      JOIN prospects p ON p.id = lm.prospect_id
+      LEFT JOIN persons pn ON pn.organizer_id = $2 AND LOWER(pn.email) = LOWER(p.email)
+      WHERE lm.list_id = $1
+      ORDER BY p.created_at DESC`,
+      [listId, organizerId]
+    );
+
+    const rows = membersRes.rows.map(r => ({
+      email: r.email,
+      first_name: r.first_name || '',
+      last_name: r.last_name || '',
+      name: r.name || '',
+      company: r.affiliation_company || r.company || '',
+      job_title: r.job_title || '',
+      phone: r.phone || '',
+      website: r.website || '',
+      country: r.country || '',
+      verification_status: r.verification_status || 'unknown',
+      source_type: r.source_type || '',
+      tags: Array.isArray(r.tags) ? r.tags.join(', ') : (r.tags || ''),
+      has_opened: r.has_opened ? 'Yes' : 'No',
+      has_clicked: r.has_clicked ? 'Yes' : 'No',
+      has_replied: r.has_replied ? 'Yes' : 'No',
+      has_bounced: r.has_bounced ? 'Yes' : 'No',
+      created_at: r.created_at ? new Date(r.created_at).toISOString().split('T')[0] : ''
+    }));
+
+    const columns = [
+      { header: 'Email', key: 'email', width: 30 },
+      { header: 'First Name', key: 'first_name', width: 16 },
+      { header: 'Last Name', key: 'last_name', width: 16 },
+      { header: 'Display Name', key: 'name', width: 22 },
+      { header: 'Company', key: 'company', width: 25 },
+      { header: 'Job Title', key: 'job_title', width: 22 },
+      { header: 'Phone', key: 'phone', width: 18 },
+      { header: 'Website', key: 'website', width: 25 },
+      { header: 'Country', key: 'country', width: 12 },
+      { header: 'Verification', key: 'verification_status', width: 14 },
+      { header: 'Source', key: 'source_type', width: 14 },
+      { header: 'Tags', key: 'tags', width: 20 },
+      { header: 'Opened', key: 'has_opened', width: 10 },
+      { header: 'Clicked', key: 'has_clicked', width: 10 },
+      { header: 'Replied', key: 'has_replied', width: 10 },
+      { header: 'Bounced', key: 'has_bounced', width: 10 },
+      { header: 'Added', key: 'created_at', width: 14 }
+    ];
+
+    const safeName = listName.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50);
+    const buffer = await generateExport(rows, columns, listName, format);
+    const ext = format === 'csv' ? 'csv' : 'xlsx';
+    const contentType = format === 'csv'
+      ? 'text/csv'
+      : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="list-${safeName}.${ext}"`);
+    return res.send(buffer);
+  } catch (err) {
+    console.error('GET /api/lists/:id/export error:', err);
+    return res.status(500).json({ error: 'Export failed' });
   }
 });
 
