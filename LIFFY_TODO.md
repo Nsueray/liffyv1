@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-02-26*
+*Updated: 2026-02-27*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -41,6 +41,7 @@
 | B1 | Zoho CRM Push UI — push button, module select, push history | P3 | TODO |
 | B2 | Frontend import-all polling — progress bar | P2 | TODO |
 | B3 | Mining console page — log writing + /logs endpoint | P3 | FUTURE |
+| B4 | Excel/CSV Export — mining results, contacts, list members (exceljs + exportHelper.js) (commits: 1e6f06d, 72d175f) | P1 | ✅ DONE |
 
 ## C. KNOWN ISSUES
 
@@ -128,3 +129,4 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | H2 | New Mining Job formunda Free mode default olsun (şu an AI mode default) | P1 | ✅ DONE |
 | H3 | Campaign scheduling — gün ve saat seçerek otomatik gönderim | P2 | TODO |
 | H4 | Mining Jobs Strategy kolonu — miner_used, mining_mode, flow2_status detaylı gösterim | P1 | ✅ DONE |
+| H5 | Excel/CSV Export buttons — mining results, contacts, list detail pages (commit: 72d175f liffy-ui) | P1 | ✅ DONE |

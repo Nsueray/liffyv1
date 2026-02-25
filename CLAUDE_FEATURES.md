@@ -418,6 +418,7 @@ Frontend-facing canonical persons + affiliations endpoints. Replaces legacy `pro
 |----------|--------|-------------|
 | `/api/persons` | GET | List persons with pagination, search, filter (`verification_status`, `country`, `company`, `has_intent`). Supports `exclude_invalid` filter value (NOT IN 'invalid','risky'). Returns latest affiliation per person. |
 | `/api/persons/stats` | GET | Dashboard counts: total, verified, invalid, unverified, with_intent |
+| `/api/persons/export` | GET | Export all contacts as XLSX or CSV. 21 columns including engagement stats. Supports same filters as listing. Query: `?format=xlsx\|csv&search=&verification_status=&country=&company=&has_intent=` |
 | `/api/persons/:id` | GET | Full person detail with all affiliations, intents, engagement summary, Zoho pushes |
 | `/api/persons/:id/affiliations` | GET | Person's affiliation list |
 | `/api/persons/:id` | DELETE | Delete person + affiliations + push logs |
@@ -666,6 +667,38 @@ Backend endpoint + frontend page for viewing unsubscribe history.
 - Table: Email, Source (color-coded badge), Campaign (linked), Date
 - Source badges: sendgrid_unsubscribe=gray, spam_report=red, user_request=blue
 - Nav link added to campaigns page header (next to "Create Campaign")
+
+---
+
+## Excel/CSV Export (`backend/utils/exportHelper.js`)
+
+Server-side data export using `exceljs` library. Shared utility generates both XLSX and CSV formats.
+
+**Utility:** `generateExport(rows, columns, sheetName, format)` — XLSX features: bold white headers on blue fill, auto-filter. CSV: proper escaping (quotes, commas, newlines). Arrays auto-converted to comma-separated strings.
+
+| Endpoint | Method | Columns | Description |
+|----------|--------|---------|-------------|
+| `/api/mining/jobs/:id/results/export` | GET | 13 | Email, Company, Contact Name, Job Title, Phone, Website, Country, City, Address, Confidence, Verification, Status, Found At |
+| `/api/persons/export` | GET | 21 | Email, First/Last Name, Company, Job Title, Phone, Website, Country, City, Verification, Verified At, Added, Campaigns Sent, Opens, Clicks, Replies, Bounces, Last Campaign, Is Prospect, Latest Intent, Lists |
+| `/api/lists/:id/export` | GET | 17 | Email, First/Last Name, Display Name, Company, Job Title, Phone, Website, Country, Verification, Source, Tags, Opened, Clicked, Replied, Bounced, Added |
+
+All endpoints:
+- Query param: `?format=xlsx` (default) or `?format=csv`
+- Auth-protected with `organizer_id` filtering
+- Stream binary buffer with `Content-Disposition: attachment` header
+- No pagination/LIMIT — exports full dataset
+- Persons export supports same filters as listing endpoint (search, verification_status, country, company, has_intent)
+
+**Frontend:** "Export All (N)" buttons on mining results page, contacts page, and list detail page. Download via `fetch → blob → URL.createObjectURL → anchor click`. Loading state shown during export.
+
+**Files:**
+- `backend/utils/exportHelper.js` — shared `generateExport()` + `generateCSV()` utility
+- `backend/routes/miningResults.js` — mining results export endpoint
+- `backend/routes/persons.js` — contacts export endpoint (registered BEFORE `/:id` to avoid param collision)
+- `backend/routes/lists.js` — list members export endpoint
+- `liffy-ui/app/mining/jobs/[id]/results/page.tsx` — export button (replaces old client-side CSV)
+- `liffy-ui/app/leads/page.tsx` — export button
+- `liffy-ui/app/lists/[id]/page.tsx` — export button
 
 ---
 
