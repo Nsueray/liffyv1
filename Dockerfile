@@ -13,8 +13,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-freefont-ttf \
     fonts-liberation \
     fontconfig \
+    python3 \
+    python3-pip \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
+
+# --- PYTHON PDF TABLE EXTRACTION ---
+RUN pip install --break-system-packages pdfplumber
 
 COPY package.json package-lock.json ./
 RUN npm ci

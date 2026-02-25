@@ -143,31 +143,166 @@ function ensureBuffer(input) {
 }
 
 // ============================================
-// 2. TEXT EXTRACTION - PDF
+// 2a. PDF TABLE EXTRACTION (pdfplumber)
+// ============================================
+async function tryPdfPlumber(tempPath) {
+    try {
+        const scriptPath = path.join(__dirname, 'extractors', 'pdfTableExtractor.py');
+        console.log("   [0/4] Trying pdfplumber table extraction...");
+        const { stdout } = await execPromise(
+            `python3 "${scriptPath}" "${tempPath}"`,
+            { timeout: 30000, maxBuffer: CONFIG.MAX_BUFFER }
+        );
+        const parsed = JSON.parse(stdout);
+        if (parsed.error) {
+            console.log(`   ⚠️ pdfplumber error: ${parsed.error}`);
+            return null;
+        }
+        if (parsed.has_tables && parsed.tables.length > 0) {
+            const totalRows = parsed.tables.reduce((sum, t) => sum + t.rows.length, 0);
+            console.log(`   ✅ pdfplumber found ${parsed.tables.length} table(s), ${totalRows} data rows`);
+            return parsed;
+        }
+        console.log("   ⚠️ pdfplumber: No tables detected");
+        return null;
+    } catch (err) {
+        console.log(`   ⚠️ pdfplumber failed: ${err.message.slice(0, 100)}`);
+        return null;
+    }
+}
+
+function extractContactsFromTables(tableData) {
+    const contacts = [];
+    const processedEmails = new Set();
+
+    for (const table of tableData.tables) {
+        const headers = table.headers.map(h => (h || '').toLowerCase().trim());
+
+        // Column mapping from headers
+        const colMap = {};
+        headers.forEach((h, i) => {
+            if (/email|e-mail|mail/i.test(h)) colMap.email = i;
+            else if (/company|firm|organi[sz]ation|name/i.test(h) && !/email|contact/i.test(h)) colMap.company = i;
+            else if (/location|state|address|city/i.test(h)) colMap.location = i;
+            else if (/phone|tel|mobile/i.test(h)) colMap.phone = i;
+            else if (/service|sector|category/i.test(h)) colMap.services = i;
+            else if (/s\/no|no\.|#|serial/i.test(h)) colMap.sno = i;
+            else if (/website|url|web/i.test(h)) colMap.website = i;
+            else if (/contact.*name|person|representative/i.test(h)) colMap.contact_name = i;
+            else if (/title|position|role/i.test(h)) colMap.job_title = i;
+        });
+
+        // If no email column detected by header, find by content
+        if (colMap.email === undefined) {
+            for (let i = 0; i < headers.length; i++) {
+                const hasEmail = table.rows.some(row => row[i] && row[i].includes('@'));
+                if (hasEmail) { colMap.email = i; break; }
+            }
+        }
+
+        // If no company column, find first non-email text column
+        if (colMap.company === undefined && colMap.email !== undefined) {
+            for (let i = 0; i < headers.length; i++) {
+                if (i === colMap.email || i === colMap.sno) continue;
+                const hasText = table.rows.some(row => row[i] && row[i].length > 3 && !row[i].includes('@'));
+                if (hasText) { colMap.company = i; break; }
+            }
+        }
+
+        // Extract contacts — track current company for multi-row entries
+        let currentCompany = '';
+        let currentLocation = '';
+
+        for (const row of table.rows) {
+            const rowCompany = colMap.company !== undefined ? (row[colMap.company] || '').trim() : '';
+            const rowLocation = colMap.location !== undefined ? (row[colMap.location] || '').trim() : '';
+
+            if (rowCompany && rowCompany.length > 1 && !/^\d+$/.test(rowCompany)) {
+                currentCompany = rowCompany;
+            }
+            if (rowLocation) {
+                currentLocation = rowLocation;
+            }
+
+            // Find emails in email column or anywhere in row
+            let emails = [];
+            if (colMap.email !== undefined && row[colMap.email]) {
+                const cellEmails = row[colMap.email].match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+                if (cellEmails) emails.push(...cellEmails);
+            }
+            if (emails.length === 0) {
+                for (const cell of row) {
+                    if (!cell) continue;
+                    const found = cell.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g);
+                    if (found) emails.push(...found);
+                }
+            }
+
+            for (const email of emails) {
+                const emailLower = email.toLowerCase();
+                if (processedEmails.has(emailLower)) continue;
+                if (/^(noreply|no-reply|mailer-daemon|postmaster|hostmaster|abuse|webmaster|test)@/i.test(email)) continue;
+                if (PATTERNS.emailBlacklist.some(bl => emailLower.includes(bl))) continue;
+                processedEmails.add(emailLower);
+
+                contacts.push({
+                    email: emailLower,
+                    company: currentCompany || null,
+                    name: colMap.contact_name !== undefined ? (row[colMap.contact_name] || '').trim() || null : null,
+                    title: colMap.job_title !== undefined ? (row[colMap.job_title] || '').trim() || null : null,
+                    phone: colMap.phone !== undefined ? (row[colMap.phone] || '').trim() || null : null,
+                    website: colMap.website !== undefined ? (row[colMap.website] || '').trim() || null : null,
+                    city: currentLocation || null,
+                    country: null,
+                    address: null,
+                });
+            }
+        }
+    }
+
+    console.log(`   📊 Table extraction found ${contacts.length} contacts`);
+    return contacts;
+}
+
+// ============================================
+// 2b. TEXT EXTRACTION - PDF
 // ============================================
 async function extractTextFromPDF(buffer) {
     const tempPath = path.join(os.tmpdir(), `liffy_${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`);
-    
+
     try {
         await fs.promises.writeFile(tempPath, buffer);
         const stats = await fs.promises.stat(tempPath);
         console.log(`   📁 Temp PDF written: ${stats.size} bytes`);
-        
+
         let text = '';
         let method = 'none';
+        let tableContacts = null;
+
+        // METHOD 0: pdfplumber table extraction (structured tables)
+        const tableData = await tryPdfPlumber(tempPath);
+        if (tableData && tableData.has_tables) {
+            const contacts = extractContactsFromTables(tableData);
+            if (contacts.length > 0) {
+                tableContacts = contacts;
+                method = 'pdfplumber-table';
+                console.log(`   ✅ pdfplumber-table: ${contacts.length} contacts from structured tables`);
+            }
+        }
 
         // METHOD 1: pdftotext (Poppler) - Best for text-based PDFs
+        // Always run for text fallback even if tables found
         try {
             console.log("   [1/4] Trying pdftotext...");
             const { stdout, stderr } = await execPromise(
                 `pdftotext -layout -enc UTF-8 "${tempPath}" -`,
                 { timeout: CONFIG.PDF_TIMEOUT, maxBuffer: CONFIG.MAX_BUFFER }
             );
-            
+
             const cleanText = stdout.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, ''); // Remove control chars
             if (cleanText.trim().length >= CONFIG.MIN_TEXT_LENGTH) {
                 text = cleanText;
-                method = 'pdftotext';
+                if (!tableContacts) method = 'pdftotext';
                 console.log(`   ✅ pdftotext SUCCESS: ${text.length} chars`);
             } else {
                 console.log(`   ⚠️ pdftotext: Only ${cleanText.trim().length} chars (min: ${CONFIG.MIN_TEXT_LENGTH})`);
@@ -250,8 +385,8 @@ async function extractTextFromPDF(buffer) {
             }
         }
 
-        return { text: text || '', method };
-        
+        return { text: text || '', method, tableContacts: tableContacts || null };
+
     } finally {
         try { await fs.promises.unlink(tempPath); } catch (e) {}
     }
@@ -778,12 +913,14 @@ async function processFile(buffer, filename) {
     let text = '';
     let method = 'unknown';
     let excelData = null;
-    
+    let pdfTableContacts = null;
+
     // Extract text based on file type
     if (ext === '.pdf') {
         const result = await extractTextFromPDF(buffer);
         text = result.text;
         method = result.method;
+        pdfTableContacts = result.tableContacts;
         
     } else if (ext === '.docx' || ext === '.doc') {
         const result = await extractTextFromWord(buffer);
@@ -818,19 +955,30 @@ async function processFile(buffer, filename) {
     
     // Parse contacts
     let contacts = [];
-    
+
+    // Method 0: PDF table contacts (pdfplumber structured extraction)
+    if (pdfTableContacts && pdfTableContacts.length > 0) {
+        console.log(`   📊 Using ${pdfTableContacts.length} contacts from PDF table extraction`);
+        // Score table contacts with confidence
+        for (const c of pdfTableContacts) {
+            c.confidence = calculateConfidence(c);
+            c.source_type = 'file_mining';
+        }
+        contacts = contacts.concat(pdfTableContacts);
+    }
+
     // Method 1: Excel structured mining
     if (excelData && excelData.sheets && excelData.sheets.length > 0) {
         const excelContacts = mineExcelStructured(excelData.sheets);
         contacts = contacts.concat(excelContacts);
     }
-    
-    // Method 2: Structured text parsing
+
+    // Method 2: Structured text parsing (also runs for PDFs to catch anything tables missed)
     if (text.length > 0) {
         const structuredContacts = parseStructuredText(text);
         const emailCentricContacts = extractContactsAroundEmails(text);
-        
-        // Merge all contacts
+
+        // Merge all contacts (deduplicates by email)
         contacts = mergeContacts(
             [...contacts, ...structuredContacts],
             emailCentricContacts
