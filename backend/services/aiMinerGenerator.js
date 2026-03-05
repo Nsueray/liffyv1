@@ -117,14 +117,83 @@ class AIMinerGenerator {
     // 9. SVG content (large, unnecessary for extraction)
     html = html.replace(/<svg[\s\S]*?<\/svg>/gi, '');
 
-    // 10. Truncate — max 50KB (~12K tokens)
-    if (html.length > 50000) {
-      html = html.substring(0, 50000) + '\n<!-- TRUNCATED -->';
-    }
+    // 10. Smart truncate — max 100KB, email-rich sections prioritized
+    html = this.smartTruncate(html, 100000);
 
     console.log(`[AIMinerGenerator] HTML sanitized: ${rawHtml.length} → ${html.length} chars (${Math.round((1 - html.length / rawHtml.length) * 100)}% reduction)`);
 
     return html;
+  }
+
+  /**
+   * Smart truncation: prioritize email/contact-rich sections over generic content.
+   * Splits HTML into chunks, scores each by contact density, keeps highest-scoring.
+   * @param {string} html - Sanitized HTML
+   * @param {number} maxLength - Maximum output length (default 100000)
+   * @returns {string} Truncated HTML with email-rich sections preserved
+   */
+  smartTruncate(html, maxLength = 100000) {
+    if (html.length <= maxLength) return html;
+
+    console.log(`[AIMinerGenerator] Smart truncation: ${html.length} → ${maxLength} chars`);
+
+    const chunkSize = 5000;
+    const chunks = [];
+
+    for (let i = 0; i < html.length; i += chunkSize) {
+      const chunk = html.substring(i, i + chunkSize);
+      let score = 0;
+
+      // Email patterns — high priority
+      const emailCount = (chunk.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || []).length;
+      score += emailCount * 10;
+
+      // mailto: links
+      score += (chunk.match(/mailto:/gi) || []).length * 10;
+
+      // Phone patterns
+      score += (chunk.match(/(?:tel|phone|fax|mobile)[:\s]/gi) || []).length * 3;
+      score += (chunk.match(/[\+]?\d{1,3}[\s-]?\(?\d{2,4}\)?[\s-]?\d{3,}/g) || []).length * 2;
+
+      // Contact-related keywords
+      score += (chunk.match(/\b(?:email|contact|phone|address|company|director|manager|ceo|president)\b/gi) || []).length * 2;
+
+      // Table structure (usually structured data)
+      score += (chunk.match(/<(?:table|tr|td|th)\b/gi) || []).length * 1;
+
+      // First chunk always included (page structure, navigation)
+      if (i === 0) score += 50;
+
+      chunks.push({ start: i, text: chunk, score });
+    }
+
+    // Sort by score descending, pick highest-scoring chunks
+    chunks.sort((a, b) => b.score - a.score);
+
+    let totalLength = 0;
+    const usedChunks = [];
+
+    for (const chunk of chunks) {
+      if (totalLength + chunk.text.length > maxLength) continue;
+      usedChunks.push(chunk);
+      totalLength += chunk.text.length;
+      if (totalLength >= maxLength) break;
+    }
+
+    // Re-sort by original position to preserve DOM structure
+    usedChunks.sort((a, b) => a.start - b.start);
+    let result = usedChunks.map(c => c.text).join('');
+
+    const emailsBefore = (html.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || []).length;
+    const emailsAfter = (result.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || []).length;
+
+    console.log(`[AIMinerGenerator] Smart truncation complete: ${html.length}→${result.length} chars, emails preserved: ${emailsAfter}/${emailsBefore}`);
+
+    if (result.length < html.length) {
+      result += '\n<!-- SMART_TRUNCATED -->';
+    }
+
+    return result;
   }
 
   // ---------------------------------------------------------------------------
@@ -728,17 +797,42 @@ Write a JavaScript function body that extracts business contacts from this speci
     console.log(`${'='.repeat(60)}`);
 
     try {
-      // Step 1: Fetch HTML (or use override)
+      // Step 1: Fetch rendered HTML with Playwright (SPA support)
       let rawHtml = options.htmlOverride || null;
       if (!rawHtml) {
-        console.log('[AIMinerGenerator] Step 1: Fetching HTML...');
+        console.log('[AIMinerGenerator] Step 1: Fetching HTML with Playwright (SPA support)...');
         const fetchStart = Date.now();
-        const response = await fetch(url, {
-          headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
-          signal: AbortSignal.timeout(15000)
-        });
-        rawHtml = await response.text();
-        console.log(`[AIMinerGenerator] Step 1: Fetched ${rawHtml.length} chars in ${Date.now() - fetchStart}ms`);
+        const { chromium } = require('playwright');
+        let fetchBrowser = null;
+        try {
+          fetchBrowser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+          const fetchPage = await fetchBrowser.newPage({
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          });
+          await fetchPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          await fetchPage.waitForLoadState('networkidle').catch(() => {});
+          // Extra wait for lazy-loaded / SPA content
+          await fetchPage.waitForTimeout(2000);
+          rawHtml = await fetchPage.content();
+          await fetchBrowser.close();
+          fetchBrowser = null;
+          console.log(`[AIMinerGenerator] Step 1: Fetched ${rawHtml.length} chars (rendered) in ${Date.now() - fetchStart}ms`);
+        } catch (fetchErr) {
+          if (fetchBrowser) await fetchBrowser.close().catch(() => {});
+          console.error(`[AIMinerGenerator] Step 1 Playwright fetch failed: ${fetchErr.message}`);
+          // Fallback: static fetch
+          console.log('[AIMinerGenerator] Step 1: Falling back to static fetch...');
+          try {
+            const response = await fetch(url, {
+              headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' },
+              signal: AbortSignal.timeout(15000)
+            });
+            rawHtml = await response.text();
+            console.log(`[AIMinerGenerator] Step 1: Static fallback: ${rawHtml.length} chars in ${Date.now() - fetchStart}ms`);
+          } catch (staticErr) {
+            throw new Error(`Both Playwright and static fetch failed: ${staticErr.message}`);
+          }
+        }
       }
 
       // Step 2: Sanitize HTML
