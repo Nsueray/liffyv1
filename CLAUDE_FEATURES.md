@@ -702,6 +702,67 @@ All endpoints:
 
 ---
 
+## AI Miner Generator — Phase 0 (Lab Mode)
+
+Self-evolving mining engine: when existing miners fail on a new site, Claude generates site-specific extraction code that runs in a Playwright sandbox.
+
+**Status:** Phase 0 — controlled lab, no production integration. Manual test via CLI only.
+
+**Pipeline:**
+```
+URL → Playwright fetch (SPA support, static fallback)
+  → sanitizeHtml() — strips scripts/styles/SVG/noscript, removes data-* attrs
+  → smartTruncate() — email-density-aware chunking (100KB limit, 5KB chunks scored by email/phone/mailto density)
+  → Spotlighting — random hex boundary delimiters around untrusted HTML (prompt injection defense)
+  → Claude API (claude-sonnet-4-20250514) — generates page.evaluate() JS code
+  → postProcessCode() — fixes common AI bugs (continue→return in forEach, for...of NodeList)
+  → securityScan() — 20 forbidden patterns (eval, fetch, XMLHttpRequest, import, require, etc.)
+  → executeInSandbox() — Playwright page.evaluate() with IIFE wrapper, 30s timeout, network blocking
+  → validateResults() — email rate >30%, format >80% valid, duplicates <50%, hallucination detection
+  → saveMiner() — persist to generated_miners table (status: pending_approval)
+```
+
+**Security layers:**
+1. **Spotlighting** — Microsoft prompt injection defense: random hex boundary tags around HTML
+2. **Security scanner** — 20 regex patterns block dangerous code (eval, fetch, import, require, document.cookie, window.location, etc.)
+3. **Network blocking** — `page.route('**/*', ...)` blocks all requests except target domain + static CDNs
+4. **Sandbox execution** — `page.evaluate()` runs in browser context (no Node.js APIs)
+5. **IIFE wrapper** — `(() => { try { ${code} } catch(err) { return { __error: err.message }; } })()`
+6. **Output validation** — email rate, format, duplicates, hallucination checks
+
+**Quality tracking:**
+- `quality_score = success_count / (success_count + failure_count)`
+- Auto-disable: 3+ failures with score < 0.3 → status = 'auto_disabled'
+- `recordSuccess()` / `recordFailure()` update counters + timestamps
+
+**Key methods:**
+| Method | Purpose |
+|--------|---------|
+| `generateMiner(url, options)` | Full pipeline: fetch → sanitize → Claude → sandbox → validate → save |
+| `runGeneratedMiner(minerId, url)` | Execute saved miner code against a URL |
+| `findGeneratedMiner(url)` | Find active miner matching URL domain |
+| `approveMiner(id, userId)` | Approve pending miner → status='active' |
+| `disableMiner(id, reason)` | Disable miner with reason |
+| `smartTruncate(html, maxLen)` | Email-density-aware HTML truncation |
+
+**Known limitations (Phase 0):**
+- Emails must be in DOM — click-to-reveal, AJAX-loaded emails not extractable
+- Single-page only — no multi-page crawl (detail page emails not reachable)
+- SPAs now supported via Playwright fetch (added in quick fix)
+
+**Files:**
+- `backend/services/aiMinerGenerator.js` — main service (~820 lines)
+- `backend/scripts/testAIMinerGenerator.js` — CLI test script
+- `backend/migrations/024_create_generated_miners.sql` — DB table
+
+**Test CLI:**
+```bash
+ANTHROPIC_API_KEY=sk-... DATABASE_URL=postgresql://... NODE_ENV=production \
+  node backend/scripts/testAIMinerGenerator.js "https://example.com/directory"
+```
+
+---
+
 ## Email Extraction Policy — B2B Context
 
 Role-based business emails (info@, contact@, sales@, office@, etc.) **ARE** valid discovery targets.

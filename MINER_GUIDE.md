@@ -400,6 +400,7 @@ triggerCanonicalAggregation():
 | `fullMiner` | Composite | Runs playwrightTableMiner only (aiMiner removed from free mode) | ACTIVE |
 | `playwrightMiner` | Playwright | General Playwright crawl (alias for fullMiner) | ACTIVE (alias) |
 | `playwrightDetailMiner` | Playwright | Detail page enrichment (alias for fullMiner) | ACTIVE (alias) |
+| `aiMinerGenerator` | Claude AI + Playwright | AI-generated site-specific extraction code (Phase 0 — lab mode, not in production pipeline) | LAB |
 
 **documentMiner details:**
 - Two extraction paths: (1) HTML-based (flipbook platforms — SEO text layer, JSON text API, embedded text), (2) PDF direct (downloads binary, delegates to fileMiner)

@@ -38,7 +38,7 @@ Engagement is stored as events, not scores.
 
 ---
 
-## Database — Current State (20 tables, 23 migrations)
+## Database — Current State (21 tables, 24 migrations)
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -63,6 +63,7 @@ Engagement is stored as events, not scores.
 | `campaign_events` | ACTIVE | 018 | Immutable event log. Populated by webhook + campaignSend + backfill. |
 | `verification_queue` | ACTIVE | 019 | Email verification queue. Processed by worker via ZeroBounce API. |
 | `zoho_push_log` | ACTIVE | 020 | Zoho CRM push audit trail. Tracks create/update per person+module. |
+| `generated_miners` | ACTIVE | 024 | AI Miner Generator — stores AI-generated extraction code per domain. Approval workflow + quality tracking. |
 
 ### Legacy Tables (Exist but transitional)
 | Table | Status | Notes |
@@ -86,17 +87,17 @@ Phase 4 — Remove legacy tables (5 steps). Full plan in `MIGRATION_PLAN.md`.
 
 **Current phase: Late Phase 3 (approaching Phase 4)**
 
-All migrations (001–023) applied in production. 20 tables active.
+All migrations (001–024) applied in production. 21 tables active.
 `AGGREGATION_PERSIST=true` set on Render — mining pipeline writes to `persons` + `affiliations`.
 All import paths (CSV upload, import-all, leads/import) dual-write to both legacy and canonical tables.
 Campaign resolve prefers canonical data with legacy fallback.
 
 **Phase 4 steps** (see `MIGRATION_PLAN.md` for full details):
-- Step 0: Add `campaign_recipients.person_id` (migration 024)
-- Step 1: Add `list_members.person_id`, migrate queries (migration 025)
+- Step 0: Add `campaign_recipients.person_id` (migration 025)
+- Step 1: Add `list_members.person_id`, migrate queries (migration 026)
 - Step 2: Remove dual-write to `prospects` from all import paths
-- Step 3: Backfill `campaign_events` + freeze `campaign_recipients` mutable columns (migration 026)
-- Step 4: Archive `prospects` → `prospects_archive`, drop `email_logs` (migration 027)
+- Step 3: Backfill `campaign_events` + freeze `campaign_recipients` mutable columns (migration 027)
+- Step 4: Archive `prospects` → `prospects_archive`, drop `email_logs` (migration 028)
 
 **Remaining legacy dependencies:**
 - `email_logs` — DEPRECATED. No longer written (last INSERT in `campaignSend.js` removed) or read. Zero active references. Retained for historical data only.
@@ -148,7 +149,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 
 ---
 
-## Migrations (23 files)
+## Migrations (24 files)
 
 | # | File | Tables |
 |---|------|--------|
@@ -174,6 +175,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 | 021 | `prospect_intents_unique_constraint.sql` | UNIQUE INDEX on `prospect_intents` (dedup) |
 | 022 | `add_import_progress_columns.sql` | ALTER `mining_jobs`, ALTER `lists` (import_status, import_progress) |
 | 023 | `add_campaign_verification_mode.sql` | ALTER `campaigns` (verification_mode) |
+| 024 | `create_generated_miners.sql` | `generated_miners` (AI Miner Generator) |
 
 ---
 

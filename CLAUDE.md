@@ -153,6 +153,7 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 8. ~~Phase 3 migration~~ ✅ DONE
 9. ~~Remove nodemailer~~ ✅ DONE
 10. **Frontend UI build** — liffy-ui (Next.js) pages for canonical APIs ← CURRENT
+11. **AI Miner Generator** — Phase 0 (lab mode) ✅ DONE. Phase 1 (multi-page crawl, production integration) pending.
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for detailed task tracking.
 

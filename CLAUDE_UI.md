@@ -49,6 +49,8 @@
 - **Contacts Page Search/Filter Bug** — Page showed "0 total contacts" despite 3,379 in stats. Two fixes: (1) Backend `exclude_invalid` SQL filter used `NOT IN ('invalid','risky')` which silently excludes NULL rows (NULL NOT IN (...) = NULL = false). Added `IS NULL OR` clause. Stats unverified count also now includes NULL. (2) Frontend switched from Next.js rewrite proxy to direct API URL (`api.liffy.app`) matching campaigns page pattern. Added null-safe response parsing + better error messages. (commits: c156e3f backend, 41f14d2 liffy-ui)
 - **Unsubscribes Page** — Dedicated `/campaigns/unsubscribes` page showing who unsubscribed, when, from which campaign, and how. 4 summary cards (Total, Unsubscribe Link, Spam Reports, User Requests), search + source filter, table with color-coded source badges, campaign attribution links, pagination. Backend `GET /api/unsubscribes` endpoint with LATERAL join for campaign attribution. Nav link added to campaigns page header.
 - **Excel/CSV Export** — Server-side export for 3 pages using `exceljs` library + shared `exportHelper.js` utility. XLSX (styled headers, auto-filter) and CSV formats. (1) Mining results: `GET /api/mining/jobs/:id/results/export` — 13 columns. (2) Contacts: `GET /api/persons/export` — 21 columns with campaign engagement stats (campaigns_sent, opens, clicks, replies, bounces, last_campaign, is_prospect, latest_intent, lists). Supports same filters as contacts page. (3) List members: `GET /api/lists/:id/export` — 17 columns with campaign engagement flags (has_opened, has_clicked, has_replied, has_bounced). Frontend: "Export All (N)" buttons on mining results, contacts, and list detail pages. Replaces old client-side CSV export. (commits: 1e6f06d backend, 72d175f liffy-ui)
+- **documentMiner PDF Table Fix** — documentMiner returned `pdfContacts` (pre-extracted contacts from fileMiner) but execution plan path in flowOrchestrator overwrote them by calling `documentTextNormalizer.normalize()`. Fixed all 4 normalizer paths (inline adapter, paginated, enrichment, non-paginated) to check for existing contacts before applying text normalizer. (commit: 82fb4ea)
+- **Import Silent Crash Fix** — `processImportBatch()` crashed silently on undefined `name` field (prospects table NOT NULL constraint). Added null guards for `name`, `company`, `email` in import-all batch processing. (commit: related to import-all batch processing)
 
 ---
 
@@ -86,6 +88,7 @@ See [LIFFY_TODO.md](./LIFFY_TODO.md) for full task tracking.
 - ~~**PDF mining 0 results from UI jobs**~~ — FIXED: documentMiner returned `pdfContacts` but execution plan path in flowOrchestrator overwrote them by calling `documentTextNormalizer.normalize()`. All 3 execution plan normalizer paths now check for existing contacts before applying text normalizer. (commit: 82fb4ea)
 
 ### Open
+- **AI Miner Generator Phase 0** — Lab mode only. Phase 1 (multi-page crawl, production integration) not yet started. See CLAUDE_FEATURES.md for details.
 - `/api/stats` 401 Unauthorized still repeating in console — sidebar polls every 30s, auth header was added but issue persists
 - ZeroBounce account not yet configured — settings UI untested against live API
 - Prospects page search is client-side only (backend `/api/intents` doesn't support text search param)
