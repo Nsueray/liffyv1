@@ -434,6 +434,10 @@ OUTPUT RULES:
 7. Handle errors gracefully — catch exceptions, never throw, return empty array on failure
 8. Be SPECIFIC to this page's DOM structure — analyze the actual HTML tags, classes, and layout
 
+IMPORTANT JAVASCRIPT RULES:
+- Do NOT use "continue" inside .forEach() callbacks — it causes a SyntaxError. Use "return" to skip to the next iteration in .forEach().
+- Do NOT use "for...of" with NodeList — use .forEach() or convert with Array.from() first.
+
 FORBIDDEN — these will cause the code to be REJECTED:
 - fetch(), XMLHttpRequest, or any network requests
 - require(), import, or module loading
@@ -493,16 +497,38 @@ Write a JavaScript function body that extracts business contacts from this speci
     // ```javascript ... ``` block
     const match = response.match(/```javascript\s*\n([\s\S]*?)```/);
     if (match && match[1]) {
-      return match[1].trim();
+      return this.postProcessCode(match[1].trim());
     }
 
     // Fallback: ``` ... ``` (no language specified)
     const fallback = response.match(/```\s*\n([\s\S]*?)```/);
     if (fallback && fallback[1]) {
-      return fallback[1].trim();
+      return this.postProcessCode(fallback[1].trim());
     }
 
     return null;
+  }
+
+  /**
+   * Fix common JavaScript issues in AI-generated code.
+   * @param {string} code - Raw generated code
+   * @returns {string} Fixed code
+   */
+  postProcessCode(code) {
+    let fixed = code;
+    let fixes = [];
+
+    // Fix 1: "continue" inside .forEach() → "return" (continue is only valid in for/while)
+    // Match: catch block with just "continue;" inside a forEach callback
+    const beforeFix1 = fixed;
+    fixed = fixed.replace(/\bcontinue\s*;/g, 'return;');
+    if (fixed !== beforeFix1) fixes.push('continue→return in forEach');
+
+    if (fixes.length > 0) {
+      console.log(`[AIMinerGenerator] Post-processed code: ${fixes.join(', ')}`);
+    }
+
+    return fixed;
   }
 
   /**
@@ -633,13 +659,14 @@ Write a JavaScript function body that extracts business contacts from this speci
       console.log(`[AIMinerGenerator] Sandbox: executing generated code (${code.length} chars)...`);
       const execStart = Date.now();
 
-      const wrappedCode = `
+      // Wrap in IIFE — page.evaluate() needs a function context for return statements
+      const wrappedCode = `(() => {
         try {
           ${code}
         } catch (err) {
           return { __error: err.message };
         }
-      `;
+      })()`;
 
       const rawResult = await Promise.race([
         page.evaluate(wrappedCode),
