@@ -163,6 +163,29 @@ class GenericExtractor {
           return { entities: [], debugInfo };
         }
 
+        // GUARD: If entity_role is "link", filter to business profile links only
+        // "link" is too broad — matches navigation, footer, social media, ads
+        if (config.entity_role === 'link' && entityLocators.length > 20) {
+          console.log(`[GenericExtractor] entity_role=link detected with ${entityLocators.length} links — filtering to business links only`);
+          const filteredLocators = [];
+          for (const loc of entityLocators) {
+            const href = await loc.getAttribute('href').catch(() => null);
+            const text = await loc.textContent().catch(() => '');
+            if (!href) continue;
+            if (this.isNavigationLink(href, text)) continue;
+            if (this.isBusinessProfileLink(href)) {
+              filteredLocators.push(loc);
+            }
+          }
+          if (filteredLocators.length > 0) {
+            entityLocators = filteredLocators;
+            debugInfo.selectorsFound.filtered_business_links = filteredLocators.length;
+            console.log(`[GenericExtractor] Filtered to ${filteredLocators.length} business profile links`);
+          } else {
+            console.log(`[GenericExtractor] No business profile links found, using all ${entityLocators.length} links`);
+          }
+        }
+
         console.log(`[GenericExtractor] Container mode found ${entityLocators.length} entities`);
 
         // Her entity'den veri çıkar
@@ -487,6 +510,62 @@ class GenericExtractor {
   }
 
   /**
+   * Check if a link is a navigation/utility link (not a business entity).
+   * @param {string} href - Link URL
+   * @param {string} text - Link text content
+   * @returns {boolean} true if this is a navigation link
+   */
+  isNavigationLink(href, text) {
+    const navPatterns = [
+      /^\/$/, // Homepage
+      /^\/en\/?$/, /^\/[a-z]{2}\/?$/, // Language root
+      /\/(login|signup|register|account)\b/i,
+      /\/(about|contact|privacy|terms|faq|help)\b/i,
+      /\/(forum|blog|news|magazine|events|jobs|housing)\b/i,
+      /\/(classifieds|properties|services|network|pictures)\b/i,
+      /\/#/, // Anchor links
+      /^(https?:\/\/)?(www\.)?(facebook|twitter|linkedin|instagram|youtube|google|apple)/i,
+    ];
+
+    for (const pattern of navPatterns) {
+      if (pattern.test(href)) return true;
+    }
+
+    // Very short generic text — likely navigation
+    const navTexts = ['home', 'login', 'sign up', 'more', 'search', 'menu', 'next', 'previous',
+      'back', 'all', 'see all', 'view all', 'read more', 'close', 'ok', 'cancel'];
+    if (navTexts.includes(text.toLowerCase().trim())) return true;
+
+    return false;
+  }
+
+  /**
+   * Check if a link URL looks like a business/company profile page.
+   * Matches URLs with numeric IDs + slugs, or common profile path patterns.
+   * @param {string} href - Link URL
+   * @returns {boolean} true if this looks like a business profile link
+   */
+  isBusinessProfileLink(href) {
+    const businessPatterns = [
+      /\/business\/\d+[_-]/i,
+      /\/exhibitor\//i,
+      /\/company\//i,
+      /\/member\//i,
+      /\/profile\//i,
+      /\/vendor\//i,
+      /\/supplier\//i,
+      /\/directory\/[^/]+\/[^/]+\.\w+$/i, // /directory/category/company.html
+      /\/\d+[_-][a-z].*\.\w+$/i, // Generic numeric ID + slug + extension pattern
+    ];
+
+    for (const pattern of businessPatterns) {
+      if (pattern.test(href)) return true;
+    }
+
+    return false;
+  }
+
+  /**
    * Check if a detail URL is a valid profile/company page (not blog, homepage, login, etc.)
    * @param {string} url - Detail URL to validate
    * @param {string} baseUrl - Listing page URL (for same-domain check)
@@ -519,6 +598,14 @@ class GenericExtractor {
 
       // Path too short (/ or /en/) — homepage
       if (path === '/' || /^\/[a-z]{2}\/?$/.test(path)) return false;
+
+      // Category page pattern: /business/africa/ghana/29_moving/ (many segments, ends with number_category)
+      const segments = path.split('/').filter(Boolean);
+      if (segments.length >= 4) {
+        const lastSegment = segments[segments.length - 1];
+        // Pattern: "29_moving" or "191_moving-companies" without file extension → category page
+        if (/^\d+_[a-z-]+$/.test(lastSegment)) return false;
+      }
 
       return true;
     } catch {
