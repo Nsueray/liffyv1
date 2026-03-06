@@ -739,17 +739,35 @@ URL → Playwright render → ariaSnapshot() YAML (2-5KB)
   → Başarılı → config DB'ye kaydet, reuse
 ```
 
-**v2 Beklenen İyileşme:**
+**v2 Bileşenler (implemente edildi):**
+- ✅ AXTree integration — Playwright ariaSnapshot() YAML (6KB vs 100KB HTML = %94 azalma)
+- ✅ GenericExtractor — config-driven template (anchor-based + container-based dual mode)
+- ✅ Self-healing REPL loop — generateMinerV2WithHealing() (max 3 iterasyon)
+- ✅ Config DB storage — generated_miners.miner_code → JSON config
+- ✅ Multi-step config — listing AXTree + sample detail AXTree → iki Claude API çağrısı
 
-| Metrik | v1 (Park) | v2 (Hedef) |
-|--------|-----------|------------|
-| Token per call | 15-40K | 2-5K (%90↓) |
-| Maliyet per site | $0.10-0.30 | $0.01-0.05 |
-| Halüsinasyon | Yüksek | ~Sıfır |
-| Genel başarı oranı | %29 | %60+ |
+**v2 Test Sonuçları:**
+
+| URL | AXTree Size | Tokens | Type | Result |
+|-----|-------------|--------|------|--------|
+| glmis.gov.gh/Domestic | 6KB | 3,555 | single_page (anchor) | ✅ 11 contact, 100% email, 100% company |
+| valveworldexpo.com/directory | 20KB | 8,081 | multi_step | ❌ 115 listitem buldu ama name_role null — VIS SPA çok özel yapı |
+| ghanabusinessweb.com | 15KB | 6,224 | multi_step | ❌ 18 entity, 3 detail URL ama yanlış linkler (homepage, blog değil profil) |
+
+**v1 vs v2 karşılaştırma (glmis.gov.gh):**
+
+| Metrik | v1 | v2 |
+|--------|----|-----|
+| Input size | 74KB HTML | 6KB AXTree (%94↓) |
+| Token | 19,110 | 3,555 (%81↓) |
+| Contacts | 10 | 11 |
+| Config | 200 satır JS | 10 satır JSON |
+| Halüsinasyon | CSS selector tahmin | Sıfır (semantic) |
+
+**v2 Commits:** d3db511 (Step 1 — AXTree + GenericExtractor + prompts), f139403 (anchor-based fix)
 
 **Mevcut altyapı (aynen kalıyor):**
-- `generated_miners` DB tablosu — `miner_code` artık JSON config olacak
+- `generated_miners` DB tablosu — `miner_code` artık JSON config
 - Admin API (7 endpoint) — değişmez
 - Pipeline hook (flowOrchestrator) — değişmez
 - Security scan — config-driven'da daha az risk ama kalır
@@ -760,15 +778,21 @@ URL → Playwright render → ariaSnapshot() YAML (2-5KB)
 - [AI_Miner_Generator_Report_v2.md](./AI_Miner_Generator_Report_v2.md) — proje raporu
 
 **Files:**
-- `backend/services/aiMinerGenerator.js` — main service (~1400 lines, v2'de güncellenecek)
-- `backend/services/genericExtractor.js` — YENİ (v2 — config-driven template)
-- `backend/scripts/testAIMinerGenerator.js` — CLI test script
+- `backend/services/aiMinerGenerator.js` — main service (~2180 lines, v2 methods added)
+- `backend/services/genericExtractor.js` — config-driven extraction template (anchor + container dual mode)
+- `backend/scripts/testAIMinerGenerator.js` — CLI test script (--v2 default, --v1, --axtree)
 - `backend/migrations/024_create_generated_miners.sql` — DB table
 
 **Test CLI:**
 ```bash
-ANTHROPIC_API_KEY=sk-... DATABASE_URL=postgresql://... NODE_ENV=production \
-  node backend/scripts/testAIMinerGenerator.js "https://example.com/directory"
+# v2 (default) — AXTree + Config-Driven
+ANTHROPIC_API_KEY=sk-... node backend/scripts/testAIMinerGenerator.js "https://example.com/directory"
+
+# AXTree only (debug, no Claude call)
+node backend/scripts/testAIMinerGenerator.js "https://example.com/directory" --axtree
+
+# v1 (legacy)
+ANTHROPIC_API_KEY=sk-... node backend/scripts/testAIMinerGenerator.js "https://example.com/directory" --v1
 ```
 
 ---

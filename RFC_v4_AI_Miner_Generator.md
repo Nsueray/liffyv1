@@ -248,3 +248,20 @@ Yeni URL'ler:
 6. Herhangi bir dernek üye listesi
 
 Hedef: 6 URL'den 4+ başarılı (%66+)
+
+---
+
+## Gerçek Test Sonuçları
+
+### v2 Step 1 Testleri (6 Mart 2025)
+
+| URL | Hedef | Sonuç |
+|-----|-------|-------|
+| glmis.gov.gh/Domestic | Regression (v1'de çalışıyordu) | ✅ 11 contact, 3555 token — v1'den daha iyi |
+| valveworldexpo.com | SPA directory | ❌ name_role null — container mode iyileştirmesi gerekli |
+| ghanabusinessweb.com | Listing + detail | ❌ Yanlış detail URL'ler — link filtering gerekli |
+
+### Kalan İyileştirmeler
+- Container mode'da name extraction (listitem içinde heading/text bul)
+- Detail link filtering (blog/homepage URL'leri filtrele, sadece profil/company URL'leri al)
+- Daha fazla site testi (20 URL hedefi)

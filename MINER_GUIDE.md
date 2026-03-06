@@ -400,7 +400,7 @@ triggerCanonicalAggregation():
 | `fullMiner` | Composite | Runs playwrightTableMiner only (aiMiner removed from free mode) | ACTIVE |
 | `playwrightMiner` | Playwright | General Playwright crawl (alias for fullMiner) | ACTIVE (alias) |
 | `playwrightDetailMiner` | Playwright | Detail page enrichment (alias for fullMiner) | ACTIVE (alias) |
-| `aiMinerGenerator` | Claude AI + Playwright | AI-generated site-specific extraction (v1 JS generation PARKED %29 başarı, v2 AXTree+Config-Driven+Self-Healing geçiş aktif). Bkz: [RFC_v4](./RFC_v4_AI_Miner_Generator.md) | v2 GEÇİŞ |
+| `aiMinerGenerator` | Claude AI + Playwright | AI config gen | v2: AXTree + Config-Driven + Self-Healing REPL — glmis.gov.gh ✅, zor siteler devam ediyor | ACTIVE DEV |
 
 **documentMiner details:**
 - Two extraction paths: (1) HTML-based (flipbook platforms — SEO text layer, JSON text API, embedded text), (2) PDF direct (downloads binary, delegates to fileMiner)

@@ -287,6 +287,21 @@ Yeni yaklaşım mevcut altyapıyı KULLANIR, silmez:
 | Halüsinasyon oranı | Yüksek | **~Sıfır** |
 | Self-healing | Yok (tek deneme) | **3-5 iterasyon** |
 
+## 9.1 Gerçek v2 Test Sonuçları (6 Mart 2025)
+
+| URL | AXTree | Tokens | Type | Entities | Contacts | Durum |
+|-----|--------|--------|------|----------|----------|-------|
+| glmis.gov.gh/Domestic | 6KB | 3,555 | single_page anchor | 21 heading → 11 email | 11 (100% email) | ✅ BAŞARILI |
+| valveworldexpo.com/directory/a | 20KB | 8,081 | multi_step | 115 listitem → name_role null | 0 | ❌ VIS SPA — özel yapı |
+| ghanabusinessweb.com | 15KB | 6,224 | multi_step | 18 heading → 3 detail URL (yanlış) | 0 | ❌ Homepage, dizin değil |
+
+**Önemli bulgular:**
+- AXTree %94 küçük (6KB vs 74KB HTML) — token %81 düşüş
+- Anchor-based extraction düz layout'larda mükemmel çalışıyor
+- Container-based extraction (listitem) name çıkaramıyor — name_role null sorunu
+- Multi-step detail URL tespiti iyileştirmeli — homepage/blog linkleri yerine gerçek profil linkleri
+- VIS gibi SPA platformlar hala zor — visExhibitorMiner gibi özel miner daha uygun
+
 ---
 
 ## 10. Dosyalar

@@ -153,7 +153,7 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 8. ~~Phase 3 migration~~ ✅ DONE
 9. ~~Remove nodemailer~~ ✅ DONE
 10. **Frontend UI build** — liffy-ui (Next.js) pages for canonical APIs ← CURRENT
-11. **AI Miner Generator** — Phase 0 (lab mode, v1 JS generation) ✅ DONE (%29 başarı). v2 yaklaşıma geçiş: AXTree + Config-Driven + Self-Healing REPL. Bkz: [RFC_v4_AI_Miner_Generator.md](./RFC_v4_AI_Miner_Generator.md), [AI_Miner_Generator_Report_v2.md](./AI_Miner_Generator_Report_v2.md)
+11. **AI Miner Generator v2** — AXTree + Config-Driven + Self-Healing REPL implemente edildi. glmis.gov.gh: ✅ 11 contact (3555 token). Zor siteler (VIS SPA, homepage) hala başarısız. Daha fazla site testi + GenericExtractor iyileştirmesi gerekli. Bkz: [RFC_v4_AI_Miner_Generator.md](./RFC_v4_AI_Miner_Generator.md) ← CURRENT
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for detailed task tracking.
 

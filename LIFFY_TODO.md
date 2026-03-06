@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-02-27*
+*Updated: 2026-03-06*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -33,11 +33,11 @@
 | A23 | Node.js heap limit (NODE_OPTIONS env var) | P1 | TODO (manual Render config) |
 | A24 | Excel mining quality — column mapping improvement | P2 | TODO |
 | A25 | flipbookMiner v2 — dual-path extraction (column-position + isolateSegment for pre/code layouts) | P1 | ✅ DONE |
-| A26 | AI Miner Generator v2 — AXTree integration (Playwright ariaSnapshot → YAML) | P1 | TODO |
-| A27 | AI Miner Generator v2 — Config-driven templates (GenericDirectoryExtractor, GenericTableExtractor) | P1 | TODO |
-| A28 | AI Miner Generator v2 — Self-Healing REPL loop (max 3-5 iterasyon, hata feedback) | P1 | TODO |
-| A29 | AI Miner Generator v2 — Multi-step listing + detail (AXTree-based) | P1 | TODO |
-| A30 | AI Miner Generator v2 — Test & validate (%60+ başarı hedefi, v1 başarısız URL'leri tekrar test) | P1 | TODO |
+| A26 | AI Miner Generator v2 — AXTree integration (Playwright ariaSnapshot) | P1 | ✅ DONE |
+| A27 | AI Miner Generator v2 — GenericExtractor templates (config-driven) | P1 | ✅ DONE |
+| A28 | AI Miner Generator v2 — Self-healing REPL loop (3-5 iterations) | P1 | ✅ DONE |
+| A29 | AI Miner Generator v2 — Multi-step config (listing + detail AXTree) | P1 | ✅ DONE |
+| A30 | AI Miner Generator v2 — Test: glmis.gov.gh ✅ başarılı (11 contact, 3555 token). VIS + Ghana Business Web ❌ (zor case). Daha fazla URL test gerekli. | P1 | IN PROGRESS |
 
 ## B. UI TASKS
 
