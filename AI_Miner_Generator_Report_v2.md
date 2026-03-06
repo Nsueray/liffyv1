@@ -295,6 +295,13 @@ Yeni yaklaşım mevcut altyapıyı KULLANIR, silmez:
 | valveworldexpo.com/directory/a | 20KB | 8,081 | multi_step | 115 listitem → name_role null | 0 | ❌ VIS SPA — özel yapı |
 | ghanabusinessweb.com | 15KB | 6,224 | multi_step | 18 heading → 3 detail URL (yanlış) | 0 | ❌ Homepage, dizin değil |
 | expat.com/business/africa/ghana | ~25KB | ~5,000 | multi_step | entity_role="link" → 261 link | 0 | ❌ Çok geniş entity seçimi — link filtering eklendi |
+| expat.com (best run) | 31KB | 15,323 | multi_step container | 261 link → 14 business → 7 detail → 7 contact | 7 (100% email) | ✅ İlk multi-step tam başarı |
+| expat.com (tutarsız) | 31KB | 17,584 | single→multi override | anchor mode → 3 contact | 3 (33% email) | ⚠️ Claude non-deterministic |
+
+**Performans:**
+- İlk multi-step: 24 dakika (1,480,618ms)
+- Optimized: 88 saniye (87,716ms) — %94 hız artışı
+- Son test (networkidle geri): 137 saniye — kabul edilebilir
 
 **Önemli bulgular:**
 - AXTree %94 küçük (6KB vs 74KB HTML) — token %81 düşüş
@@ -304,6 +311,8 @@ Yeni yaklaşım mevcut altyapıyı KULLANIR, silmez:
 - VIS gibi SPA platformlar hala zor — visExhibitorMiner gibi özel miner daha uygun
 - entity_role="link" çok geniş — tüm sayfa linklerini yakalar → isNavigationLink + isBusinessProfileLink filtering eklendi
 - Link entity self-href: entity IS the link → kendi href'i = detail_url (fix eklendi)
+- **Claude non-deterministic** — aynı AXTree'ye farklı config döndürebiliyor. Override mekanizması (email 0 → multi_step zorla) eklendi ama entity_role tutarsızlığı devam ediyor.
+- **Best case kanıtlandı** — doğru config ile 7/7 contact (%100 email, %100 company, %100 phone). Sorun config tutarlılığı.
 
 ---
 

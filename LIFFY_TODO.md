@@ -34,10 +34,11 @@
 | A24 | Excel mining quality — column mapping improvement | P2 | TODO |
 | A25 | flipbookMiner v2 — dual-path extraction (column-position + isolateSegment for pre/code layouts) | P1 | ✅ DONE |
 | A26 | AI Miner Generator v2 — AXTree integration (Playwright ariaSnapshot) | P1 | ✅ DONE |
-| A27 | AI Miner Generator v2 — GenericExtractor templates (config-driven) | P1 | ✅ DONE |
-| A28 | AI Miner Generator v2 — Self-healing REPL loop (3-5 iterations) | P1 | ✅ DONE |
-| A29 | AI Miner Generator v2 — Multi-step config (listing + detail AXTree) | P1 | ✅ DONE |
-| A30 | AI Miner Generator v2 — Test: glmis.gov.gh ✅ (11 contact, 3555 token). VIS ❌, Ghana Business Web ❌, expat.com ❌ (entity_role="link" → 261 link, link filtering eklendi). GenericExtractor: link self-href, quickText timeout, max 50 entity. | P1 | IN PROGRESS |
+| A27 | AI Miner Generator v2 — GenericExtractor templates (config-driven, anchor+container+bulk modes) | P1 | ✅ DONE |
+| A28 | AI Miner Generator v2 — Self-healing REPL loop (3-5 iterations) | P1 | ✅ DONE (code ready, needs more testing) |
+| A29 | AI Miner Generator v2 — Multi-step config (listing + detail AXTree) — expat.com 7 contact best case | P1 | ✅ DONE |
+| A30 | AI Miner Generator v2 — Test sonuçları: glmis ✅ 11, expat.com ✅ 7 (best), performans 24dk→2dk. Kalan sorun: Claude non-deterministic (anchor vs container). | P1 | PARKED |
+| A31 | AI Miner Generator v2 — Claude tutarlılık sorunu: aynı AXTree'ye TYPE 1/TYPE 2, anchor/container farklı dönüyor. Prompt veya post-processing iyileştirmesi gerekli. | P2 | TODO |
 
 ## B. UI TASKS
 

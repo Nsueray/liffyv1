@@ -261,6 +261,7 @@ Hedef: 6 URL'den 4+ başarılı (%66+)
 | valveworldexpo.com | SPA directory | ❌ name_role null — container mode iyileştirmesi gerekli |
 | ghanabusinessweb.com | Listing + detail | ❌ Yanlış detail URL'ler — link filtering gerekli |
 | expat.com/business/africa/ghana | Multi-step directory | ❌ entity_role="link" → 261 link (çok geniş). Link filtering + self-href fix eklendi |
+| expat.com/business/ghana | Multi-step directory | ✅ Best: 7 contact (100% email). ⚠️ Tutarsız: 3 contact (Claude non-deterministic). Performans: 24dk→88s. |
 
 ### Yapılan İyileştirmeler
 - ✅ Container mode name fallback — heading → first text line (name_role null fix)
@@ -269,7 +270,12 @@ Hedef: 6 URL'den 4+ başarılı (%66+)
 - ✅ Link entity guard — isNavigationLink + isBusinessProfileLink filtering
 - ✅ Link entity self-href — entity IS the link → href = detail_url
 - ✅ quickText timeout (5s) + max 50 entities cap (performance)
+- ✅ bulkExtractFromPage — page.evaluate() for link entities (5-10 dk → 100ms)
+- ✅ quickExtractDetail — page.evaluate() for detail pages (5-10s → 10ms)
+- ✅ Shared browser — 3 browser → 1 browser (tab reuse)
+- ✅ networkidle 5s timeout — analytics bloklama önlenir
+- ✅ Claude override — email 0 → single_page'i multi_step'e zorla
 
 ### Kalan İyileştirmeler
-- Self-healing loop ile expat.com tekrar test
+- Claude non-deterministic çözümü: temperature=0 dene, veya multi-run voting (3 config üret, en iyisini seç)
 - Daha fazla site testi (20 URL hedefi)

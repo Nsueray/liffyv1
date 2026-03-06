@@ -153,7 +153,7 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 8. ~~Phase 3 migration~~ ✅ DONE
 9. ~~Remove nodemailer~~ ✅ DONE
 10. **Frontend UI build** — liffy-ui (Next.js) pages for canonical APIs ← CURRENT
-11. **AI Miner Generator v2** — AXTree + Config-Driven + Self-Healing REPL implemente edildi. glmis.gov.gh: ✅ 11 contact. expat.com: ❌ entity_role="link" → link filtering + self-href fix eklendi. GenericExtractor: quickText timeout, max 50 entity, name fallback chain. Bkz: [RFC_v4_AI_Miner_Generator.md](./RFC_v4_AI_Miner_Generator.md) ← CURRENT
+11. **AI Miner Generator v2** — AXTree + Config-Driven + Self-Healing REPL. glmis ✅ 11 contact (3.5K token). expat.com multi-step ✅ 7 contact best case (tutarsız — Claude non-deterministic). Performans 24dk→2dk. Kalan: Claude tutarlılığı, anchor vs container mode seçimi. Bkz: [RFC_v4_AI_Miner_Generator.md](./RFC_v4_AI_Miner_Generator.md) ← PARKED (ASE'ye geçiş)
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for detailed task tracking.
 

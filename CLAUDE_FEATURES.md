@@ -746,26 +746,30 @@ URL → Playwright render → ariaSnapshot() YAML (2-5KB)
 - ✅ Config DB storage — generated_miners.miner_code → JSON config
 - ✅ Multi-step config — listing AXTree + sample detail AXTree → iki Claude API çağrısı
 
-**v2 Test Sonuçları:**
+**v2 Test Sonuçları (6 Mart 2025 — Final):**
 
-| URL | AXTree Size | Tokens | Type | Result |
-|-----|-------------|--------|------|--------|
-| glmis.gov.gh/Domestic | 6KB | 3,555 | single_page (anchor) | ✅ 11 contact, 100% email, 100% company |
-| valveworldexpo.com/directory | 20KB | 8,081 | multi_step | ❌ 115 listitem buldu ama name_role null — VIS SPA çok özel yapı |
-| ghanabusinessweb.com | 15KB | 6,224 | multi_step | ❌ 18 entity, 3 detail URL ama yanlış linkler (homepage, blog değil profil) |
-| expat.com/business/africa/ghana | ~25KB | ~5,000 | multi_step | ❌ entity_role="link" → 261 link (tüm sayfa linkleri). Link filtering eklendi (be00916). Self-href fix eklendi. |
+| URL | AXTree | Tokens | Type | Result | Süre |
+|-----|--------|--------|------|--------|------|
+| glmis.gov.gh/Domestic | 6KB | 3,555 | single_page anchor | ✅ 11 contact, 100% email | 14s |
+| expat.com/business/ghana | 31KB | 15,323 | multi_step | ✅ 7 contact, 100% email (best run) | 88s |
+| expat.com (tutarsız run) | 31KB | 17,584 | single→multi override | ⚠️ 3 contact, 33% email | 137s |
+| valveworldexpo.com | 20KB | 8,081 | multi_step | ⏳ Timeout (115 entity, VIS SPA) | — |
+| ghanabusinessweb.com | 15KB | 6,224 | multi_step | ❌ Homepage, directory değil | — |
 
-**v1 vs v2 karşılaştırma (glmis.gov.gh):**
+**Performans iyileştirmesi:**
 
-| Metrik | v1 | v2 |
-|--------|----|-----|
-| Input size | 74KB HTML | 6KB AXTree (%94↓) |
-| Token | 19,110 | 3,555 (%81↓) |
-| Contacts | 10 | 11 |
-| Config | 200 satır JS | 10 satır JSON |
-| Halüsinasyon | CSS selector tahmin | Sıfır (semantic) |
+| Metrik | İlk test | Optimized |
+|--------|----------|-----------|
+| expat.com süre | 24 dakika | 88 saniye (%94↓) |
+| Listing extraction | 5-10 dk (locator loop) | 100ms (page.evaluate bulk) |
+| Detail page crawl | 10-15 dk | 30-60s (tab reuse + quick extract) |
 
-**v2 Commits:** d3db511 (Step 1 — AXTree + GenericExtractor + prompts), f139403 (anchor-based fix), 3f84983 (container name fallback + URL filtering), be00916 (link entity filtering + navigation detection)
+**Kalan sorunlar:**
+- Claude non-deterministic: aynı AXTree'ye bazen TYPE 1, bazen TYPE 2 dönüyor
+- Anchor mode navigasyon linkleri karıştırabiliyor (entity_selector null olunca)
+- Çözüm bekleniyor: prompt güçlendirme veya response post-validation
+
+**v2 Commits:** d3db511 (AXTree + GenericExtractor), f139403 (anchor fix), 3f84983 (name fallback + URL filter), be00916 (link entity filter), 636cd55 (self-href detail_url), 7cea825 (performance bulk extract), bb97a49 (networkidle restore + Claude override)
 
 **GenericExtractor İyileştirmeleri:**
 - Container name fallback: heading → first text line (name_role null durumu)
@@ -773,6 +777,8 @@ URL → Playwright render → ariaSnapshot() YAML (2-5KB)
 - Link entity guard: entity_role="link" → isNavigationLink + isBusinessProfileLink filtering
 - Link entity self-href: entity IS the link → its href = detail_url
 - quickText timeout: 5s Promise.race guard, max 50 entities cap
+- bulkExtractFromPage: page.evaluate() for link entities (100ms vs 5-10 min)
+- quickExtractDetail: page.evaluate() for detail pages (10ms vs 5-10s)
 
 **Mevcut altyapı (aynen kalıyor):**
 - `generated_miners` DB tablosu — `miner_code` artık JSON config
