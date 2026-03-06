@@ -170,7 +170,7 @@ class GenericExtractor {
           try {
             const item = {};
 
-            // Company name
+            // Company name — config role first
             if (config.name_role) {
               const nameRoleOpts = this.parseRoleOptions(config.name_role);
               const nameRoleName = config.name_role.split('[')[0].split(' ')[0].trim();
@@ -179,9 +179,29 @@ class GenericExtractor {
                 item.company_name = await nameEl.first().textContent().catch(() => null);
               } catch { /* ignore */ }
             }
+            // Fallback: config CSS selector
             if (!item.company_name && config.name_selector) {
               try {
                 item.company_name = await entity.locator(config.name_selector).first().textContent().catch(() => null);
+              } catch { /* ignore */ }
+            }
+            // Fallback: any heading inside entity (h1-h6)
+            if (!item.company_name) {
+              try {
+                const anyHeading = await entity.locator('h1, h2, h3, h4, h5, h6').first().textContent().catch(() => null);
+                if (anyHeading && anyHeading.trim().length > 1) {
+                  item.company_name = anyHeading.trim();
+                }
+              } catch { /* ignore */ }
+            }
+            // Fallback: first line of entity text (if short enough to be a name)
+            if (!item.company_name) {
+              try {
+                const fullText = await entity.textContent().catch(() => '');
+                const firstLine = fullText.trim().split('\n')[0]?.trim();
+                if (firstLine && firstLine.length > 2 && firstLine.length < 100) {
+                  item.company_name = firstLine;
+                }
               } catch { /* ignore */ }
             }
 
@@ -204,6 +224,22 @@ class GenericExtractor {
                 }
               } catch { /* ignore */ }
             }
+            // Fallback: first valid <a> link inside entity (skip mailto, tel, hash, invalid paths)
+            if (!item.detail_url) {
+              try {
+                const allLinks = await entity.locator('a[href]').all();
+                for (const link of allLinks) {
+                  const href = await link.getAttribute('href').catch(() => null);
+                  if (!href) continue;
+                  if (href.startsWith('mailto:') || href.startsWith('tel:') || href.startsWith('#')) continue;
+                  const fullUrl = href.startsWith('http') ? href : new URL(href, page.url()).href;
+                  if (this.isValidDetailUrl(fullUrl, page.url())) {
+                    item.detail_url = fullUrl;
+                    break;
+                  }
+                }
+              } catch { /* ignore */ }
+            }
 
             // Email (listing sayfasında varsa)
             if (config.email_selector) {
@@ -218,6 +254,11 @@ class GenericExtractor {
             // Country
             if (config.country_selector) {
               item.country = await this.extractText(entity, config.country_selector);
+            }
+
+            // Validate detail_url — filter out blog, homepage, login, etc.
+            if (item.detail_url && !this.isValidDetailUrl(item.detail_url, page.url())) {
+              item.detail_url = null;
             }
 
             // Company name varsa listeye ekle
@@ -443,6 +484,46 @@ class GenericExtractor {
     if (levelMatch) opts.level = parseInt(levelMatch[1]);
 
     return opts;
+  }
+
+  /**
+   * Check if a detail URL is a valid profile/company page (not blog, homepage, login, etc.)
+   * @param {string} url - Detail URL to validate
+   * @param {string} baseUrl - Listing page URL (for same-domain check)
+   * @returns {boolean}
+   */
+  isValidDetailUrl(url, baseUrl) {
+    try {
+      const parsed = new URL(url);
+      const baseParsed = new URL(baseUrl);
+      const path = parsed.pathname.toLowerCase();
+
+      // Same page (path match) — invalid
+      if (parsed.origin + parsed.pathname === baseParsed.origin + baseParsed.pathname) return false;
+
+      // Known invalid paths — blog, admin, login, generic pages
+      const invalidPaths = [
+        '/blog', '/news', '/about', '/contact', '/login', '/signup', '/register',
+        '/privacy', '/terms', '/faq', '/help', '/sitemap', '/search',
+        '/category', '/tag', '/archive', '/feed', '/rss',
+        '/cart', '/checkout', '/account', '/settings',
+        '/wp-admin', '/admin'
+      ];
+
+      for (const invalid of invalidPaths) {
+        if (path === invalid || path.startsWith(invalid + '/')) return false;
+      }
+
+      // Different domain — probably external link, invalid
+      if (parsed.hostname !== baseParsed.hostname) return false;
+
+      // Path too short (/ or /en/) — homepage
+      if (path === '/' || /^\/[a-z]{2}\/?$/.test(path)) return false;
+
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**
