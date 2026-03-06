@@ -1,6 +1,6 @@
 # Liffy DB Schema Guide
 
-> 20 tables, 23 migrations, PostgreSQL 17 (Render hosted)
+> 21 tables, 24 migrations, PostgreSQL 17 (Render hosted)
 > All PKs: UUID via `gen_random_uuid()`. All tables include `organizer_id` for multi-tenant isolation.
 
 ---
@@ -29,6 +29,7 @@
 | 18 | [verification_queue](#18-verification_queue) | ACTIVE | Verification | 019 |
 | 19 | [zoho_push_log](#19-zoho_push_log) | ACTIVE | CRM Integration | 020 |
 | 20 | [email_logs](#20-email_logs) | DEPRECATED | Legacy Logging | 003 |
+| 21 | [generated_miners](#21-generated_miners) | ACTIVE | AI Mining | 024 |
 
 ---
 
@@ -549,6 +550,44 @@ Audit trail for Zoho CRM pushes.
 
 ---
 
+### 21. generated_miners
+
+AI Miner Generator — stores AI-generated extraction code per domain with approval workflow and quality tracking.
+
+| Column | Type | Constraints | Notes |
+|--------|------|-------------|-------|
+| `id` | UUID | PK | |
+| `organizer_id` | UUID | FK → organizers, ON DELETE SET NULL | NULL = global |
+| `domain_pattern` | VARCHAR(255) | NOT NULL | Target domain |
+| `url_pattern` | TEXT | | URL path pattern |
+| `miner_code` | TEXT | NOT NULL | AI-generated page.evaluate() JS code |
+| `miner_version` | INTEGER | DEFAULT 1 | |
+| `source_url` | TEXT | NOT NULL | URL used to generate the miner |
+| `source_html_hash` | VARCHAR(64) | | SHA-256 of source HTML |
+| `ai_model` | VARCHAR(50) | DEFAULT 'claude-sonnet-4-20250514' | |
+| `ai_prompt_version` | VARCHAR(20) | DEFAULT 'v1' | |
+| `generation_tokens_used` | INTEGER | | |
+| `test_result` | JSONB | | Sandbox test results |
+| `success_count` | INTEGER | DEFAULT 0 | |
+| `failure_count` | INTEGER | DEFAULT 0 | |
+| `total_contacts_mined` | INTEGER | DEFAULT 0 | |
+| `quality_score` | NUMERIC(3,2) | | success / (success + failure) |
+| `status` | VARCHAR(20) | DEFAULT 'pending_approval' | pending_approval, active, disabled, auto_disabled |
+| `approved_by` | UUID | FK → users, ON DELETE SET NULL | |
+| `approved_at` | TIMESTAMPTZ | | |
+| `disabled_reason` | TEXT | | |
+| `last_used_at` | TIMESTAMPTZ | | |
+| `last_success_at` | TIMESTAMPTZ | | |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+| `updated_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+**Indexes:** `idx_generated_miners_domain` (domain_pattern + status), `idx_generated_miners_quality` (quality_score DESC, partial WHERE active), `idx_generated_miners_organizer` (partial WHERE NOT NULL)
+**Read by:** flowOrchestrator (fallback on 0 contacts), admin API (list, detail, test)
+**Written by:** aiMinerGenerator.saveMiner(), approveMiner(), disableMiner(), recordSuccess(), recordFailure()
+**UI pages:** Admin AI Miner (future)
+
+---
+
 ## UI Page → API → Table Map
 
 | UI Page | Route | Primary API Endpoints | Primary Tables |
@@ -635,6 +674,7 @@ verify-list → verification_queue INSERT (pending)
 | 021 | `prospect_intents_unique_constraint.sql` | UNIQUE INDEX on prospect_intents |
 | 022 | `add_import_progress_columns.sql` | ALTER mining_jobs (+import_status, import_progress), ALTER lists (+import_status, import_progress) |
 | 023 | `add_campaign_verification_mode.sql` | ALTER campaigns (+verification_mode) |
+| 024 | `create_generated_miners.sql` | generated_miners (AI Miner Generator) |
 
 ---
 
