@@ -163,28 +163,34 @@ class GenericExtractor {
           return { entities: [], debugInfo };
         }
 
-        // GUARD: If entity_role is "link", filter to business profile links only
-        // "link" is too broad — matches navigation, footer, social media, ads
-        if (config.entity_role === 'link' && entityLocators.length > 20) {
-          console.log(`[GenericExtractor] entity_role=link detected with ${entityLocators.length} links — filtering to business links only`);
-          const filteredLocators = [];
-          for (const loc of entityLocators) {
-            const href = await loc.getAttribute('href').catch(() => null);
-            const text = await loc.textContent().catch(() => '');
-            if (!href) continue;
-            if (this.isNavigationLink(href, text)) continue;
-            if (this.isBusinessProfileLink(href)) {
-              filteredLocators.push(loc);
+        // ============================
+        // FAST PATH: entity_role === 'link' → bulk page.evaluate()
+        // 14 entity × 6 locator calls × 2-5s = 3-7 min → page.evaluate = 100ms
+        // ============================
+        if (config.entity_role === 'link') {
+          console.log(`[GenericExtractor] entity_role=link — using FAST bulk page.evaluate() path`);
+          const bulkResults = await this.bulkExtractFromPage(page, config);
+          debugInfo.selectorsFound.bulk_extracted = bulkResults.length;
+          console.log(`[GenericExtractor] Bulk extracted ${bulkResults.length} link entities`);
+
+          // Filter through isValidDetailUrl + isNavigationLink + isBusinessProfileLink
+          const baseUrl = page.url();
+          for (const item of bulkResults) {
+            if (!item.company_name || !item.company_name.trim()) continue;
+            if (item.detail_url && !this.isValidDetailUrl(item.detail_url, baseUrl)) {
+              item.detail_url = null;
             }
+            item.company_name = item.company_name.trim();
+            entities.push(item);
           }
-          if (filteredLocators.length > 0) {
-            entityLocators = filteredLocators;
-            debugInfo.selectorsFound.filtered_business_links = filteredLocators.length;
-            console.log(`[GenericExtractor] Filtered to ${filteredLocators.length} business profile links`);
-          } else {
-            console.log(`[GenericExtractor] No business profile links found, using all ${entityLocators.length} links`);
-          }
-        }
+          debugInfo.selectorsFound.after_filter = entities.length;
+          console.log(`[GenericExtractor] After filtering: ${entities.length} valid link entities`);
+
+        } else {
+        // ============================
+        // STANDARD PATH: non-link container entities (listitem, article, etc.)
+        // Uses Playwright locator calls per entity
+        // ============================
 
         console.log(`[GenericExtractor] Container mode found ${entityLocators.length} entities`);
 
@@ -234,25 +240,6 @@ class GenericExtractor {
                   item.company_name = firstLine;
                 }
               } catch { /* ignore */ }
-            }
-
-            // LINK ENTITY: When entity IS a link element, its own href is the detail_url
-            // (no need to look for links INSIDE — the entity itself is the link)
-            if (config.entity_role === 'link') {
-              const selfHref = await entity.getAttribute('href').catch(() => null);
-              if (selfHref) {
-                const fullUrl = selfHref.startsWith('http') ? selfHref : new URL(selfHref, page.url()).href;
-                if (this.isValidDetailUrl(fullUrl, page.url())) {
-                  item.detail_url = fullUrl;
-                }
-              }
-              // Link text as company name fallback
-              if (!item.company_name) {
-                const linkText = await this.quickText(entity);
-                if (linkText && linkText.trim().length > 2 && linkText.trim().length < 100) {
-                  item.company_name = linkText.trim();
-                }
-              }
             }
 
             // Detail link
@@ -321,6 +308,7 @@ class GenericExtractor {
             debugInfo.errors.push(`Entity extraction error: ${entityErr.message}`);
           }
         }
+        } // end non-link container path
       }
 
     } catch (err) {
@@ -468,6 +456,209 @@ class GenericExtractor {
 
     console.log(`[GenericExtractor] Extracted ${entities.length} entities from table`);
     return { entities, debugInfo };
+  }
+
+  // ---------------------------------------------------------------------------
+  // FAST EXTRACTION — page.evaluate() based (no locator overhead)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Bulk extract link entities using page.evaluate().
+   * 14 entities: 5-10 minutes with locators → ~100ms with page.evaluate.
+   * Includes navigation/business link filtering inside the browser context.
+   * @param {Page} page - Playwright Page (already navigated)
+   * @param {Object} config - Extraction config
+   * @returns {Array} entities with company_name, detail_url, email, phone, country
+   */
+  async bulkExtractFromPage(page, config) {
+    return await page.evaluate((cfg) => {
+      const results = [];
+      const origin = window.location.origin;
+      const currentPath = window.location.pathname;
+
+      // ---- Navigation link detection (mirrors isNavigationLink) ----
+      function isNavLink(href, text) {
+        const navPatterns = [
+          /^\/$/, /^\/en\/?$/, /^\/[a-z]{2}\/?$/,
+          /\/(login|signup|register|account)\b/i,
+          /\/(about|contact|privacy|terms|faq|help)\b/i,
+          /\/(forum|blog|news|magazine|events|jobs|housing)\b/i,
+          /\/(classifieds|properties|services|network|pictures)\b/i,
+          /\/#/,
+          /^(https?:\/\/)?(www\.)?(facebook|twitter|linkedin|instagram|youtube|google|apple)/i,
+        ];
+        for (const p of navPatterns) {
+          if (p.test(href)) return true;
+        }
+        const navTexts = ['home', 'login', 'sign up', 'more', 'search', 'menu', 'next', 'previous',
+          'back', 'all', 'see all', 'view all', 'read more', 'close', 'ok', 'cancel'];
+        if (navTexts.includes(text.toLowerCase().trim())) return true;
+        return false;
+      }
+
+      // ---- Business profile detection (mirrors isBusinessProfileLink) ----
+      function isBizLink(href) {
+        const bizPatterns = [
+          /\/business\/\d+[_-]/i, /\/exhibitor\//i, /\/company\//i,
+          /\/member\//i, /\/profile\//i, /\/vendor\//i, /\/supplier\//i,
+          /\/directory\/[^/]+\/[^/]+\.\w+$/i,
+          /\/\d+[_-][a-z].*\.\w+$/i,
+        ];
+        for (const p of bizPatterns) {
+          if (p.test(href)) return true;
+        }
+        return false;
+      }
+
+      // ---- Valid detail URL check (mirrors isValidDetailUrl) ----
+      function isValidDetail(href) {
+        try {
+          const parsed = new URL(href, origin);
+          const path = parsed.pathname.toLowerCase();
+          if (parsed.origin + parsed.pathname === origin + currentPath) return false;
+          const invalidPaths = ['/blog','/news','/about','/contact','/login','/signup','/register',
+            '/privacy','/terms','/faq','/help','/sitemap','/search','/category','/tag',
+            '/archive','/feed','/rss','/cart','/checkout','/account','/settings','/wp-admin','/admin'];
+          for (const inv of invalidPaths) {
+            if (path === inv || path.startsWith(inv + '/')) return false;
+          }
+          if (parsed.hostname !== window.location.hostname) return false;
+          if (path === '/' || /^\/[a-z]{2}\/?$/.test(path)) return false;
+          const segments = path.split('/').filter(Boolean);
+          if (segments.length >= 4) {
+            const last = segments[segments.length - 1];
+            if (/^\d+_[a-z-]+$/.test(last)) return false;
+          }
+          return true;
+        } catch { return false; }
+      }
+
+      // ---- Collect all links, filter ----
+      const selector = cfg.entity_selector || 'a[href]';
+      const allLinks = document.querySelectorAll(selector);
+
+      for (const link of allLinks) {
+        const href = link.getAttribute('href') || '';
+        const text = link.textContent?.trim() || '';
+        if (!text || text.length < 3 || text.length > 100) continue;
+        if (!href) continue;
+
+        // Build full URL
+        let fullUrl;
+        try {
+          fullUrl = href.startsWith('http') ? href : new URL(href, origin).href;
+        } catch { continue; }
+
+        // Skip navigation links
+        if (isNavLink(href, text)) continue;
+
+        // Prefer business profile links, but accept any valid detail URL
+        const isBusiness = isBizLink(href);
+        const isValid = isValidDetail(fullUrl);
+        if (!isBusiness && !isValid) continue;
+
+        // Check for email on the page around this link
+        let email = null;
+        const parent = link.closest('li, article, div, tr, section');
+        if (parent) {
+          const mailtoEl = parent.querySelector('a[href^="mailto:"]');
+          if (mailtoEl) email = mailtoEl.href.replace('mailto:', '').split('?')[0].trim();
+          if (!email) {
+            const parentText = parent.textContent || '';
+            const emailMatch = parentText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+            if (emailMatch) email = emailMatch[0];
+          }
+        }
+
+        results.push({
+          company_name: text,
+          detail_url: fullUrl,
+          email,
+          phone: null,
+          country: null
+        });
+      }
+
+      return results;
+    }, config);
+  }
+
+  /**
+   * Fast detail page extraction using page.evaluate().
+   * Replaces slow Playwright locator-based extractDetail() for performance.
+   * Single page.evaluate call: ~10ms vs locator-based: ~5-10 seconds.
+   * @param {Page} page - Playwright Page (already navigated to detail URL)
+   * @param {Object} config - Detail extraction config
+   * @returns {Object} { email, phone, website, contact_name, job_title, address, country }
+   */
+  async quickExtractDetail(page, config) {
+    return await page.evaluate((cfg) => {
+      const result = { email: null, phone: null, website: null, contact_name: null, job_title: null, address: null, country: null };
+
+      // Email — mailto link
+      const mailtoEl = document.querySelector('a[href^="mailto:"]');
+      if (mailtoEl) {
+        result.email = mailtoEl.href.replace('mailto:', '').split('?')[0].trim();
+      }
+      // Fallback: text'te @ ara
+      if (!result.email) {
+        const bodyText = document.body?.textContent || '';
+        const match = bodyText.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+        if (match) result.email = match[0];
+      }
+
+      // Phone — tel link
+      const telEl = document.querySelector('a[href^="tel:"]');
+      if (telEl) {
+        result.phone = telEl.href.replace('tel:', '').trim();
+      }
+
+      // Website — external link (not same domain, not social media)
+      const externalLinks = document.querySelectorAll('a[href^="http"]');
+      for (const link of externalLinks) {
+        try {
+          const url = new URL(link.href);
+          if (url.hostname !== window.location.hostname
+              && !url.hostname.includes('google') && !url.hostname.includes('facebook')
+              && !url.hostname.includes('twitter') && !url.hostname.includes('instagram')
+              && !url.hostname.includes('linkedin') && !url.hostname.includes('youtube')) {
+            result.website = link.href;
+            break;
+          }
+        } catch { /* ignore */ }
+      }
+
+      // Config-based selectors
+      if (cfg.email_selector && !result.email) {
+        const el = document.querySelector(cfg.email_selector);
+        if (el) {
+          const href = el.getAttribute('href') || '';
+          if (href.startsWith('mailto:')) {
+            result.email = href.replace('mailto:', '').split('?')[0].trim();
+          } else if (el.textContent?.includes('@')) {
+            const m = el.textContent.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+            if (m) result.email = m[0];
+          }
+        }
+      }
+
+      if (cfg.address_selector) {
+        const addrEl = document.querySelector(cfg.address_selector);
+        if (addrEl) result.address = addrEl.textContent?.trim();
+      }
+
+      if (cfg.contact_name_selector) {
+        const nameEl = document.querySelector(cfg.contact_name_selector);
+        if (nameEl) result.contact_name = nameEl.textContent?.trim();
+      }
+
+      if (cfg.country_selector) {
+        const countryEl = document.querySelector(cfg.country_selector);
+        if (countryEl) result.country = countryEl.textContent?.trim();
+      }
+
+      return result;
+    }, config);
   }
 
   // ---------------------------------------------------------------------------

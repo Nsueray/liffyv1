@@ -1595,13 +1595,19 @@ Return ONLY the function body in a \`\`\`javascript block.`;
   async getPageAXTree(url, options = {}) {
     const { chromium } = require('playwright');
     const timeout = options.timeout || 20000;
-    let browser = null;
+    const existingBrowser = options.browser || null;
+    let browser = existingBrowser;
+    let ownBrowser = false;
 
     console.log(`[AIMinerGen-v2] Getting AXTree for: ${url}`);
     const startTime = Date.now();
 
     try {
-      browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+      if (!browser) {
+        browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+        ownBrowser = true;
+      }
+
       const context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       });
@@ -1626,8 +1632,11 @@ Return ONLY the function body in a \`\`\`javascript block.`;
         yaml = this.accessibilitySnapshotToYaml(snapshot);
       }
 
-      await browser.close();
-      browser = null;
+      await context.close(); // context kapat, browser'ı paylaşıyorsak açık bırak
+
+      if (ownBrowser) {
+        await browser.close();
+      }
 
       const elapsed = Date.now() - startTime;
       const tokenEstimate = Math.ceil(yaml.length / 4); // ~4 chars per token
@@ -1638,7 +1647,7 @@ Return ONLY the function body in a \`\`\`javascript block.`;
       return { yaml, url, title, tokenEstimate };
 
     } catch (err) {
-      if (browser) await browser.close().catch(() => {});
+      if (ownBrowser && browser) await browser.close().catch(() => {});
       console.error(`[AIMinerGen-v2] AXTree fetch failed: ${err.message}`);
       throw err;
     }
@@ -1958,9 +1967,19 @@ Return ONLY JSON, no explanation.`;
     console.log(`${'='.repeat(60)}`);
 
     try {
-      // Step 1: AXTree al
+      // ============================
+      // SHARED BROWSER — tek browser açılır, tüm adımlarda kullanılır
+      // Eski: 3 browser açma/kapama (AXTree + detail AXTree + crawl) → ~30s overhead
+      // Yeni: 1 browser, paylaşılır → ~3s overhead
+      // ============================
+      const { chromium } = require('playwright');
+      const genericExtractor = require('./genericExtractor');
+      const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+
+      try {
+      // Step 1: AXTree al (shared browser)
       console.log(`[AIMinerGen-v2] Step 1: Getting AXTree...`);
-      const axTree = await this.getPageAXTree(url);
+      const axTree = await this.getPageAXTree(url, { browser });
 
       // Step 2: Claude'a AXTree gönder → config al
       console.log(`[AIMinerGen-v2] Step 2: Calling Claude for config...`);
@@ -1974,12 +1993,9 @@ Return ONLY JSON, no explanation.`;
       console.log(`[AIMinerGen-v2] Config type: ${config.type}`);
       console.log(`[AIMinerGen-v2] Config: ${JSON.stringify(config, null, 2)}`);
 
-      // Step 3: GenericExtractor ile çalıştır
+      // Step 3: GenericExtractor ile çalıştır (shared browser)
       console.log(`[AIMinerGen-v2] Step 3: Executing with GenericExtractor...`);
-      const genericExtractor = require('./genericExtractor');
-      const { chromium } = require('playwright');
 
-      let browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
       const context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       });
@@ -2012,34 +2028,41 @@ Return ONLY JSON, no explanation.`;
         console.log(`[AIMinerGen-v2] Listing: ${listingResult.entities.length} entities, ${withDetailUrl.length} with detail URLs`);
 
         if (withDetailUrl.length > 0) {
-          // Detail config yoksa → ilk detail page'in AXTree'sini al → Claude'a sor
+          // Detail config yoksa → ilk detail page'in AXTree'sini al → Claude'a sor (shared browser)
           let detailConfig = config.detail;
           if (!detailConfig) {
             console.log(`[AIMinerGen-v2] Getting sample detail AXTree: ${withDetailUrl[0].detail_url}`);
-            const detailAXTree = await this.getPageAXTree(withDetailUrl[0].detail_url);
+            const detailAXTree = await this.getPageAXTree(withDetailUrl[0].detail_url, { browser });
             detailConfig = await this.callClaudeForDetailConfig(detailAXTree.yaml, withDetailUrl[0].detail_url, domain);
             console.log(`[AIMinerGen-v2] Detail config: ${JSON.stringify(detailConfig)}`);
           }
 
-          // Detail page'leri crawl et
+          // ============================
+          // Detail page crawl — OPTIMIZED:
+          // - Tek page tab reuse (eski: her sayfa yeni tab aç/kapat)
+          // - networkidle KALDIRILDI (gereksiz, analytics bekleniyor)
+          // - waitForTimeout 1000 → 500ms
+          // - Polite delay 1000 → 300ms
+          // - quickExtractDetail (page.evaluate) kullanılır (eski: locator-based)
+          // ============================
           const maxDetails = Math.min(withDetailUrl.length, options.maxDetails || 50);
-          console.log(`[AIMinerGen-v2] Crawling ${maxDetails} detail pages...`);
+          console.log(`[AIMinerGen-v2] Crawling ${maxDetails} detail pages (optimized: single tab reuse)...`);
 
           let detailSuccess = 0;
           let detailErrors = 0;
+          const detailPage = await context.newPage(); // Tek tab — reuse
 
           for (let i = 0; i < maxDetails; i++) {
             try {
-              const detailPage = await context.newPage();
               await detailPage.goto(withDetailUrl[i].detail_url, {
                 waitUntil: 'domcontentloaded',
-                timeout: 15000
+                timeout: 10000
               });
-              await detailPage.waitForLoadState('networkidle').catch(() => {});
-              await detailPage.waitForTimeout(1000);
+              // networkidle KALDIRILDI — contact bilgisi ilk yüklemede gelir
+              await detailPage.waitForTimeout(500);
 
-              const detail = await genericExtractor.extractDetail(detailPage, detailConfig);
-              await detailPage.close();
+              // quickExtractDetail — page.evaluate ile ~10ms (locator: ~5-10s)
+              const detail = await genericExtractor.quickExtractDetail(detailPage, detailConfig);
 
               if (detail.email || detail.phone) {
                 detailSuccess++;
@@ -2060,8 +2083,8 @@ Return ONLY JSON, no explanation.`;
                 console.log(`[AIMinerGen-v2] Detail progress: ${i + 1}/${maxDetails}, ${results.length} contacts found`);
               }
 
-              // Polite delay
-              await new Promise(r => setTimeout(r, 1000));
+              // Polite delay — 300ms (eski: 1000ms)
+              await new Promise(r => setTimeout(r, 300));
             } catch (detailErr) {
               detailErrors++;
               if (detailErrors <= 3) {
@@ -2070,13 +2093,15 @@ Return ONLY JSON, no explanation.`;
             }
           }
 
+          await detailPage.close(); // Tek tab sonunda kapat
+
           console.log(`[AIMinerGen-v2] Multi-step: ${results.length} contacts from ${maxDetails} detail pages (${detailSuccess} success, ${detailErrors} errors)`);
         } else {
           console.log(`[AIMinerGen-v2] No detail URLs found — cannot crawl detail pages`);
         }
       }
 
-      await browser.close();
+      await context.close();
 
       // Step 4: Validate
       console.log(`[AIMinerGen-v2] Step 4: Validating ${results.length} results...`);
@@ -2147,6 +2172,11 @@ Return ONLY JSON, no explanation.`;
         tokensUsed: totalTokens,
         totalTime
       };
+
+      } finally {
+        // SHARED BROWSER: her durumda kapat (başarılı veya hatalı)
+        await browser.close().catch(() => {});
+      }
 
     } catch (err) {
       console.error(`[AIMinerGen-v2] ❌ FATAL: ${err.message}`);
