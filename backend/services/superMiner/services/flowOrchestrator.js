@@ -650,6 +650,67 @@ class FlowOrchestrator {
             console.log(`[FlowOrchestrator] Enrichment rate: ${(flow1Result.enrichmentRate * 100).toFixed(1)}%`);
 
             // ========================================
+            // AI MINER GENERATOR FALLBACK
+            // When all miners return 0 contacts, try existing generated miner
+            // ========================================
+            if (flow1Result.contactCount === 0 && process.env.AI_MINER_GENERATOR_ENABLED === 'true') {
+                console.log(`[FlowOrchestrator] 0 contacts from all miners — trying AI Miner Generator...`);
+                try {
+                    const aiMinerGenerator = require('../../../services/aiMinerGenerator');
+                    const existingMiner = await aiMinerGenerator.findGeneratedMiner(job.input);
+
+                    if (existingMiner) {
+                        console.log(`[FlowOrchestrator] Found existing generated miner ${existingMiner.id} for domain`);
+                        const runResult = await aiMinerGenerator.runGeneratedMiner(existingMiner, job.input);
+
+                        if (runResult.results && runResult.results.length > 0) {
+                            console.log(`[FlowOrchestrator] Generated miner produced ${runResult.results.length} contacts`);
+
+                            // Convert to UnifiedContact format for aggregator
+                            const aiContacts = runResult.results.map(r => ({
+                                companyName: r.company_name || null,
+                                email: r.email || null,
+                                phone: r.phone || null,
+                                website: r.website || null,
+                                country: r.country || null,
+                                contactName: r.contact_name || null,
+                                jobTitle: r.job_title || null,
+                                address: r.address || null,
+                                city: r.city || null,
+                                sourceUrl: job.input,
+                                source: 'ai_miner_generator'
+                            }));
+
+                            // Persist via Aggregator writeToDatabase + canonical aggregation
+                            const dbResult = await this.aggregator.writeToDatabase(
+                                jobId, job.organizer_id, aiContacts
+                            );
+
+                            if (dbResult.savedCount > 0) {
+                                await this.aggregator.triggerCanonicalAggregation(aiContacts, {
+                                    jobId, organizerId: job.organizer_id, sourceUrl: job.input
+                                });
+                            }
+
+                            // Update flow1Result to reflect AI Miner Generator contacts
+                            flow1Result.contactCount = dbResult.savedCount || aiContacts.length;
+                            flow1Result.minerUsed = 'aiMinerGenerator';
+                            flow1Result._alreadyPersisted = true;
+
+                            console.log(`[FlowOrchestrator] AI Miner Generator saved ${flow1Result.contactCount} contacts`);
+                        }
+                    } else {
+                        // No existing generated miner — log manual trigger command
+                        console.log(`[FlowOrchestrator] No working generated miner for ${job.input} — manual generation needed`);
+                        console.log(`[FlowOrchestrator] Trigger manually: POST /api/admin/ai-miner/generate { "url": "${job.input}" }`);
+                    }
+                } catch (aiErr) {
+                    // AI Miner Generator errors must NEVER break the main pipeline
+                    console.error(`[FlowOrchestrator] AI Miner Generator error (non-fatal): ${aiErr.message}`);
+                }
+            }
+
+            // ========================================
             // NO-REDIS FAST PATH: If Flow1 already persisted to DB, skip Flow2
             // ========================================
             if (flow1Result._alreadyPersisted) {

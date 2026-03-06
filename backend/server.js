@@ -27,6 +27,7 @@ const zohoRouter = require('./routes/zoho');
 const personsRouter = require('./routes/persons');
 const intentsRouter = require('./routes/intents');
 const unsubscribesRouter = require('./routes/unsubscribes');
+const adminAIMinerRouter = require('./routes/adminAIMiner');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -70,6 +71,7 @@ app.use('/api/zoho', zohoRouter);
 app.use('/api/persons', personsRouter);
 app.use('/api/intents', intentsRouter);
 app.use('/api/unsubscribes', unsubscribesRouter);
+app.use('/api/admin/ai-miner', adminAIMinerRouter);
 app.use(webhooksRouter);
 app.use(statsRouter);
 
