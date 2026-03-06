@@ -700,9 +700,56 @@ class FlowOrchestrator {
                             console.log(`[FlowOrchestrator] AI Miner Generator saved ${flow1Result.contactCount} contacts`);
                         }
                     } else {
-                        // No existing generated miner — log manual trigger command
-                        console.log(`[FlowOrchestrator] No working generated miner for ${job.input} — manual generation needed`);
-                        console.log(`[FlowOrchestrator] Trigger manually: POST /api/admin/ai-miner/generate { "url": "${job.input}" }`);
+                        // No existing generated miner — auto-trigger generation (Phase 1)
+                        console.log(`[FlowOrchestrator] No saved generated miner — auto-triggering generation for ${job.input}`);
+                        const canAttempt = await aiMinerGenerator.shouldAttemptGeneration(job.input);
+
+                        if (canAttempt) {
+                            const genResult = await aiMinerGenerator.generateMinerWithRetry(job.input, {
+                                organizerId: job.organizer_id
+                            });
+
+                            if (genResult.success && genResult.results && genResult.results.length > 0) {
+                                console.log(`[FlowOrchestrator] Auto-generated miner produced ${genResult.results.length} contacts (attempt ${genResult.attempt})`);
+
+                                // Convert to UnifiedContact format for aggregator
+                                const aiContacts = genResult.results.map(r => ({
+                                    companyName: r.company_name || null,
+                                    email: r.email || null,
+                                    phone: r.phone || null,
+                                    website: r.website || null,
+                                    country: r.country || null,
+                                    contactName: r.contact_name || null,
+                                    jobTitle: r.job_title || null,
+                                    address: r.address || null,
+                                    city: r.city || null,
+                                    sourceUrl: job.input,
+                                    source: 'ai_miner_generator'
+                                }));
+
+                                // Persist via Aggregator writeToDatabase + canonical aggregation
+                                const dbResult = await this.aggregator.writeToDatabase(
+                                    jobId, job.organizer_id, aiContacts
+                                );
+
+                                if (dbResult.savedCount > 0) {
+                                    await this.aggregator.triggerCanonicalAggregation(aiContacts, {
+                                        jobId, organizerId: job.organizer_id, sourceUrl: job.input
+                                    });
+                                }
+
+                                // Update flow1Result to reflect AI Miner Generator contacts
+                                flow1Result.contactCount = dbResult.savedCount || aiContacts.length;
+                                flow1Result.minerUsed = 'aiMinerGenerator';
+                                flow1Result._alreadyPersisted = true;
+
+                                console.log(`[FlowOrchestrator] Auto-generated miner saved ${flow1Result.contactCount} contacts`);
+                            } else {
+                                console.log(`[FlowOrchestrator] Auto-generation ${genResult.success ? 'produced 0 contacts' : 'failed: ' + genResult.error}`);
+                            }
+                        } else {
+                            console.log(`[FlowOrchestrator] Domain in 24h cooldown — skipping auto-generation`);
+                        }
                     }
                 } catch (aiErr) {
                     // AI Miner Generator errors must NEVER break the main pipeline
