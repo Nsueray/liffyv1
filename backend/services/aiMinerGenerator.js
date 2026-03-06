@@ -1153,34 +1153,181 @@ Analyze the page structure and decide between TYPE 1 (single page — ${emailCou
         };
       }
 
-      // Step 5: Security scan
-      console.log(`[AIMinerGenerator] Step 5: Security scanning (${parsed.type})...`);
+      // Step 5-6: Security scan + Test execution
+      let sandboxResult;
+
       if (parsed.type === 'multi_step') {
-        // Scan both step1 and step2 code
+        // =============================================================
+        // TYPE 2: TWO-API-CALL APPROACH
+        // 1st call gave us step1 code (listing extraction)
+        // Now: run step1, fetch sample detail HTML, 2nd call for step2
+        // =============================================================
+
+        // 5a: Security scan step1
+        console.log('[AIMinerGenerator] Step 5a: Security scanning step1_listing...');
         const scan1 = this.securityScan(parsed.step1_listing);
         if (!scan1.safe) {
           console.error('[AIMinerGenerator] Security scan FAILED on step1_listing');
           return { success: false, error: `Security violation in step1: ${scan1.violations.map(v => v.reason).join(', ')}`, code: parsed.code };
         }
-        const scan2 = this.securityScan(parsed.step2_detail);
-        if (!scan2.safe) {
-          console.error('[AIMinerGenerator] Security scan FAILED on step2_detail');
-          return { success: false, error: `Security violation in step2: ${scan2.violations.map(v => v.reason).join(', ')}`, code: parsed.code };
+
+        // 5b: Execute step1 to get listings
+        console.log('[AIMinerGenerator] Step 5b: Executing step1 (listing extraction)...');
+        const { chromium } = require('playwright');
+        let genBrowser = null;
+        try {
+          genBrowser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+          const genContext = await genBrowser.newContext({
+            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          });
+          const listingPage = await genContext.newPage();
+          const targetDomain = new URL(url).hostname;
+          await this.setupNetworkBlocking(listingPage, targetDomain);
+
+          await listingPage.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          await listingPage.waitForLoadState('networkidle').catch(() => {});
+          await listingPage.waitForTimeout(2000);
+
+          const wrappedStep1 = `(() => {
+            try {
+              ${parsed.step1_listing}
+            } catch (err) {
+              return { __error: err.message };
+            }
+          })()`;
+
+          const step1Result = await Promise.race([
+            listingPage.evaluate(wrappedStep1),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Step 1 timeout')), 30000))
+          ]);
+
+          if (step1Result && step1Result.__error) {
+            await genBrowser.close();
+            return { success: false, error: `Step 1 execution error: ${step1Result.__error}`, code: parsed.code };
+          }
+
+          const listings = Array.isArray(step1Result) ? step1Result : [];
+          const withDetailUrl = listings.filter(l => l && l.detail_url && typeof l.detail_url === 'string');
+          console.log(`[AIMinerGenerator] Step 1 found ${listings.length} listings (${withDetailUrl.length} with detail URLs)`);
+
+          if (withDetailUrl.length === 0) {
+            await genBrowser.close();
+            return { success: false, error: `Step 1 found ${listings.length} listings but 0 detail URLs`, code: parsed.code };
+          }
+
+          // 5c: Fetch sample detail page HTML
+          const sampleUrl = withDetailUrl[0].detail_url;
+          console.log(`[AIMinerGenerator] Step 5c: Fetching sample detail page: ${sampleUrl}`);
+          const detailPage = await genContext.newPage();
+          await this.setupNetworkBlocking(detailPage, targetDomain);
+          await detailPage.goto(sampleUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          await detailPage.waitForLoadState('networkidle').catch(() => {});
+          await detailPage.waitForTimeout(1500);
+          const detailHtml = await detailPage.content();
+          await detailPage.close();
+          await genBrowser.close();
+          genBrowser = null;
+
+          console.log(`[AIMinerGenerator] Sample detail HTML: ${detailHtml.length} chars`);
+
+          // 5d: Sanitize detail HTML + second Claude API call for step2
+          console.log('[AIMinerGenerator] Step 5d: Calling Claude API for Step 2 (detail extraction)...');
+          const sanitizedDetailHtml = this.sanitizeHtml(detailHtml);
+          const detailBoundary = this.generateBoundary();
+
+          const step2UserPrompt = `You previously analyzed a listing page and found company entries with detail page URLs.
+Now I'm showing you a SAMPLE detail/profile page. Write a page.evaluate() function body that extracts contact information from THIS specific page structure.
+
+Sample detail page URL: ${sampleUrl}
+Company name from listing: ${withDetailUrl[0].company_name || 'Unknown'}
+
+The code must return an ARRAY of objects (usually one per page):
+[{ email: "...", phone: "...", website: "...", country: "...", contact_name: "...", job_title: "...", address: "..." }]
+
+All fields are strings or null. Look for:
+- Email: mailto links, text containing @, data attributes with email
+- Phone: tel links, phone patterns, text with +/() digits
+- Website: external links (not same domain), href with http
+- Address: structured address elements, text with street/city patterns
+
+Return an array with at least one object even if some fields are null. Return [] only if the page has NO contact info at all.
+
+RULES: vanilla JS + DOM APIs only. No fetch, no require, no network calls. Use "return" not "continue" inside .forEach().
+
+<<START_UNTRUSTED_HTML_${detailBoundary}>>
+${sanitizedDetailHtml}
+<<END_UNTRUSTED_HTML_${detailBoundary}>>
+
+Return ONLY the function body in a \`\`\`javascript block.`;
+
+          const step2Response = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': process.env.ANTHROPIC_API_KEY,
+              'anthropic-version': '2023-06-01'
+            },
+            body: JSON.stringify({
+              model: 'claude-sonnet-4-20250514',
+              max_tokens: 4096,
+              system: this.buildSystemPrompt(),
+              messages: [{ role: 'user', content: step2UserPrompt }]
+            })
+          });
+
+          if (!step2Response.ok) {
+            const errBody = await step2Response.text();
+            console.error(`[AIMinerGenerator] Step 2 Claude API error ${step2Response.status}: ${errBody}`);
+            return { success: false, error: `Step 2 API error: ${step2Response.status}`, code: parsed.code };
+          }
+
+          const step2Data = await step2Response.json();
+          const step2RawResponse = step2Data.content?.[0]?.text || '';
+          const step2Tokens = (step2Data.usage?.input_tokens || 0) + (step2Data.usage?.output_tokens || 0);
+          const step2Code = this.extractCodeFromResponse(step2RawResponse);
+
+          console.log(`[AIMinerGenerator] Step 2 code generated: ${step2Code?.length || 0} chars, ${step2Tokens} tokens`);
+
+          if (!step2Code) {
+            return { success: false, error: 'Failed to generate Step 2 code from detail page HTML', code: parsed.code };
+          }
+
+          // 5e: Security scan step2
+          console.log('[AIMinerGenerator] Step 5e: Security scanning step2_detail...');
+          const scan2 = this.securityScan(step2Code);
+          if (!scan2.safe) {
+            return { success: false, error: `Step 2 security violation: ${scan2.violations.map(v => v.reason).join(', ')}`, code: parsed.code };
+          }
+
+          // Override step2 with real site-specific code
+          parsed.step2_detail = step2Code;
+          parsed.code = JSON.stringify({ type: 'multi_step', step1_listing: parsed.step1_listing, step2_detail: step2Code });
+          apiResult.tokensUsed += step2Tokens;
+
+          console.log(`[AIMinerGenerator] Step 5 complete — total tokens: ${apiResult.tokensUsed}`);
+
+          // 6: Execute full multi-step with updated step2 code
+          console.log('[AIMinerGenerator] Step 6: Executing multi-step with site-specific step2...');
+          sandboxResult = await this.executeMultiStep(parsed.step1_listing, parsed.step2_detail, url);
+
+        } catch (genErr) {
+          if (genBrowser) await genBrowser.close().catch(() => {});
+          console.error(`[AIMinerGenerator] TYPE 2 generation error: ${genErr.message}`);
+          return { success: false, error: `Multi-step generation failed: ${genErr.message}`, code: parsed.code };
         }
+
       } else {
+        // =============================================================
+        // TYPE 1: SINGLE-PAGE — standard scan + execute
+        // =============================================================
+        console.log('[AIMinerGenerator] Step 5: Security scanning...');
         const scanResult = this.securityScan(parsed.code);
         if (!scanResult.safe) {
           console.error('[AIMinerGenerator] Security scan FAILED — code rejected');
           return { success: false, error: `Security violation: ${scanResult.violations.map(v => v.reason).join(', ')}`, code: parsed.code };
         }
-      }
 
-      // Step 6: Test in sandbox
-      console.log(`[AIMinerGenerator] Step 6: Testing in sandbox (${parsed.type})...`);
-      let sandboxResult;
-      if (parsed.type === 'multi_step') {
-        sandboxResult = await this.executeMultiStep(parsed.step1_listing, parsed.step2_detail, url);
-      } else {
+        console.log('[AIMinerGenerator] Step 6: Testing in sandbox...');
         sandboxResult = await this.executeInSandbox(parsed.code, url);
       }
 
