@@ -1,6 +1,8 @@
 # RFC v3: AI Miner Generator — Self-Evolving Mining Engine
 
-**Status:** ACTIVE DEVELOPMENT — Phase 0 complete, Phase 1 in progress
+> **⚠️ SUPERSEDED:** Bu RFC v4 tarafından supersede edilmiştir. v1 yaklaşım (JS kod üretimi) %29 başarı oranıyla park edildi. Yeni yaklaşım için bkz: [RFC_v4_AI_Miner_Generator.md](./RFC_v4_AI_Miner_Generator.md)
+
+**Status:** ~~ACTIVE DEVELOPMENT~~ PARKED — v1 approach (%29 success). Superseded by v4 (AXTree + Config-Driven + Self-Healing).
 **Author:** Liffy Architecture Team
 **Date:** 2025-03-06 (v3 — rewritten based on real-world testing)
 **Reviewers:** Engineering team, ChatGPT (2 rounds), Gemini (deep feasibility report)

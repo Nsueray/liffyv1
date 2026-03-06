@@ -33,6 +33,11 @@
 | A23 | Node.js heap limit (NODE_OPTIONS env var) | P1 | TODO (manual Render config) |
 | A24 | Excel mining quality — column mapping improvement | P2 | TODO |
 | A25 | flipbookMiner v2 — dual-path extraction (column-position + isolateSegment for pre/code layouts) | P1 | ✅ DONE |
+| A26 | AI Miner Generator v2 — AXTree integration (Playwright ariaSnapshot → YAML) | P1 | TODO |
+| A27 | AI Miner Generator v2 — Config-driven templates (GenericDirectoryExtractor, GenericTableExtractor) | P1 | TODO |
+| A28 | AI Miner Generator v2 — Self-Healing REPL loop (max 3-5 iterasyon, hata feedback) | P1 | TODO |
+| A29 | AI Miner Generator v2 — Multi-step listing + detail (AXTree-based) | P1 | TODO |
+| A30 | AI Miner Generator v2 — Test & validate (%60+ başarı hedefi, v1 başarısız URL'leri tekrar test) | P1 | TODO |
 
 ## B. UI TASKS
 

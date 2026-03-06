@@ -702,56 +702,66 @@ All endpoints:
 
 ---
 
-## AI Miner Generator — Phase 0 (Lab Mode)
+## AI Miner Generator — v1 (Park) → v2 (Aktif Geliştirme)
 
-Self-evolving mining engine: when existing miners fail on a new site, Claude generates site-specific extraction code that runs in a Playwright sandbox.
+Self-evolving mining engine: when existing miners fail on a new site, Claude generates site-specific extraction config that runs via generic templates.
 
-**Status:** Phase 0 — controlled lab, no production integration. Manual test via CLI only.
+**Status:** v1 (Phase 0, JS generation) PARKED — %29 başarı oranı. v2 geçiş aktif.
 
-**Pipeline:**
+**v1 Neden Park Edildi:**
+- %29 başarı — sadece email'leri DOM'da doğrudan gösteren basit sayfalarda çalıştı
+- Claude **uydurma CSS selector** üretiyordu (`.company-card`, `.directory-item` — gerçekte yok)
+- 100KB raw HTML gönderiliyordu — çok gürültülü, Claude asıl veriyi bulamıyordu
+- Tek deneme, başarısız olursa bitir. Self-healing yok.
+
+**v2 Yaklaşım (3 Temel Değişiklik):**
+
+| # | Değişiklik | Etki |
+|---|-----------|------|
+| 1 | **AXTree (Accessibility Tree)** — Ham HTML yerine Playwright `ariaSnapshot()` YAML | %95 token tasarrufu, halüsinasyon riski sıfır |
+| 2 | **Config-Driven Extraction** — AI kod yazmaz, JSON selector config üretir | Kırılganlık azalır, güvenlik riski düşer |
+| 3 | **Self-Healing REPL Loop** — tek deneme yerine iteratif düzeltme (max 3-5) | Başarı oranı %29 → hedef %60+ |
+
+**v2 Pipeline:**
 ```
-URL → Playwright fetch (SPA support, static fallback)
-  → sanitizeHtml() — strips scripts/styles/SVG/noscript, removes data-* attrs
-  → smartTruncate() — email-density-aware chunking (100KB limit, 5KB chunks scored by email/phone/mailto density)
-  → Spotlighting — random hex boundary delimiters around untrusted HTML (prompt injection defense)
-  → Claude API (claude-sonnet-4-20250514) — generates page.evaluate() JS code
-  → postProcessCode() — fixes common AI bugs (continue→return in forEach, for...of NodeList)
-  → securityScan() — 20 forbidden patterns (eval, fetch, XMLHttpRequest, import, require, etc.)
-  → executeInSandbox() — Playwright page.evaluate() with IIFE wrapper, 30s timeout, network blocking
-  → validateResults() — email rate >30%, format >80% valid, duplicates <50%, hallucination detection
-  → saveMiner() — persist to generated_miners table (status: pending_approval)
+URL → Playwright render → ariaSnapshot() YAML (2-5KB)
+  → Claude API: "Bu AXTree'de tekrar eden entity blokları bul"
+  → Claude JSON config döner (kod değil!):
+    {
+      entity_selector: "role=listitem",
+      name: "heading level=3",
+      detail_link: "link 'View Profile'",
+      email: "link name=/mailto:/",
+      phone: "text /\\+?\\d/"
+    }
+  → Sabit GenericExtractor template config ile çalışır
+  → Başarısız → hata + güncel AXTree → Claude'a geri → düzelt (max 3-5)
+  → Başarılı → config DB'ye kaydet, reuse
 ```
 
-**Security layers:**
-1. **Spotlighting** — Microsoft prompt injection defense: random hex boundary tags around HTML
-2. **Security scanner** — 20 regex patterns block dangerous code (eval, fetch, import, require, document.cookie, window.location, etc.)
-3. **Network blocking** — `page.route('**/*', ...)` blocks all requests except target domain + static CDNs
-4. **Sandbox execution** — `page.evaluate()` runs in browser context (no Node.js APIs)
-5. **IIFE wrapper** — `(() => { try { ${code} } catch(err) { return { __error: err.message }; } })()`
-6. **Output validation** — email rate, format, duplicates, hallucination checks
+**v2 Beklenen İyileşme:**
 
-**Quality tracking:**
-- `quality_score = success_count / (success_count + failure_count)`
-- Auto-disable: 3+ failures with score < 0.3 → status = 'auto_disabled'
-- `recordSuccess()` / `recordFailure()` update counters + timestamps
+| Metrik | v1 (Park) | v2 (Hedef) |
+|--------|-----------|------------|
+| Token per call | 15-40K | 2-5K (%90↓) |
+| Maliyet per site | $0.10-0.30 | $0.01-0.05 |
+| Halüsinasyon | Yüksek | ~Sıfır |
+| Genel başarı oranı | %29 | %60+ |
 
-**Key methods:**
-| Method | Purpose |
-|--------|---------|
-| `generateMiner(url, options)` | Full pipeline: fetch → sanitize → Claude → sandbox → validate → save |
-| `runGeneratedMiner(minerId, url)` | Execute saved miner code against a URL |
-| `findGeneratedMiner(url)` | Find active miner matching URL domain |
-| `approveMiner(id, userId)` | Approve pending miner → status='active' |
-| `disableMiner(id, reason)` | Disable miner with reason |
-| `smartTruncate(html, maxLen)` | Email-density-aware HTML truncation |
+**Mevcut altyapı (aynen kalıyor):**
+- `generated_miners` DB tablosu — `miner_code` artık JSON config olacak
+- Admin API (7 endpoint) — değişmez
+- Pipeline hook (flowOrchestrator) — değişmez
+- Security scan — config-driven'da daha az risk ama kalır
+- Output validation — değişmez
 
-**Known limitations (Phase 0):**
-- Emails must be in DOM — click-to-reveal, AJAX-loaded emails not extractable
-- Single-page only — no multi-page crawl (detail page emails not reachable)
-- SPAs now supported via Playwright fetch (added in quick fix)
+**Detaylı dokümanlar:**
+- [RFC_v4_AI_Miner_Generator.md](./RFC_v4_AI_Miner_Generator.md) — teknik RFC
+- [AI_Miner_Generator_Report_v2.md](./AI_Miner_Generator_Report_v2.md) — proje raporu
 
 **Files:**
-- `backend/services/aiMinerGenerator.js` — main service (~820 lines)
+- `backend/services/aiMinerGenerator.js` — main service (~1400 lines, v2'de güncellenecek)
+- `backend/services/genericExtractor.js` — YENİ (v2 — config-driven template)
 - `backend/scripts/testAIMinerGenerator.js` — CLI test script
 - `backend/migrations/024_create_generated_miners.sql` — DB table
 
