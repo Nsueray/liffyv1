@@ -260,8 +260,16 @@ Hedef: 6 URL'den 4+ başarılı (%66+)
 | glmis.gov.gh/Domestic | Regression (v1'de çalışıyordu) | ✅ 11 contact, 3555 token — v1'den daha iyi |
 | valveworldexpo.com | SPA directory | ❌ name_role null — container mode iyileştirmesi gerekli |
 | ghanabusinessweb.com | Listing + detail | ❌ Yanlış detail URL'ler — link filtering gerekli |
+| expat.com/business/africa/ghana | Multi-step directory | ❌ entity_role="link" → 261 link (çok geniş). Link filtering + self-href fix eklendi |
+
+### Yapılan İyileştirmeler
+- ✅ Container mode name fallback — heading → first text line (name_role null fix)
+- ✅ Detail URL fallback — first valid `<a>` link, isValidDetailUrl filtering
+- ✅ Prompt: entity_role "link" FORBIDDEN, name_role MUST NOT be null
+- ✅ Link entity guard — isNavigationLink + isBusinessProfileLink filtering
+- ✅ Link entity self-href — entity IS the link → href = detail_url
+- ✅ quickText timeout (5s) + max 50 entities cap (performance)
 
 ### Kalan İyileştirmeler
-- Container mode'da name extraction (listitem içinde heading/text bul)
-- Detail link filtering (blog/homepage URL'leri filtrele, sadece profil/company URL'leri al)
+- Self-healing loop ile expat.com tekrar test
 - Daha fazla site testi (20 URL hedefi)

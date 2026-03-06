@@ -753,6 +753,7 @@ URL → Playwright render → ariaSnapshot() YAML (2-5KB)
 | glmis.gov.gh/Domestic | 6KB | 3,555 | single_page (anchor) | ✅ 11 contact, 100% email, 100% company |
 | valveworldexpo.com/directory | 20KB | 8,081 | multi_step | ❌ 115 listitem buldu ama name_role null — VIS SPA çok özel yapı |
 | ghanabusinessweb.com | 15KB | 6,224 | multi_step | ❌ 18 entity, 3 detail URL ama yanlış linkler (homepage, blog değil profil) |
+| expat.com/business/africa/ghana | ~25KB | ~5,000 | multi_step | ❌ entity_role="link" → 261 link (tüm sayfa linkleri). Link filtering eklendi (be00916). Self-href fix eklendi. |
 
 **v1 vs v2 karşılaştırma (glmis.gov.gh):**
 
@@ -764,7 +765,14 @@ URL → Playwright render → ariaSnapshot() YAML (2-5KB)
 | Config | 200 satır JS | 10 satır JSON |
 | Halüsinasyon | CSS selector tahmin | Sıfır (semantic) |
 
-**v2 Commits:** d3db511 (Step 1 — AXTree + GenericExtractor + prompts), f139403 (anchor-based fix)
+**v2 Commits:** d3db511 (Step 1 — AXTree + GenericExtractor + prompts), f139403 (anchor-based fix), 3f84983 (container name fallback + URL filtering), be00916 (link entity filtering + navigation detection)
+
+**GenericExtractor İyileştirmeleri:**
+- Container name fallback: heading → first text line (name_role null durumu)
+- Detail URL fallback: first valid `<a>` link, isValidDetailUrl filtering
+- Link entity guard: entity_role="link" → isNavigationLink + isBusinessProfileLink filtering
+- Link entity self-href: entity IS the link → its href = detail_url
+- quickText timeout: 5s Promise.race guard, max 50 entities cap
 
 **Mevcut altyapı (aynen kalıyor):**
 - `generated_miners` DB tablosu — `miner_code` artık JSON config

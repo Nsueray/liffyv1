@@ -37,7 +37,7 @@
 | A27 | AI Miner Generator v2 — GenericExtractor templates (config-driven) | P1 | ✅ DONE |
 | A28 | AI Miner Generator v2 — Self-healing REPL loop (3-5 iterations) | P1 | ✅ DONE |
 | A29 | AI Miner Generator v2 — Multi-step config (listing + detail AXTree) | P1 | ✅ DONE |
-| A30 | AI Miner Generator v2 — Test: glmis.gov.gh ✅ başarılı (11 contact, 3555 token). VIS + Ghana Business Web ❌ (zor case). Daha fazla URL test gerekli. | P1 | IN PROGRESS |
+| A30 | AI Miner Generator v2 — Test: glmis.gov.gh ✅ (11 contact, 3555 token). VIS ❌, Ghana Business Web ❌, expat.com ❌ (entity_role="link" → 261 link, link filtering eklendi). GenericExtractor: link self-href, quickText timeout, max 50 entity. | P1 | IN PROGRESS |
 
 ## B. UI TASKS
 

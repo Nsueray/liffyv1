@@ -294,13 +294,16 @@ Yeni yaklaşım mevcut altyapıyı KULLANIR, silmez:
 | glmis.gov.gh/Domestic | 6KB | 3,555 | single_page anchor | 21 heading → 11 email | 11 (100% email) | ✅ BAŞARILI |
 | valveworldexpo.com/directory/a | 20KB | 8,081 | multi_step | 115 listitem → name_role null | 0 | ❌ VIS SPA — özel yapı |
 | ghanabusinessweb.com | 15KB | 6,224 | multi_step | 18 heading → 3 detail URL (yanlış) | 0 | ❌ Homepage, dizin değil |
+| expat.com/business/africa/ghana | ~25KB | ~5,000 | multi_step | entity_role="link" → 261 link | 0 | ❌ Çok geniş entity seçimi — link filtering eklendi |
 
 **Önemli bulgular:**
 - AXTree %94 küçük (6KB vs 74KB HTML) — token %81 düşüş
 - Anchor-based extraction düz layout'larda mükemmel çalışıyor
-- Container-based extraction (listitem) name çıkaramıyor — name_role null sorunu
-- Multi-step detail URL tespiti iyileştirmeli — homepage/blog linkleri yerine gerçek profil linkleri
+- Container-based extraction (listitem) name çıkaramıyor — name_role null sorunu → heading/text fallback eklendi
+- Multi-step detail URL tespiti iyileştirmeli — homepage/blog linkleri yerine gerçek profil linkleri → isValidDetailUrl eklendi
 - VIS gibi SPA platformlar hala zor — visExhibitorMiner gibi özel miner daha uygun
+- entity_role="link" çok geniş — tüm sayfa linklerini yakalar → isNavigationLink + isBusinessProfileLink filtering eklendi
+- Link entity self-href: entity IS the link → kendi href'i = detail_url (fix eklendi)
 
 ---
 

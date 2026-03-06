@@ -188,6 +188,14 @@ class GenericExtractor {
 
         console.log(`[GenericExtractor] Container mode found ${entityLocators.length} entities`);
 
+        // PERFORMANCE: Cap at 50 entities to prevent timeout on large pages
+        const MAX_ENTITIES = 50;
+        if (entityLocators.length > MAX_ENTITIES) {
+          console.log(`[GenericExtractor] Capping ${entityLocators.length} entities to ${MAX_ENTITIES} (performance guard)`);
+          entityLocators = entityLocators.slice(0, MAX_ENTITIES);
+          debugInfo.selectorsFound.capped_at = MAX_ENTITIES;
+        }
+
         // Her entity'den veri çıkar
         for (const entity of entityLocators) {
           try {
@@ -199,19 +207,19 @@ class GenericExtractor {
               const nameRoleName = config.name_role.split('[')[0].split(' ')[0].trim();
               try {
                 const nameEl = entity.getByRole(nameRoleName, nameRoleOpts);
-                item.company_name = await nameEl.first().textContent().catch(() => null);
+                item.company_name = await this.quickText(nameEl.first());
               } catch { /* ignore */ }
             }
             // Fallback: config CSS selector
             if (!item.company_name && config.name_selector) {
               try {
-                item.company_name = await entity.locator(config.name_selector).first().textContent().catch(() => null);
+                item.company_name = await this.quickText(entity.locator(config.name_selector).first());
               } catch { /* ignore */ }
             }
             // Fallback: any heading inside entity (h1-h6)
             if (!item.company_name) {
               try {
-                const anyHeading = await entity.locator('h1, h2, h3, h4, h5, h6').first().textContent().catch(() => null);
+                const anyHeading = await this.quickText(entity.locator('h1, h2, h3, h4, h5, h6').first());
                 if (anyHeading && anyHeading.trim().length > 1) {
                   item.company_name = anyHeading.trim();
                 }
@@ -220,12 +228,31 @@ class GenericExtractor {
             // Fallback: first line of entity text (if short enough to be a name)
             if (!item.company_name) {
               try {
-                const fullText = await entity.textContent().catch(() => '');
+                const fullText = await this.quickText(entity) || '';
                 const firstLine = fullText.trim().split('\n')[0]?.trim();
                 if (firstLine && firstLine.length > 2 && firstLine.length < 100) {
                   item.company_name = firstLine;
                 }
               } catch { /* ignore */ }
+            }
+
+            // LINK ENTITY: When entity IS a link element, its own href is the detail_url
+            // (no need to look for links INSIDE — the entity itself is the link)
+            if (config.entity_role === 'link') {
+              const selfHref = await entity.getAttribute('href').catch(() => null);
+              if (selfHref) {
+                const fullUrl = selfHref.startsWith('http') ? selfHref : new URL(selfHref, page.url()).href;
+                if (this.isValidDetailUrl(fullUrl, page.url())) {
+                  item.detail_url = fullUrl;
+                }
+              }
+              // Link text as company name fallback
+              if (!item.company_name) {
+                const linkText = await this.quickText(entity);
+                if (linkText && linkText.trim().length > 2 && linkText.trim().length < 100) {
+                  item.company_name = linkText.trim();
+                }
+              }
             }
 
             // Detail link
@@ -470,6 +497,24 @@ class GenericExtractor {
       }
     } catch { /* ignore */ }
     return null;
+  }
+
+  /**
+   * Extract text content with a timeout guard.
+   * Prevents hanging on slow/broken elements.
+   * @param {Locator} locator - Playwright locator
+   * @param {number} timeoutMs - Max wait time (default 5000ms)
+   * @returns {string|null}
+   */
+  async quickText(locator, timeoutMs = 5000) {
+    try {
+      return await Promise.race([
+        locator.textContent(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('quickText timeout')), timeoutMs))
+      ]);
+    } catch {
+      return null;
+    }
   }
 
   /**
