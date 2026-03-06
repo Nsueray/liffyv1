@@ -1993,6 +1993,25 @@ Return ONLY JSON, no explanation.`;
       console.log(`[AIMinerGen-v2] Config type: ${config.type}`);
       console.log(`[AIMinerGen-v2] Config: ${JSON.stringify(config, null, 2)}`);
 
+      // Claude tutarsızlık koruması:
+      // AXTree'de email 0 ise single_page mantıksız — multi_step'e zorla
+      const emailsInAXTree = (axTree.yaml.match(/mailto:|@[a-zA-Z]/g) || []).length;
+      if (config.type === 'single_page' && emailsInAXTree === 0) {
+        console.log(`[AIMinerGen-v2] Override: Claude said single_page but 0 emails in AXTree — forcing multi_step`);
+        config.type = 'multi_step';
+        config.listing = {
+          entity_role: config.entity_role,
+          entity_mode: config.entity_mode,
+          entity_selector: config.entity_selector,
+          name_role: config.name_role,
+          name_selector: config.name_selector,
+          detail_link_role: config.entity_role,
+          detail_link_selector: config.entity_selector,
+          country_selector: config.country_selector
+        };
+        config.detail = null; // Detail config Claude'dan ayrıca istenir
+      }
+
       // Step 3: GenericExtractor ile çalıştır (shared browser)
       console.log(`[AIMinerGen-v2] Step 3: Executing with GenericExtractor...`);
 
@@ -2040,8 +2059,7 @@ Return ONLY JSON, no explanation.`;
           // ============================
           // Detail page crawl — OPTIMIZED:
           // - Tek page tab reuse (eski: her sayfa yeni tab aç/kapat)
-          // - networkidle KALDIRILDI (gereksiz, analytics bekleniyor)
-          // - waitForTimeout 1000 → 500ms
+          // - networkidle 5s timeout ile (eski: sınırsız bekleme)
           // - Polite delay 1000 → 300ms
           // - quickExtractDetail (page.evaluate) kullanılır (eski: locator-based)
           // ============================
@@ -2058,8 +2076,8 @@ Return ONLY JSON, no explanation.`;
                 waitUntil: 'domcontentloaded',
                 timeout: 10000
               });
-              // networkidle KALDIRILDI — contact bilgisi ilk yüklemede gelir
-              await detailPage.waitForTimeout(500);
+              // networkidle — 5s timeout ile bekle, timeout olursa devam et
+              await detailPage.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
               // quickExtractDetail — page.evaluate ile ~10ms (locator: ~5-10s)
               const detail = await genericExtractor.quickExtractDetail(detailPage, detailConfig);
