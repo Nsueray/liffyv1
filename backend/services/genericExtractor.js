@@ -16,103 +16,219 @@ class GenericExtractor {
    * @returns {{ entities: Array, debugInfo: Object }}
    */
   async extractListing(page, config) {
-    const debugInfo = { selectorsFound: {}, errors: [] };
+    const debugInfo = { selectorsFound: {}, errors: [], mode: 'container' };
     const entities = [];
 
     try {
-      // Entity blokları bul — role-based veya CSS fallback
-      let entityLocators;
+      // Detect extraction mode: anchor-based vs container-based
+      const isAnchorMode = config.entity_mode === 'anchor' || this.isHeadingRole(config.entity_role);
 
-      if (config.entity_role) {
-        // Semantic: getByRole
-        try {
-          entityLocators = await page.getByRole(config.entity_role).all();
-          debugInfo.selectorsFound.entity_role = entityLocators.length;
-        } catch (roleErr) {
-          debugInfo.errors.push(`getByRole('${config.entity_role}') failed: ${roleErr.message}`);
-        }
-      }
+      if (isAnchorMode) {
+        // ============================
+        // ANCHOR-BASED EXTRACTION
+        // Entities are NOT wrapped in a container — they're flat siblings
+        // anchored by repeating headings at the same level.
+        // Example: heading[5] "Company A" → siblings → heading[5] "Company B" → siblings
+        // ============================
+        debugInfo.mode = 'anchor';
+        const roleOpts = this.parseRoleOptions(config.entity_role);
+        const roleName = config.entity_role.split('[')[0].split(' ')[0].trim();
 
-      if ((!entityLocators || entityLocators.length === 0) && config.entity_selector) {
-        // CSS fallback
-        try {
-          entityLocators = await page.locator(config.entity_selector).all();
-          debugInfo.selectorsFound.entity_selector = entityLocators.length;
-        } catch (selErr) {
-          debugInfo.errors.push(`locator('${config.entity_selector}') failed: ${selErr.message}`);
-        }
-      }
+        console.log(`[GenericExtractor] Anchor-based mode: role=${roleName}, opts=${JSON.stringify(roleOpts)}`);
 
-      if (!entityLocators || entityLocators.length === 0) {
-        debugInfo.errors.push(`No entities found with role="${config.entity_role}" or selector="${config.entity_selector}"`);
-        return { entities: [], debugInfo };
-      }
+        // Use page.evaluate to group anchor headings + their sibling data
+        const rawEntities = await page.evaluate(({ roleName: rn, level }) => {
+          // Find all headings at the target level
+          const selector = level ? `h${level}` : `h1, h2, h3, h4, h5, h6`;
+          const headings = Array.from(document.querySelectorAll(selector));
+          if (headings.length === 0) return [];
 
-      console.log(`[GenericExtractor] Found ${entityLocators.length} entities`);
+          const results = [];
 
-      // Her entity'den veri çıkar
-      for (const entity of entityLocators) {
-        try {
-          const item = {};
+          for (let i = 0; i < headings.length; i++) {
+            const heading = headings[i];
+            const companyName = heading.textContent.trim();
+            if (!companyName) continue;
 
-          // Company name
-          if (config.name_role) {
-            const roleOpts = this.parseRoleOptions(config.name_role);
-            const roleName = config.name_role.split('[')[0].split(' ')[0].trim();
-            try {
-              const nameEl = entity.getByRole(roleName, roleOpts);
-              item.company_name = await nameEl.first().textContent().catch(() => null);
-            } catch { /* ignore */ }
-          }
-          if (!item.company_name && config.name_selector) {
-            try {
-              item.company_name = await entity.locator(config.name_selector).first().textContent().catch(() => null);
-            } catch { /* ignore */ }
-          }
+            // Collect sibling elements until the next heading at same level
+            const siblings = [];
+            let sibling = heading.nextElementSibling;
+            const nextHeading = headings[i + 1] || null;
 
-          // Detail link
-          if (config.detail_link_role) {
-            try {
-              const linkOpts = this.parseRoleOptions(config.detail_link_role);
-              const linkEl = entity.getByRole('link', linkOpts);
-              const href = await linkEl.first().getAttribute('href').catch(() => null);
-              if (href) {
-                item.detail_url = href.startsWith('http') ? href : new URL(href, page.url()).href;
+            while (sibling && sibling !== nextHeading) {
+              siblings.push({
+                tag: sibling.tagName.toLowerCase(),
+                text: sibling.textContent.trim(),
+                html: sibling.innerHTML,
+                links: Array.from(sibling.querySelectorAll('a')).map(a => ({
+                  href: a.href,
+                  text: a.textContent.trim()
+                }))
+              });
+              sibling = sibling.nextElementSibling;
+            }
+
+            // Extract fields from siblings
+            let email = null;
+            let phone = null;
+            let website = null;
+            let detailUrl = null;
+            let country = null;
+            let address = null;
+
+            for (const sib of siblings) {
+              // Email: mailto link
+              for (const link of sib.links) {
+                if (link.href && link.href.startsWith('mailto:')) {
+                  email = link.href.replace('mailto:', '').split('?')[0].trim();
+                }
+                if (link.href && link.href.startsWith('tel:')) {
+                  phone = link.href.replace('tel:', '').trim();
+                }
               }
-            } catch { /* ignore */ }
-          }
-          if (!item.detail_url && config.detail_link_selector) {
-            try {
-              const href = await entity.locator(config.detail_link_selector).first().getAttribute('href').catch(() => null);
-              if (href) {
-                item.detail_url = href.startsWith('http') ? href : new URL(href, page.url()).href;
+              // Email: text with @
+              if (!email) {
+                const emailMatch = sib.text.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+                if (emailMatch) email = emailMatch[0];
               }
-            } catch { /* ignore */ }
+              // Phone: text with phone pattern (not already found via tel:)
+              if (!phone) {
+                const phoneMatch = sib.text.match(/[\+]?[\d\s\-\(\)]{7,}/);
+                if (phoneMatch && !sib.text.includes('@')) phone = phoneMatch[0].trim();
+              }
+              // Detail link: non-mailto, non-tel link on same domain
+              if (!detailUrl) {
+                for (const link of sib.links) {
+                  if (link.href && !link.href.startsWith('mailto:') && !link.href.startsWith('tel:')
+                      && link.href.startsWith('http')) {
+                    detailUrl = link.href;
+                  }
+                }
+              }
+            }
+
+            results.push({
+              company_name: companyName,
+              email,
+              phone,
+              website,
+              detail_url: detailUrl,
+              country,
+              address
+            });
           }
 
-          // Email (listing sayfasında varsa)
-          if (config.email_selector) {
-            item.email = await this.extractEmail(entity, config.email_selector);
-          }
+          return results;
+        }, { roleName, level: roleOpts.level || null });
 
-          // Phone (listing sayfasında varsa)
-          if (config.phone_selector) {
-            item.phone = await this.extractText(entity, config.phone_selector);
-          }
+        debugInfo.selectorsFound.anchor_headings = rawEntities.length;
+        console.log(`[GenericExtractor] Anchor mode found ${rawEntities.length} entities`);
 
-          // Country
-          if (config.country_selector) {
-            item.country = await this.extractText(entity, config.country_selector);
+        for (const entity of rawEntities) {
+          if (entity.company_name && entity.company_name.trim()) {
+            entities.push(entity);
           }
+        }
 
-          // Company name varsa listeye ekle
-          if (item.company_name && item.company_name.trim()) {
-            item.company_name = item.company_name.trim();
-            entities.push(item);
+      } else {
+        // ============================
+        // CONTAINER-BASED EXTRACTION (original mode)
+        // Entities are wrapped in container elements (listitem, article, card div)
+        // ============================
+        debugInfo.mode = 'container';
+        let entityLocators;
+
+        if (config.entity_role) {
+          // Semantic: getByRole
+          try {
+            entityLocators = await page.getByRole(config.entity_role).all();
+            debugInfo.selectorsFound.entity_role = entityLocators.length;
+          } catch (roleErr) {
+            debugInfo.errors.push(`getByRole('${config.entity_role}') failed: ${roleErr.message}`);
           }
+        }
 
-        } catch (entityErr) {
-          debugInfo.errors.push(`Entity extraction error: ${entityErr.message}`);
+        if ((!entityLocators || entityLocators.length === 0) && config.entity_selector) {
+          // CSS fallback
+          try {
+            entityLocators = await page.locator(config.entity_selector).all();
+            debugInfo.selectorsFound.entity_selector = entityLocators.length;
+          } catch (selErr) {
+            debugInfo.errors.push(`locator('${config.entity_selector}') failed: ${selErr.message}`);
+          }
+        }
+
+        if (!entityLocators || entityLocators.length === 0) {
+          debugInfo.errors.push(`No entities found with role="${config.entity_role}" or selector="${config.entity_selector}"`);
+          return { entities: [], debugInfo };
+        }
+
+        console.log(`[GenericExtractor] Container mode found ${entityLocators.length} entities`);
+
+        // Her entity'den veri çıkar
+        for (const entity of entityLocators) {
+          try {
+            const item = {};
+
+            // Company name
+            if (config.name_role) {
+              const nameRoleOpts = this.parseRoleOptions(config.name_role);
+              const nameRoleName = config.name_role.split('[')[0].split(' ')[0].trim();
+              try {
+                const nameEl = entity.getByRole(nameRoleName, nameRoleOpts);
+                item.company_name = await nameEl.first().textContent().catch(() => null);
+              } catch { /* ignore */ }
+            }
+            if (!item.company_name && config.name_selector) {
+              try {
+                item.company_name = await entity.locator(config.name_selector).first().textContent().catch(() => null);
+              } catch { /* ignore */ }
+            }
+
+            // Detail link
+            if (config.detail_link_role) {
+              try {
+                const linkOpts = this.parseRoleOptions(config.detail_link_role);
+                const linkEl = entity.getByRole('link', linkOpts);
+                const href = await linkEl.first().getAttribute('href').catch(() => null);
+                if (href) {
+                  item.detail_url = href.startsWith('http') ? href : new URL(href, page.url()).href;
+                }
+              } catch { /* ignore */ }
+            }
+            if (!item.detail_url && config.detail_link_selector) {
+              try {
+                const href = await entity.locator(config.detail_link_selector).first().getAttribute('href').catch(() => null);
+                if (href) {
+                  item.detail_url = href.startsWith('http') ? href : new URL(href, page.url()).href;
+                }
+              } catch { /* ignore */ }
+            }
+
+            // Email (listing sayfasında varsa)
+            if (config.email_selector) {
+              item.email = await this.extractEmail(entity, config.email_selector);
+            }
+
+            // Phone (listing sayfasında varsa)
+            if (config.phone_selector) {
+              item.phone = await this.extractText(entity, config.phone_selector);
+            }
+
+            // Country
+            if (config.country_selector) {
+              item.country = await this.extractText(entity, config.country_selector);
+            }
+
+            // Company name varsa listeye ekle
+            if (item.company_name && item.company_name.trim()) {
+              item.company_name = item.company_name.trim();
+              entities.push(item);
+            }
+
+          } catch (entityErr) {
+            debugInfo.errors.push(`Entity extraction error: ${entityErr.message}`);
+          }
         }
       }
 
@@ -120,7 +236,7 @@ class GenericExtractor {
       debugInfo.errors.push(`Listing extraction error: ${err.message}`);
     }
 
-    console.log(`[GenericExtractor] Extracted ${entities.length} entities from listing`);
+    console.log(`[GenericExtractor] Extracted ${entities.length} entities from listing (mode: ${debugInfo.mode})`);
     return { entities, debugInfo };
   }
 
@@ -327,6 +443,17 @@ class GenericExtractor {
     if (levelMatch) opts.level = parseInt(levelMatch[1]);
 
     return opts;
+  }
+
+  /**
+   * Check if entity_role is a heading role (triggers anchor-based extraction).
+   * Examples: "heading[5]", "heading[3]", "heading"
+   * @param {string} role - entity_role from config
+   * @returns {boolean}
+   */
+  isHeadingRole(role) {
+    if (!role) return false;
+    return role.startsWith('heading');
   }
 }
 
