@@ -31,6 +31,7 @@ const PAGE_TYPES = {
     MEMBER_TABLE: 'member_table',          // HTML table member/exhibitor lists (associations, chambers)
     VIS_EXHIBITOR: 'vis_exhibitor',        // Messe Düsseldorf VIS platform exhibitor catalogs
     FLIPBOOK_HTML: 'flipbook_html',        // Flipbuilder/FlipHTML5 basic-html flipbook pages
+    MCE_EXPOCOMFORT: 'mce_expocomfort',    // MCE Expocomfort infinite scroll exhibitor directory
     UNKNOWN: 'unknown'
 };
 
@@ -62,6 +63,11 @@ const FLIPBOOK_DOMAINS = [
     'flipbuilder.com', 'online.flipbuilder.com',
     'fliphtml5.com', 'online.fliphtml5.com',
     'online.anyflip.com', 'publuu.com'
+];
+
+// MCE Expocomfort domains — infinite scroll exhibitor directory
+const MCE_EXPOCOMFORT_DOMAINS = [
+    'mcexpocomfort.it'
 ];
 
 // VIS platform domains — Messe Düsseldorf VIS exhibitor catalogs
@@ -195,6 +201,23 @@ class PageAnalyzer {
                             miner: 'flipbookMiner',
                             useCache: false,
                             reason: 'Flipbook basic-html pages (early hostname match)',
+                            ownPagination: true
+                        }
+                    };
+                }
+
+                // MCE Expocomfort (infinite scroll exhibitor directory)
+                if (MCE_EXPOCOMFORT_DOMAINS.some(d => hostname.includes(d)) && fullUrl.includes('exhibitor-directory')) {
+                    console.log(`[PageAnalyzer] Early detection: MCE_EXPOCOMFORT via hostname: ${hostname}`);
+                    return {
+                        url,
+                        pageType: PAGE_TYPES.MCE_EXPOCOMFORT,
+                        isMceExpocomfort: true,
+                        analysisTime: Date.now() - startTime,
+                        recommendation: {
+                            miner: 'mcexpocomfortMiner',
+                            useCache: false,
+                            reason: 'MCE Expocomfort exhibitor directory (early hostname match)',
                             ownPagination: true
                         }
                     };
@@ -693,6 +716,7 @@ module.exports = {
     SPA_CATALOG_DOMAINS,
     MESSE_FRANKFURT_DOMAINS,
     MEMBER_TABLE_DOMAINS,
+    MCE_EXPOCOMFORT_DOMAINS,
     VIS_DOMAINS,
     FLIPBOOK_DOMAINS
 };
@@ -1024,6 +1048,14 @@ PageAnalyzer.prototype.getRecommendation = function(analysis) {
             useCache: false, // Playwright-based, no cache
             reason: 'SPA catalog detected, using spaNetworkMiner',
             ownPagination: true // spaNetworkMiner handles its own data fetching
+        };
+    }
+    if (analysis.pageType === PAGE_TYPES.MCE_EXPOCOMFORT) {
+        return {
+            miner: 'mcexpocomfortMiner',
+            useCache: false,
+            reason: 'MCE Expocomfort exhibitor directory, using mcexpocomfortMiner',
+            ownPagination: true
         };
     }
     if (analysis.pageType === PAGE_TYPES.FLIPBOOK_HTML) {

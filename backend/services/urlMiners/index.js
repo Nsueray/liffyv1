@@ -30,16 +30,26 @@ try {
     console.log('[urlMiners] ⚠️ DocumentMiner not available:', e.message);
 }
 
+// MCE Expocomfort Miner (infinite scroll exhibitor directory)
+let mcexpocomfortMiner = null;
+try {
+    mcexpocomfortMiner = require('./mcexpocomfortMiner');
+    console.log('[urlMiners] ✅ McexpocomfortMiner loaded');
+} catch (e) {
+    console.log('[urlMiners] ⚠️ McexpocomfortMiner not available:', e.message);
+}
+
 module.exports = {
     // Miners
     playwrightTableMiner,
     aiMiner,
     documentMiner,
-    
+    mcexpocomfortMiner,
+
     // Utilities
     cloudflareDecoder,
     resultMerger,
-    
+
     // Convenience: List of all miners
     getAllMiners: () => {
         const miners = [
@@ -50,6 +60,9 @@ module.exports = {
         }
         if (documentMiner) {
             miners.push({ name: 'DocumentMiner', mine: documentMiner.mine });
+        }
+        if (mcexpocomfortMiner) {
+            miners.push({ name: 'McexpocomfortMiner', run: mcexpocomfortMiner.runMcexpocomfortMiner });
         }
         return miners;
     }
