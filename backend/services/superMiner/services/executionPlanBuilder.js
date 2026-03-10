@@ -67,6 +67,13 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
     return plan;
   }
 
+  // MCE Expocomfort — infinite scroll exhibitor directory.
+  // Handles its own pagination internally (ownPagination: true).
+  if (resolvedInputType === 'mce_expocomfort') {
+    addStep('mcexpocomfortMiner', 'legacy', 'MCE Expocomfort infinite scroll extraction');
+    return plan;
+  }
+
   // SPA catalog sites — spaNetworkMiner handles its own data fetching via network interception.
   // No pagination wrapper needed (ownPagination: true).
   if (resolvedInputType === 'spa_catalog') {
