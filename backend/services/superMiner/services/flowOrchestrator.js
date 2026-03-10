@@ -489,6 +489,58 @@ class FlowOrchestrator {
                 console.log('[FlowOrchestrator] flipbookMiner not available:', err.message);
             }
 
+            // contactPageMiner: try/catch load (company website email discovery)
+            // Used by Flow 2 to find emails on company websites (contact/about pages)
+            // Browser lifecycle managed by wrapper
+            try {
+                const { runContactPageMiner } = require('../../urlMiners/contactPageMiner');
+                this.miners.contactPageMiner = {
+                    name: 'contactPageMiner',
+                    // Note: This miner is called directly by executeFlow2 with an existing page,
+                    // not via the standard mine(job) interface. The mine() wrapper below is for
+                    // standalone usage if ever needed.
+                    mine: async (job) => {
+                        console.log(`[contactPageMiner] Starting for: ${job.input}`);
+                        const { chromium } = require('playwright');
+                        let browser = null;
+                        try {
+                            browser = await chromium.launch({ headless: true });
+                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            const page = await context.newPage();
+                            const rawResults = await runContactPageMiner(page, job.input, job.config || {});
+                            await browser.close();
+                            browser = null;
+
+                            const contacts = rawResults.map(r => ({
+                                company_name: r.company_name,
+                                email: r.email || null,
+                                phone: null,
+                                website: r.website,
+                                country: null,
+                                address: null,
+                                contact_name: null,
+                                job_title: null
+                            }));
+                            const emails = rawResults
+                                .map(r => r.email)
+                                .filter(e => e && typeof e === 'string' && e.includes('@') && e.length > 5);
+
+                            console.log(`[contactPageMiner] Result: ${contacts.length} contacts, ${emails.length} emails`);
+
+                            return this.normalizeResult({ contacts, emails }, 'contactPageMiner');
+                        } catch (err) {
+                            if (browser) await browser.close().catch(() => {});
+                            throw err;
+                        }
+                    },
+                    // Direct function reference for Flow 2 usage
+                    runDirect: runContactPageMiner
+                };
+                console.log('[FlowOrchestrator] contactPageMiner loaded ✅');
+            } catch (err) {
+                console.log('[FlowOrchestrator] contactPageMiner not available:', err.message);
+            }
+
             // Aliases
             this.miners.playwrightMiner = this.miners.fullMiner;
             this.miners.playwrightDetailMiner = this.miners.fullMiner;
@@ -1483,11 +1535,80 @@ class FlowOrchestrator {
 
         console.log(`[Flow2] Scraping ${websiteUrls.length} websites...`);
 
-        // Scrape websites (simplified for now)
+        // Scrape websites with contactPageMiner enrichment
         const scraperResults = [];
+        const contactPageMiner = this.miners && this.miners.contactPageMiner;
+        const hasContactPageMiner = contactPageMiner && contactPageMiner.runDirect;
 
-        // TODO: Implement actual website scraping
-        // For now, just finalize Flow 1 results
+        if (hasContactPageMiner) {
+            console.log(`[Flow2] contactPageMiner available — will try contact page discovery first`);
+        }
+
+        // Get flow1 contacts that need email enrichment
+        const flow1Contacts = flow1Result.contacts || [];
+        const contactsNeedingEmail = flow1Contacts.filter(c => {
+            const hasEmail = c.email || c.emails?.[0];
+            const hasWebsite = c.website;
+            return !hasEmail && hasWebsite;
+        });
+
+        console.log(`[Flow2] ${contactsNeedingEmail.length} contacts need email enrichment (have website, no email)`);
+
+        // Use contactPageMiner for website-based email discovery
+        if (hasContactPageMiner && contactsNeedingEmail.length > 0) {
+            const { chromium } = require('playwright');
+            let browser = null;
+            try {
+                browser = await chromium.launch({ headless: true });
+                const context = await browser.newContext({ ignoreHTTPSErrors: true });
+
+                let enriched = 0;
+                const maxEnrich = Math.min(contactsNeedingEmail.length, maxWebsites);
+
+                for (let i = 0; i < maxEnrich; i++) {
+                    const contact = contactsNeedingEmail[i];
+                    const website = contact.website;
+
+                    try {
+                        console.log(`[Flow2] contactPageMiner: trying ${website} (${i + 1}/${maxEnrich})`);
+                        const page = await context.newPage();
+                        const emailResults = await contactPageMiner.runDirect(page, website, {
+                            timeout_ms: 20000,
+                            page_timeout_ms: 10000
+                        });
+                        await page.close();
+
+                        if (emailResults.length > 0) {
+                            // Pick the best email (non-generic preferred)
+                            const bestEmail = emailResults.find(r => !r.is_generic) || emailResults[0];
+                            contact.email = bestEmail.email;
+                            contact.email_source = `contactPageMiner:${bestEmail.email_source_page}`;
+                            enriched++;
+                            console.log(`[Flow2] ✅ Enriched ${contact.company_name || contact.companyName || 'Unknown'}: ${bestEmail.email}`);
+
+                            // Add to scraper results for aggregation
+                            scraperResults.push({
+                                company_name: contact.company_name || contact.companyName,
+                                email: bestEmail.email,
+                                website: website,
+                                phone: contact.phone || null,
+                                country: contact.country || null,
+                                source: 'contactPageMiner'
+                            });
+                        }
+                    } catch (err) {
+                        console.log(`[Flow2] contactPageMiner failed for ${website}: ${err.message}`);
+                    }
+                }
+
+                await browser.close();
+                browser = null;
+                console.log(`[Flow2] contactPageMiner enriched ${enriched}/${maxEnrich} contacts`);
+            } catch (err) {
+                if (browser) await browser.close().catch(() => {});
+                console.log(`[Flow2] contactPageMiner browser error: ${err.message}`);
+            }
+        }
 
         // Aggregate V2 (final merge + DB write)
         console.log('[Flow2] Aggregating V2 (final merge → DB)...');
