@@ -32,30 +32,32 @@ async function discoverSources({ fair_name, industry, target_countries = [], org
 
   console.log(`[sourceDiscovery] Starting discovery: fair="${fair_name}", industry="${industry}", countries="${target_countries.join(', ')}"`);
 
-  const systemPrompt = 'You are a B2B data sourcing expert for trade fair organizers. Your job is to find URLs that contain lists of companies in specific industries. You must use web_search to find real, working URLs — do not invent URLs.';
+  const systemPrompt = 'You are a B2B data sourcing expert for trade fair organizers. Your job is to find SPECIFIC URLs that directly contain lists of company names, emails, or contact information — not homepages, not news pages, not about pages.\n\nCRITICAL RULES:\n- Every URL must point directly to a page that LISTS companies/members, not a homepage\n- Prefer pages where email addresses are visible on the page itself\n- PDF files with member lists are highly valuable — include them\n- Do NOT return: homepages, news articles, blog posts, event pages, about pages\n- Verify each URL exists by searching before including it\n- If you find a site but cannot find the specific member list page, skip it entirely';
 
-  const userPrompt = `Find 15-20 real URLs containing company lists for the following trade fair:
+  const userPrompt = `Find 15-20 SPECIFIC URLs containing company/member lists for this trade fair:
 
 Fair: ${fair_name}
 Industry: ${industry}
 Target countries: ${target_countries.join(', ')}
 
-Search for:
-1. Industry association member lists
-2. Exhibitor lists from related trade fairs
-3. Business directories with contact info
-4. PDF membership lists from industry bodies
-5. Chamber of commerce or government registries
+Search priority order:
+1. PDF membership lists from industry associations (e.g. 'site:uniclima.fr filetype:pdf members')
+2. Direct member directory pages (e.g. '/members', '/uyeler', '/annuaire', '/mitglieder', '/soci')
+3. Exhibitor list pages from related trade fairs (e.g. '/exhibitors', '/katilimcilar', '/exposants')
+4. Europages or Kompass directory pages filtered by industry+country
+5. Chamber of commerce member search pages
 
-For each URL return JSON with these fields:
-- url (must be real, verify with search)
-- source_type: 'association' | 'directory' | 'fair' | 'pdf' | 'registry' | 'other'
-- estimated_companies: number (estimate)
+For EACH result you MUST search and verify the URL exists before including it.
+
+Return JSON array with these fields per result:
+- url: the SPECIFIC page URL (not homepage)
+- source_type: 'pdf' | 'association' | 'fair' | 'directory' | 'registry' | 'other'
+- estimated_companies: number
 - has_email_on_page: true | false | 'unknown'
-- language: language of the page
-- notes: one sentence why this is relevant
+- language: page language
+- notes: one sentence explaining exactly what this page contains
 
-Return a JSON array only. No markdown, no explanation, no code fences.`;
+Return JSON array only. No markdown, no explanation, no code fences.`;
 
   try {
     const controller = new AbortController();
