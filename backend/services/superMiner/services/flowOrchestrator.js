@@ -1592,21 +1592,12 @@ class FlowOrchestrator {
         const hasContactPageMiner = contactPageMiner && contactPageMiner.runDirect;
 
         if (hasContactPageMiner) {
-            console.log(`[Flow2] contactPageMiner available — will try contact page discovery first`);
+            console.log(`[Flow2] contactPageMiner available — will try contact page discovery on ${websiteUrls.length} URLs`);
         }
 
-        // Get flow1 contacts that need email enrichment
-        const flow1Contacts = flow1Result.contacts || [];
-        const contactsNeedingEmail = flow1Contacts.filter(c => {
-            const hasEmail = c.email || c.emails?.[0];
-            const hasWebsite = c.website;
-            return !hasEmail && hasWebsite;
-        });
-
-        console.log(`[Flow2] ${contactsNeedingEmail.length} contacts need email enrichment (have website, no email)`);
-
         // Use contactPageMiner for website-based email discovery
-        if (hasContactPageMiner && contactsNeedingEmail.length > 0) {
+        // websiteUrls comes from Flow 1 aggregator (extractWebsiteUrls) — string array of website origins
+        if (hasContactPageMiner && websiteUrls.length > 0) {
             const { chromium } = require('playwright');
             let browser = null;
             try {
@@ -1614,14 +1605,12 @@ class FlowOrchestrator {
                 const context = await browser.newContext({ ignoreHTTPSErrors: true });
 
                 let enriched = 0;
-                const maxEnrich = Math.min(contactsNeedingEmail.length, maxWebsites);
 
-                for (let i = 0; i < maxEnrich; i++) {
-                    const contact = contactsNeedingEmail[i];
-                    const website = contact.website;
+                for (let i = 0; i < websiteUrls.length; i++) {
+                    const website = websiteUrls[i];
 
                     try {
-                        console.log(`[Flow2] contactPageMiner: trying ${website} (${i + 1}/${maxEnrich})`);
+                        console.log(`[Flow2] contactPageMiner: trying ${website} (${i + 1}/${websiteUrls.length})`);
                         const page = await context.newPage();
                         const emailResults = await contactPageMiner.runDirect(page, website, {
                             timeout_ms: 20000,
@@ -1632,18 +1621,16 @@ class FlowOrchestrator {
                         if (emailResults.length > 0) {
                             // Pick the best email (non-generic preferred)
                             const bestEmail = emailResults.find(r => !r.is_generic) || emailResults[0];
-                            contact.email = bestEmail.email;
-                            contact.email_source = `contactPageMiner:${bestEmail.email_source_page}`;
                             enriched++;
-                            console.log(`[Flow2] ✅ Enriched ${contact.company_name || contact.companyName || 'Unknown'}: ${bestEmail.email}`);
+                            console.log(`[Flow2] ✅ Found email on ${website}: ${bestEmail.email}`);
 
                             // Add to scraper results for aggregation
                             scraperResults.push({
-                                company_name: contact.company_name || contact.companyName,
+                                company_name: null,
                                 email: bestEmail.email,
                                 website: website,
-                                phone: contact.phone || null,
-                                country: contact.country || null,
+                                phone: null,
+                                country: null,
                                 source: 'contactPageMiner'
                             });
                         }
@@ -1654,7 +1641,7 @@ class FlowOrchestrator {
 
                 await browser.close();
                 browser = null;
-                console.log(`[Flow2] contactPageMiner enriched ${enriched}/${maxEnrich} contacts`);
+                console.log(`[Flow2] contactPageMiner found emails on ${enriched}/${websiteUrls.length} websites`);
             } catch (err) {
                 if (browser) await browser.close().catch(() => {});
                 console.log(`[Flow2] contactPageMiner browser error: ${err.message}`);
