@@ -44,7 +44,7 @@ const DEFAULT_MAX_SCROLLS = 50;
 const DEFAULT_SCROLL_DELAY_MS = 2000;
 const DEFAULT_DETAIL_DELAY_MS = 1500;
 const DEFAULT_MAX_DETAILS = 500;
-const DEFAULT_TOTAL_TIMEOUT = 600000; // 10 minutes
+const DEFAULT_TOTAL_TIMEOUT = 300000; // 5 minutes
 
 // Detail link pattern: /exhibitor-directory/exhib_profile*
 const DETAIL_LINK_PATTERN = /\/exhibitor-directory\/exhib_profile/;
@@ -58,26 +58,38 @@ const DETAIL_LINK_PATTERN = /\/exhibitor-directory\/exhib_profile/;
 async function collectExhibitorLinks(page, url, config) {
     const maxScrolls = config.max_scrolls || DEFAULT_MAX_SCROLLS;
     const scrollDelay = config.scroll_delay_ms || DEFAULT_SCROLL_DELAY_MS;
+    const startTime = Date.now();
 
     console.log(`[mcexpocomfortMiner] Phase 1: Navigating to ${url}`);
 
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    console.log(`[mcexpocomfortMiner] Phase 1: Page loaded (${Date.now() - startTime}ms)`);
 
-    // Wait for initial content to render
+    // Wait for initial content to render — try exhibitor links first, then general wait
     try {
-        await page.waitForSelector('a[href*="exhib_profile"]', { timeout: 15000 });
+        await page.waitForSelector('a[href*="exhib_profile"]', { timeout: 10000 });
+        console.log(`[mcexpocomfortMiner] Phase 1: Exhibitor links detected in DOM`);
     } catch (e) {
-        // Try waiting for networkidle as fallback
-        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+        console.log(`[mcexpocomfortMiner] Phase 1: No exhibitor links after 10s, waiting 3s for JS render...`);
+        await page.waitForTimeout(3000);
     }
 
-    let previousHeight = 0;
+    // Extra settle time for JS-heavy pages
+    await page.waitForTimeout(3000);
+    console.log(`[mcexpocomfortMiner] Phase 1: Ready to scroll (${Date.now() - startTime}ms)`);
+
+    let previousHeight = await page.evaluate(() => document.body.scrollHeight);
     let noChangeCount = 0;
     let scrollCount = 0;
 
-    console.log(`[mcexpocomfortMiner] Starting infinite scroll (max ${maxScrolls} scrolls)...`);
+    console.log(`[mcexpocomfortMiner] Phase 1: Starting infinite scroll (max ${maxScrolls} scrolls, initial height=${previousHeight})`);
 
     while (scrollCount < maxScrolls && noChangeCount < 3) {
+        scrollCount++;
+
+        // Log every scroll for first 5, then every 10
+        const shouldLog = scrollCount <= 5 || scrollCount % 10 === 0;
+
         // Scroll to bottom
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
         await page.waitForTimeout(scrollDelay);
@@ -92,18 +104,22 @@ async function collectExhibitorLinks(page, url, config) {
         }
 
         previousHeight = currentHeight;
-        scrollCount++;
 
-        // Progress log every 10 scrolls
-        if (scrollCount % 10 === 0) {
-            const linkCount = await page.evaluate((pattern) => {
-                return document.querySelectorAll(`a[href*="exhib_profile"]`).length;
+        if (shouldLog) {
+            const linkCount = await page.evaluate(() => {
+                return document.querySelectorAll('a[href*="exhib_profile"]').length;
             });
-            console.log(`[mcexpocomfortMiner] Scroll ${scrollCount}/${maxScrolls}: ${linkCount} links found, height=${currentHeight}`);
+            console.log(`[mcexpocomfortMiner] Scroll ${scrollCount}/${maxScrolls}: ${linkCount} links, height=${currentHeight}, noChange=${noChangeCount}`);
+        }
+
+        // Phase 1 timeout guard (use half of total timeout)
+        if (Date.now() - startTime > 150000) {
+            console.log(`[mcexpocomfortMiner] Phase 1 timeout (150s) — stopping scroll`);
+            break;
         }
     }
 
-    console.log(`[mcexpocomfortMiner] Scrolling done after ${scrollCount} scrolls (noChange=${noChangeCount})`);
+    console.log(`[mcexpocomfortMiner] Scrolling done after ${scrollCount} scrolls (noChange=${noChangeCount}, ${Date.now() - startTime}ms)`);
 
     // Collect all exhibitor detail links
     const links = await page.evaluate(() => {
@@ -319,10 +335,18 @@ async function runMcexpocomfortMiner(page, url, config = {}) {
     const totalTimeout = config.total_timeout || DEFAULT_TOTAL_TIMEOUT;
     const startTime = Date.now();
 
-    console.log(`[mcexpocomfortMiner] Starting for: ${url}`);
+    console.log(`[mcexpocomfortMiner] Starting for: ${url} (timeout: ${totalTimeout}ms)`);
+
+    // Total timeout wrapper
+    const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`mcexpocomfortMiner total timeout (${totalTimeout}ms)`)), totalTimeout)
+    );
 
     // Phase 1: Scroll and collect all exhibitor links + names
-    const exhibitorCards = await collectExhibitorLinks(page, url, config);
+    const exhibitorCards = await Promise.race([
+        collectExhibitorLinks(page, url, config),
+        timeoutPromise
+    ]);
 
     if (exhibitorCards.length === 0) {
         console.log('[mcexpocomfortMiner] No exhibitor links found — returning empty.');
