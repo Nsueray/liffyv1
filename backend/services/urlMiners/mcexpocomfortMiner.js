@@ -169,11 +169,16 @@ async function collectExhibitorLinks(page, url, config) {
 
 // ─── Phase 2: ReedExpo API — Email Extraction ────────────────────────
 
+// DEBUG: counter for first 3 orgs — remove after testing
+let _debugOrgCount = 0;
+
 /**
  * Fetch organisation data from ReedExpo API.
  * Tries two endpoints and merges results.
  */
 async function fetchOrgFromAPI(orgGuid, eventEditionId) {
+    const _shouldDebug = _debugOrgCount < 3;
+    if (_shouldDebug) _debugOrgCount++;
     const results = {
         emails: [],
         phones: [],
@@ -195,9 +200,18 @@ async function fetchOrgFromAPI(orgGuid, eventEditionId) {
 
         if (docsRes.ok) {
             const docsData = await docsRes.json();
+            if (_shouldDebug) {
+                console.log(`[MCE DEBUG] org: ${orgGuid}`);
+                console.log(`[MCE DEBUG] endpoint1 status: ${docsRes.status}`);
+                console.log(`[MCE DEBUG] endpoint1 response:`, JSON.stringify(docsData, null, 2));
+            }
             extractFromDocsResponse(docsData, results);
+        } else if (_shouldDebug) {
+            console.log(`[MCE DEBUG] org: ${orgGuid}`);
+            console.log(`[MCE DEBUG] endpoint1 status: ${docsRes.status}`);
         }
     } catch (e) {
+        if (_shouldDebug) console.log(`[MCE DEBUG] endpoint1 error for ${orgGuid}: ${e.message}`);
         // Endpoint 1 failed — continue to endpoint 2
     }
 
@@ -211,9 +225,16 @@ async function fetchOrgFromAPI(orgGuid, eventEditionId) {
 
         if (orgRes.ok) {
             const orgData = await orgRes.json();
+            if (_shouldDebug) {
+                console.log(`[MCE DEBUG] endpoint2 status: ${orgRes.status}`);
+                console.log(`[MCE DEBUG] endpoint2 response:`, JSON.stringify(orgData, null, 2));
+            }
             extractFromOrgResponse(orgData, results);
+        } else if (_shouldDebug) {
+            console.log(`[MCE DEBUG] endpoint2 status: ${orgRes.status}`);
         }
     } catch (e) {
+        if (_shouldDebug) console.log(`[MCE DEBUG] endpoint2 error for ${orgGuid}: ${e.message}`);
         // Endpoint 2 failed
     }
 
