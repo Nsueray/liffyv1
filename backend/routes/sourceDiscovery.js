@@ -80,11 +80,18 @@ router.post('/', authRequired, async (req, res) => {
       organizer_id
     });
 
-    return res.json({
-      sources: result.sources,
+    const responseBody = {
+      sources: result.sources || [],
       searched_at: new Date().toISOString(),
       ...(result.error ? { error: result.error } : {})
-    });
+    };
+
+    // Explicit stringify to catch serialization issues and log response size
+    const json = JSON.stringify(responseBody);
+    console.log(`[sourceDiscovery] Response: ${responseBody.sources.length} sources, ${json.length} bytes`);
+
+    res.setHeader('Content-Type', 'application/json');
+    return res.send(json);
   } catch (err) {
     console.error(`[sourceDiscovery] Route error: ${err.message}`);
     return res.status(500).json({ error: 'Internal server error' });
