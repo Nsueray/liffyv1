@@ -201,7 +201,7 @@ async function extractDetailPage(page, detailUrl, delayMs) {
             await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
         }
 
-        const data = await page.evaluate((junkDomains, socialHosts) => {
+        const data = await page.evaluate(({ junkDomains, socialHosts }) => {
             const result = {
                 emails: [],
                 phones: [],
@@ -315,7 +315,7 @@ async function extractDetailPage(page, detailUrl, delayMs) {
             }
 
             return result;
-        }, JUNK_EMAIL_DOMAINS, SOCIAL_HOSTS);
+        }, { junkDomains: JUNK_EMAIL_DOMAINS, socialHosts: SOCIAL_HOSTS });
 
         // Polite delay
         await page.waitForTimeout(delayMs);
