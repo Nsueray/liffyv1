@@ -1,27 +1,31 @@
 /**
- * LIFFY MCE Expocomfort Miner v1.0
+ * LIFFY MCE Expocomfort Miner v2.0
  * ==================================
  *
  * Specialized miner for mcexpocomfort.it exhibitor directory.
- * The site uses infinite scroll to load exhibitor cards progressively.
- * Each card links to a detail page containing email addresses.
  *
  * Two-phase pipeline:
- *   1. Infinite scroll — scroll the list page until no new content loads,
- *      collecting all exhibitor detail URLs
- *   2. Detail pages — visit each exhibitor profile, extract email via regex
+ *   1. Infinite scroll — scroll the list page, collect exhibitor detail URLs
+ *      and extract organisationGuid from each URL pattern
+ *   2. ReedExpo API — fetch email/contact data via REST API (no Playwright needed)
+ *
+ * Phase 2 uses two API endpoints per organisation:
+ *   - GET /v1/documents/public?organisationGuid=GUID&eventEditionId=EVE_ID
+ *   - GET /v1/event-editions/EVE_ID/organisations/GUID
  *
  * Miner contract:
  *   - Returns raw card data only (no normalization, no DB writes)
  *   - Browser lifecycle managed by flowOrchestrator wrapper
  *   - Handles its own pagination internally (ownPagination: true, ownBrowser: true)
- *
- * Usage (module only):
- *   const { runMcexpocomfortMiner } = require("./mcexpocomfortMiner");
- *   const cards = await runMcexpocomfortMiner(page, url, config);
  */
 
 // ─── Constants ───────────────────────────────────────────────────────
+
+const REED_API_BASE = 'https://api.reedexpo.com/v1';
+const MCE_EVENT_EDITION_ID = 'eve-57a81c89-bb6c-4549-9448-a711fe3e7d22';
+
+// Pattern: exhib_profile.COMPANY_NAME.org-GUID.html → extract "org-GUID"
+const ORG_GUID_REGEX = /exhib_profile\.[^.]+\.(org-[a-f0-9\-]+)\.html/i;
 
 const EMAIL_REGEX = /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi;
 
@@ -34,26 +38,17 @@ const JUNK_EMAIL_DOMAINS = [
     'mcexpocomfort.it', 'reedexpo.com', 'rxglobal.com'
 ];
 
-const SOCIAL_HOSTS = [
-    'facebook.com', 'twitter.com', 'linkedin.com', 'instagram.com',
-    'youtube.com', 'pinterest.com', 'tiktok.com', 'x.com',
-    'xing.com', 'wa.me', 'vimeo.com'
-];
-
 const DEFAULT_MAX_SCROLLS = 50;
 const DEFAULT_SCROLL_DELAY_MS = 2000;
-const DEFAULT_DETAIL_DELAY_MS = 1500;
-const DEFAULT_MAX_DETAILS = 500;
+const DEFAULT_MAX_DETAILS = 2000;
 const DEFAULT_TOTAL_TIMEOUT = 300000; // 5 minutes
+const DEFAULT_CONCURRENCY = 5;
 
-// Detail link pattern: /exhibitor-directory/exhib_profile*
-const DETAIL_LINK_PATTERN = /\/exhibitor-directory\/exhib_profile/;
-
-// ─── Phase 1: Infinite Scroll — Collect All Detail Links ────────────
+// ─── Phase 1: Infinite Scroll — Collect Links + Extract GUIDs ────────
 
 /**
  * Scroll the page to the bottom repeatedly until no new content loads.
- * Returns array of unique exhibitor detail URLs.
+ * Returns array of { detail_url, company_name, country, org_guid }.
  */
 async function collectExhibitorLinks(page, url, config) {
     const maxScrolls = config.max_scrolls || DEFAULT_MAX_SCROLLS;
@@ -65,7 +60,7 @@ async function collectExhibitorLinks(page, url, config) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     console.log(`[mcexpocomfortMiner] Phase 1: Page loaded (${Date.now() - startTime}ms)`);
 
-    // Wait for initial content to render — try exhibitor links first, then general wait
+    // Wait for initial content to render
     try {
         await page.waitForSelector('a[href*="exhib_profile"]', { timeout: 10000 });
         console.log(`[mcexpocomfortMiner] Phase 1: Exhibitor links detected in DOM`);
@@ -86,15 +81,11 @@ async function collectExhibitorLinks(page, url, config) {
 
     while (scrollCount < maxScrolls && noChangeCount < 3) {
         scrollCount++;
-
-        // Log every scroll for first 5, then every 10
         const shouldLog = scrollCount <= 5 || scrollCount % 10 === 0;
 
-        // Scroll to bottom
         await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
         await page.waitForTimeout(scrollDelay);
 
-        // Check if new content loaded
         const currentHeight = await page.evaluate(() => document.body.scrollHeight);
 
         if (currentHeight === previousHeight) {
@@ -121,30 +112,12 @@ async function collectExhibitorLinks(page, url, config) {
 
     console.log(`[mcexpocomfortMiner] Scrolling done after ${scrollCount} scrolls (noChange=${noChangeCount}, ${Date.now() - startTime}ms)`);
 
-    // Collect all exhibitor detail links
-    const links = await page.evaluate(() => {
-        const anchors = document.querySelectorAll('a[href*="exhib_profile"]');
-        const urls = new Set();
-        for (const a of anchors) {
-            const href = a.getAttribute('href');
-            if (href) {
-                // Resolve relative URLs
-                try {
-                    const fullUrl = new URL(href, window.location.origin).href;
-                    urls.add(fullUrl);
-                } catch (e) {
-                    // skip invalid URLs
-                }
-            }
-        }
-        return Array.from(urls);
-    });
-
-    // Also try to extract company names from the list page cards
+    // Collect all exhibitor detail links + company names from page
     const cardData = await page.evaluate(() => {
         const cards = [];
-        // Try common card patterns
         const anchors = document.querySelectorAll('a[href*="exhib_profile"]');
+        const seen = new Set();
+
         for (const a of anchors) {
             const href = a.getAttribute('href');
             if (!href) continue;
@@ -153,6 +126,9 @@ async function collectExhibitorLinks(page, url, config) {
             try {
                 fullUrl = new URL(href, window.location.origin).href;
             } catch (e) { continue; }
+
+            if (seen.has(fullUrl)) continue;
+            seen.add(fullUrl);
 
             // Try to get company name from the card
             const card = a.closest('[class*="card"], [class*="exhibitor"], [class*="item"], li, article') || a;
@@ -172,177 +148,248 @@ async function collectExhibitorLinks(page, url, config) {
             });
         }
 
-        // Dedup by detail_url
-        const seen = new Set();
-        return cards.filter(c => {
-            if (seen.has(c.detail_url)) return false;
-            seen.add(c.detail_url);
-            return true;
-        });
+        return cards;
     });
 
-    console.log(`[mcexpocomfortMiner] Phase 1 complete: ${cardData.length} unique exhibitor links`);
+    // Extract organisationGuid from each detail URL
+    for (const card of cardData) {
+        const match = card.detail_url.match(ORG_GUID_REGEX);
+        if (match) {
+            card.org_guid = match[1];
+        } else {
+            card.org_guid = null;
+        }
+    }
+
+    const withGuid = cardData.filter(c => c.org_guid).length;
+    console.log(`[mcexpocomfortMiner] Phase 1 complete: ${cardData.length} exhibitors, ${withGuid} with GUID`);
+
     return cardData;
 }
 
-// ─── Phase 2: Detail Pages — Email Extraction ────────────────────────
+// ─── Phase 2: ReedExpo API — Email Extraction ────────────────────────
 
 /**
- * Visit a single detail page and extract email + contact info.
+ * Fetch organisation data from ReedExpo API.
+ * Tries two endpoints and merges results.
  */
-async function extractDetailPage(page, detailUrl, delayMs) {
-    try {
-        await page.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+async function fetchOrgFromAPI(orgGuid, eventEditionId) {
+    const results = {
+        emails: [],
+        phones: [],
+        website: null,
+        address: null,
+        country: null,
+        contact_name: null,
+        job_title: null,
+        description: null
+    };
 
-        // Wait briefly for dynamic content
-        try {
-            await page.waitForSelector('a[href^="mailto:"], [class*="email"], [class*="contact"]', { timeout: 5000 });
-        } catch (e) {
-            await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    // Endpoint 1: Documents/public — general organisation info
+    try {
+        const docsUrl = `${REED_API_BASE}/documents/public?organisationGuid=${orgGuid}&eventEditionId=${eventEditionId}`;
+        const docsRes = await fetch(docsUrl, {
+            headers: { 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(10000)
+        });
+
+        if (docsRes.ok) {
+            const docsData = await docsRes.json();
+            extractFromDocsResponse(docsData, results);
+        }
+    } catch (e) {
+        // Endpoint 1 failed — continue to endpoint 2
+    }
+
+    // Endpoint 2: Event-editions/organisations — detailed org profile
+    try {
+        const orgUrl = `${REED_API_BASE}/event-editions/${eventEditionId}/organisations/${orgGuid}`;
+        const orgRes = await fetch(orgUrl, {
+            headers: { 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(10000)
+        });
+
+        if (orgRes.ok) {
+            const orgData = await orgRes.json();
+            extractFromOrgResponse(orgData, results);
+        }
+    } catch (e) {
+        // Endpoint 2 failed
+    }
+
+    // Deduplicate emails
+    results.emails = [...new Set(results.emails)];
+
+    return results;
+}
+
+/**
+ * Extract contact info from /documents/public response.
+ */
+function extractFromDocsResponse(data, results) {
+    if (!data) return;
+
+    // Handle array or single object
+    const items = Array.isArray(data) ? data : [data];
+
+    for (const item of items) {
+        // Email fields
+        extractEmailFromField(item.email, results);
+        extractEmailFromField(item.emailAddress, results);
+        extractEmailFromField(item.contactEmail, results);
+
+        // Nested contact object
+        if (item.contact) {
+            extractEmailFromField(item.contact.email, results);
+            extractEmailFromField(item.contact.emailAddress, results);
+            if (item.contact.phone) results.phones.push(item.contact.phone);
+            if (item.contact.firstName || item.contact.lastName) {
+                results.contact_name = [item.contact.firstName, item.contact.lastName].filter(Boolean).join(' ');
+            }
+            if (item.contact.jobTitle) results.job_title = item.contact.jobTitle;
         }
 
-        const data = await page.evaluate(({ junkDomains, socialHosts }) => {
-            const result = {
-                emails: [],
-                phones: [],
-                website: null,
-                address: null,
-                country: null,
-                contact_name: null,
-                job_title: null
-            };
+        // Phone
+        if (item.phone && !results.phones.includes(item.phone)) results.phones.push(item.phone);
+        if (item.telephone && !results.phones.includes(item.telephone)) results.phones.push(item.telephone);
 
-            // 1. mailto: links
-            const mailtoLinks = document.querySelectorAll('a[href^="mailto:"]');
-            for (const a of mailtoLinks) {
-                const href = a.getAttribute('href') || '';
-                if (href.startsWith('mailto:?')) continue;
-                const email = href.replace('mailto:', '').split('?')[0].trim().toLowerCase();
-                if (email && email.includes('@') && email.length > 5) {
-                    const isJunk = junkDomains.some(d => email.endsWith('@' + d) || email.includes('.' + d));
-                    if (!isJunk) result.emails.push(email);
-                }
-            }
+        // Website
+        if (item.website && !results.website) results.website = item.website;
+        if (item.websiteUrl && !results.website) results.website = item.websiteUrl;
+        if (item.url && !results.website) results.website = item.url;
 
-            // 2. Email regex on page text
-            const bodyText = document.body ? document.body.innerText : '';
-            const emailRegex = /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi;
-            let match;
-            while ((match = emailRegex.exec(bodyText)) !== null) {
-                const email = match[0].toLowerCase();
-                if (result.emails.includes(email)) continue;
-                const isJunk = junkDomains.some(d => email.endsWith('@' + d) || email.includes('.' + d));
-                if (!isJunk) result.emails.push(email);
-            }
+        // Address
+        if (item.address && !results.address) {
+            results.address = typeof item.address === 'string'
+                ? item.address
+                : [item.address.street, item.address.city, item.address.postCode, item.address.country].filter(Boolean).join(', ');
+        }
 
-            // 3. Phone: tel: links
-            const telLinks = document.querySelectorAll('a[href^="tel:"]');
-            for (const a of telLinks) {
-                const phone = (a.getAttribute('href') || '').replace('tel:', '').trim();
-                if (phone && phone.replace(/\D/g, '').length >= 7) {
-                    result.phones.push(phone);
-                }
-            }
+        // Country
+        if (item.country && !results.country) results.country = item.country;
+        if (item.address && item.address.country && !results.country) results.country = item.address.country;
 
-            // 4. Website: external links (not social, not fair site)
-            const allAnchors = document.querySelectorAll('a[href^="http"]');
-            for (const a of allAnchors) {
-                const href = (a.getAttribute('href') || '').trim();
-                if (!href) continue;
-                const hrefLower = href.toLowerCase();
+        // Description
+        if (item.description && !results.description) results.description = item.description;
+        if (item.companyDescription && !results.description) results.description = item.companyDescription;
 
-                let skip = false;
-                for (const d of [...junkDomains, ...socialHosts]) {
-                    if (hrefLower.includes(d)) { skip = true; break; }
-                }
-                if (skip) continue;
-
-                // Look for website-labeled links
-                const text = (a.textContent || '').trim().toLowerCase();
-                const parentText = (a.parentElement?.textContent || '').toLowerCase();
-                if (text.includes('website') || text.includes('www.') || text.includes('homepage') ||
-                    parentText.includes('website') || parentText.includes('homepage') ||
-                    text.includes('visit site') || text.startsWith('http')) {
-                    result.website = href;
-                    break;
-                }
-            }
-
-            // 5. If no labeled website link, take the first external http link
-            if (!result.website) {
-                for (const a of allAnchors) {
-                    const href = (a.getAttribute('href') || '').trim();
-                    if (!href) continue;
-                    const hrefLower = href.toLowerCase();
-                    let skip = false;
-                    for (const d of [...junkDomains, ...socialHosts]) {
-                        if (hrefLower.includes(d)) { skip = true; break; }
-                    }
-                    if (!skip && href.startsWith('http')) {
-                        result.website = href;
-                        break;
-                    }
-                }
-            }
-
-            // 6. Address
-            const addressSelectors = [
-                '[class*="address"]', '[class*="location"]',
-                '.address', '.adr', '[itemprop="address"]'
-            ];
-            for (const sel of addressSelectors) {
-                try {
-                    const el = document.querySelector(sel);
-                    if (el && el.innerText && el.innerText.trim().length > 10) {
-                        result.address = el.innerText.trim().replace(/\s+/g, ' ');
-                        break;
-                    }
-                } catch (e) { /* ignore */ }
-            }
-
-            // 7. Country — from address or dedicated element
-            const countrySelectors = [
-                '[class*="country"]', '[itemprop="addressCountry"]'
-            ];
-            for (const sel of countrySelectors) {
-                try {
-                    const el = document.querySelector(sel);
-                    if (el && el.textContent.trim().length > 1) {
-                        result.country = el.textContent.trim();
-                        break;
-                    }
-                } catch (e) { /* ignore */ }
-            }
-
-            return result;
-        }, { junkDomains: JUNK_EMAIL_DOMAINS, socialHosts: SOCIAL_HOSTS });
-
-        // Polite delay
-        await page.waitForTimeout(delayMs);
-
-        return data;
-    } catch (e) {
-        console.warn(`[mcexpocomfortMiner] Detail page error (${detailUrl}): ${e.message}`);
-        return null;
+        // Scan full text for emails
+        const jsonStr = JSON.stringify(item);
+        const foundEmails = jsonStr.match(EMAIL_REGEX) || [];
+        for (const email of foundEmails) {
+            extractEmailFromField(email, results);
+        }
     }
+}
+
+/**
+ * Extract contact info from /event-editions/.../organisations/... response.
+ */
+function extractFromOrgResponse(data, results) {
+    if (!data) return;
+
+    // Direct fields
+    extractEmailFromField(data.email, results);
+    extractEmailFromField(data.emailAddress, results);
+    extractEmailFromField(data.contactEmail, results);
+
+    // Phone
+    if (data.phone && !results.phones.includes(data.phone)) results.phones.push(data.phone);
+    if (data.telephone && !results.phones.includes(data.telephone)) results.phones.push(data.telephone);
+    if (data.phoneNumber && !results.phones.includes(data.phoneNumber)) results.phones.push(data.phoneNumber);
+
+    // Website
+    if (data.website && !results.website) results.website = data.website;
+    if (data.websiteUrl && !results.website) results.website = data.websiteUrl;
+    if (data.companyWebsite && !results.website) results.website = data.companyWebsite;
+
+    // Address
+    if (data.address && !results.address) {
+        results.address = typeof data.address === 'string'
+            ? data.address
+            : [data.address.addressLine1, data.address.addressLine2, data.address.city, data.address.postCode, data.address.country].filter(Boolean).join(', ');
+    }
+
+    // Country
+    if (data.country && !results.country) results.country = data.country;
+    if (data.countryName && !results.country) results.country = data.countryName;
+    if (data.address && data.address.country && !results.country) results.country = data.address.country;
+
+    // Contact person
+    if (data.contacts && Array.isArray(data.contacts) && data.contacts.length > 0) {
+        const contact = data.contacts[0];
+        extractEmailFromField(contact.email, results);
+        extractEmailFromField(contact.emailAddress, results);
+        if (contact.phone && !results.phones.includes(contact.phone)) results.phones.push(contact.phone);
+        if (contact.firstName || contact.lastName) {
+            if (!results.contact_name) {
+                results.contact_name = [contact.firstName, contact.lastName].filter(Boolean).join(' ');
+            }
+        }
+        if (contact.jobTitle && !results.job_title) results.job_title = contact.jobTitle;
+    }
+
+    // Description
+    if (data.description && !results.description) results.description = data.description;
+    if (data.companyProfile && !results.description) results.description = data.companyProfile;
+
+    // Scan full text for emails
+    const jsonStr = JSON.stringify(data);
+    const foundEmails = jsonStr.match(EMAIL_REGEX) || [];
+    for (const email of foundEmails) {
+        extractEmailFromField(email, results);
+    }
+}
+
+/**
+ * Validate and add email to results, filtering junk domains.
+ */
+function extractEmailFromField(value, results) {
+    if (!value || typeof value !== 'string') return;
+    const email = value.trim().toLowerCase();
+    if (!email.includes('@') || email.length < 6) return;
+    if (results.emails.includes(email)) return;
+
+    const isJunk = JUNK_EMAIL_DOMAINS.some(d => email.endsWith('@' + d) || email.includes('.' + d));
+    if (isJunk) return;
+
+    results.emails.push(email);
+}
+
+/**
+ * Process a batch of cards concurrently via API.
+ */
+async function processBatch(batch, eventEditionId) {
+    return Promise.all(batch.map(async (card) => {
+        if (!card.org_guid) return null;
+
+        try {
+            const data = await fetchOrgFromAPI(card.org_guid, eventEditionId);
+            return { card, data };
+        } catch (e) {
+            console.warn(`[mcexpocomfortMiner] API error for ${card.org_guid}: ${e.message}`);
+            return null;
+        }
+    }));
 }
 
 // ─── Main Entry Point ────────────────────────────────────────────────
 
 async function runMcexpocomfortMiner(page, url, config = {}) {
-    const detailDelay = config.delay_ms || DEFAULT_DETAIL_DELAY_MS;
     const maxDetails = config.max_details || DEFAULT_MAX_DETAILS;
+    const concurrency = config.concurrency || DEFAULT_CONCURRENCY;
     const totalTimeout = config.total_timeout || DEFAULT_TOTAL_TIMEOUT;
+    const eventEditionId = config.event_edition_id || MCE_EVENT_EDITION_ID;
     const startTime = Date.now();
 
-    console.log(`[mcexpocomfortMiner] Starting for: ${url} (timeout: ${totalTimeout}ms)`);
+    console.log(`[mcexpocomfortMiner] Starting for: ${url} (timeout: ${totalTimeout}ms, concurrency: ${concurrency})`);
 
     // Total timeout wrapper
     const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error(`mcexpocomfortMiner total timeout (${totalTimeout}ms)`)), totalTimeout)
     );
 
-    // Phase 1: Scroll and collect all exhibitor links + names
+    // Phase 1: Scroll and collect all exhibitor links + GUIDs
     const exhibitorCards = await Promise.race([
         collectExhibitorLinks(page, url, config),
         timeoutPromise
@@ -353,59 +400,58 @@ async function runMcexpocomfortMiner(page, url, config = {}) {
         return [];
     }
 
-    // Phase 2: Visit detail pages to extract emails
-    const detailLimit = Math.min(exhibitorCards.length, maxDetails);
-    console.log(`[mcexpocomfortMiner] Phase 2: Visiting ${detailLimit} detail pages...`);
+    // Filter to cards with GUIDs only, limit to maxDetails
+    const cardsWithGuid = exhibitorCards.filter(c => c.org_guid);
+    const cardsToProcess = cardsWithGuid.slice(0, maxDetails);
 
-    let consecutiveErrors = 0;
+    console.log(`[mcexpocomfortMiner] Phase 2: Fetching ${cardsToProcess.length} orgs via ReedExpo API (concurrency: ${concurrency})...`);
+
+    // Phase 2: Fetch data from API in batches
     let enriched = 0;
+    let apiErrors = 0;
 
-    for (let i = 0; i < detailLimit; i++) {
+    for (let i = 0; i < cardsToProcess.length; i += concurrency) {
         // Timeout check
         if (Date.now() - startTime > totalTimeout) {
-            console.log(`[mcexpocomfortMiner] Total timeout at ${i}/${detailLimit} — stopping.`);
+            console.log(`[mcexpocomfortMiner] Total timeout at ${i}/${cardsToProcess.length} — stopping.`);
             break;
         }
 
-        // Consecutive error circuit breaker
-        if (consecutiveErrors >= 5) {
-            console.log(`[mcexpocomfortMiner] 5 consecutive errors — stopping detail crawl.`);
-            break;
+        const batch = cardsToProcess.slice(i, i + concurrency);
+        const results = await processBatch(batch, eventEditionId);
+
+        for (const result of results) {
+            if (!result) {
+                apiErrors++;
+                continue;
+            }
+
+            const { card, data } = result;
+
+            if (data.emails.length > 0) {
+                card.email = data.emails[0];
+                card.all_emails = data.emails;
+                enriched++;
+            }
+            if (data.phones.length > 0) card.phone = data.phones[0];
+            if (data.website) card.website = data.website;
+            if (data.address) card.address = data.address;
+            if (data.country) card.country = data.country || card.country;
+            if (data.contact_name) card.contact_name = data.contact_name;
+            if (data.job_title) card.job_title = data.job_title;
         }
 
-        const card = exhibitorCards[i];
-        const detail = await extractDetailPage(page, card.detail_url, detailDelay);
-
-        if (!detail) {
-            consecutiveErrors++;
-            continue;
-        }
-
-        consecutiveErrors = 0;
-
-        // Enrich the card
-        if (detail.emails.length > 0) {
-            card.email = detail.emails[0];
-            card.all_emails = detail.emails;
-            enriched++;
-        }
-        if (detail.phones.length > 0) card.phone = detail.phones[0];
-        if (detail.website) card.website = detail.website;
-        if (detail.address) card.address = detail.address;
-        if (detail.country) card.country = detail.country || card.country;
-        if (detail.contact_name) card.contact_name = detail.contact_name;
-        if (detail.job_title) card.job_title = detail.job_title;
-
-        // Progress log every 25 detail pages
-        if ((i + 1) % 25 === 0) {
+        // Progress log every 50 orgs
+        const processed = Math.min(i + concurrency, cardsToProcess.length);
+        if (processed % 50 === 0 || processed === cardsToProcess.length) {
             const elapsed = Math.round((Date.now() - startTime) / 1000);
-            console.log(`[mcexpocomfortMiner] Detail progress: ${i + 1}/${detailLimit}, +${enriched} emails (${elapsed}s)`);
+            console.log(`[mcexpocomfortMiner] API progress: ${processed}/${cardsToProcess.length}, +${enriched} emails, ${apiErrors} errors (${elapsed}s)`);
         }
     }
 
-    console.log(`[mcexpocomfortMiner] Phase 2 complete: ${enriched} emails from ${detailLimit} detail pages`);
+    console.log(`[mcexpocomfortMiner] Phase 2 complete: ${enriched} emails from ${cardsToProcess.length} API calls, ${apiErrors} errors`);
 
-    // Build final cards
+    // Build final cards (include ALL exhibitors, even those without GUID)
     const cards = exhibitorCards.map(c => ({
         company_name: c.company_name || null,
         email: c.email || null,
