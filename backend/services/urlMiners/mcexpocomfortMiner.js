@@ -176,7 +176,7 @@ let _debugOrgCount = 0;
  * Fetch organisation data from ReedExpo API.
  * Tries two endpoints and merges results.
  */
-async function fetchOrgFromAPI(orgGuid, eventEditionId) {
+async function fetchOrgFromAPI(orgGuid, eventEditionId, apiHeaders = {}) {
     const _shouldDebug = _debugOrgCount < 3;
     if (_shouldDebug) _debugOrgCount++;
     const results = {
@@ -194,7 +194,7 @@ async function fetchOrgFromAPI(orgGuid, eventEditionId) {
     try {
         const docsUrl = `${REED_API_BASE}/documents/public?organisationGuid=${orgGuid}&eventEditionId=${eventEditionId}`;
         const docsRes = await fetch(docsUrl, {
-            headers: { 'Accept': 'application/json' },
+            headers: apiHeaders,
             signal: AbortSignal.timeout(10000)
         });
 
@@ -219,7 +219,7 @@ async function fetchOrgFromAPI(orgGuid, eventEditionId) {
     try {
         const orgUrl = `${REED_API_BASE}/event-editions/${eventEditionId}/organisations/${orgGuid}`;
         const orgRes = await fetch(orgUrl, {
-            headers: { 'Accept': 'application/json' },
+            headers: apiHeaders,
             signal: AbortSignal.timeout(10000)
         });
 
@@ -380,12 +380,12 @@ function extractEmailFromField(value, results) {
 /**
  * Process a batch of cards concurrently via API.
  */
-async function processBatch(batch, eventEditionId) {
+async function processBatch(batch, eventEditionId, apiHeaders) {
     return Promise.all(batch.map(async (card) => {
         if (!card.org_guid) return null;
 
         try {
-            const data = await fetchOrgFromAPI(card.org_guid, eventEditionId);
+            const data = await fetchOrgFromAPI(card.org_guid, eventEditionId, apiHeaders);
             return { card, data };
         } catch (e) {
             console.warn(`[mcexpocomfortMiner] API error for ${card.org_guid}: ${e.message}`);
@@ -421,6 +421,62 @@ async function runMcexpocomfortMiner(page, url, config = {}) {
         return [];
     }
 
+    // ─── Token & Cookie Capture (browser still open from Phase 1) ────
+    const token = await page.evaluate(() => {
+        // 1. RX state
+        if (window.__RX_STATE__?.auth?.accessToken)
+            return window.__RX_STATE__.auth.accessToken;
+
+        // 2. Apollo GraphQL state
+        if (window.__APOLLO_STATE__) {
+            const str = JSON.stringify(window.__APOLLO_STATE__);
+            const m = str.match(/"accessToken":"([^"]+)"/);
+            if (m) return m[1];
+        }
+
+        // 3. NEXT_DATA
+        const next = document.getElementById('__NEXT_DATA__');
+        if (next) {
+            try {
+                const data = JSON.parse(next.textContent);
+                const t =
+                    data?.props?.pageProps?.token ||
+                    data?.props?.pageProps?.authToken ||
+                    data?.props?.pageProps?.accessToken;
+                if (t) return t;
+            } catch {}
+        }
+
+        // 4. localStorage
+        for (const k of Object.keys(localStorage)) {
+            const v = localStorage.getItem(k);
+            if (v && v.includes('token')) return v;
+        }
+
+        // 5. script tag scan
+        const scripts = [...document.querySelectorAll('script')];
+        for (const s of scripts) {
+            const m = s.textContent.match(/accessToken["']?\s*:\s*["']([^"']+)["']/);
+            if (m) return m[1];
+        }
+
+        return null;
+    });
+
+    const cookies = await page.context().cookies();
+    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+
+    console.log(`[MCE DEBUG] Token: ${token ? token.slice(0, 40) + '...' : 'NOT FOUND'}`);
+    console.log(`[MCE DEBUG] Cookies: ${cookies.length} adet`);
+
+    // Build API headers — token + clientId + cookies
+    const apiHeaders = {
+        'Accept': 'application/json',
+        'x-clientid': 'uhQVcmxLwXAjVtVpTvoerERiZSsNz0om',
+    };
+    if (token) apiHeaders['Authorization'] = `Bearer ${token}`;
+    if (cookieHeader) apiHeaders['Cookie'] = cookieHeader;
+
     // Filter to cards with GUIDs only, limit to maxDetails
     const cardsWithGuid = exhibitorCards.filter(c => c.org_guid);
     const cardsToProcess = cardsWithGuid.slice(0, maxDetails);
@@ -439,7 +495,7 @@ async function runMcexpocomfortMiner(page, url, config = {}) {
         }
 
         const batch = cardsToProcess.slice(i, i + concurrency);
-        const results = await processBatch(batch, eventEditionId);
+        const results = await processBatch(batch, eventEditionId, apiHeaders);
 
         for (const result of results) {
             if (!result) {
@@ -471,6 +527,64 @@ async function runMcexpocomfortMiner(page, url, config = {}) {
     }
 
     console.log(`[mcexpocomfortMiner] Phase 2 complete: ${enriched} emails from ${cardsToProcess.length} API calls, ${apiErrors} errors`);
+
+    // ─── Fallback: Detail page HTML for cards without email ──────────
+    const noEmailCards = exhibitorCards.filter(c => !c.email && c.detail_url);
+    const fallbackLimit = Math.min(noEmailCards.length, 50); // max 50 fallback visits
+    if (fallbackLimit > 0 && (Date.now() - startTime) < totalTimeout) {
+        console.log(`[mcexpocomfortMiner] Fallback: ${fallbackLimit} detail pages via HTML (no email from API)...`);
+        let fallbackEmails = 0;
+
+        for (let i = 0; i < fallbackLimit; i++) {
+            if (Date.now() - startTime > totalTimeout) break;
+
+            const card = noEmailCards[i];
+            try {
+                await page.goto(card.detail_url, { waitUntil: 'domcontentloaded', timeout: 10000 });
+                await page.waitForTimeout(1000);
+
+                const emails = await page.evaluate(({ junkDomains }) => {
+                    const found = [];
+
+                    // mailto: links
+                    for (const a of document.querySelectorAll('a[href^="mailto:"]')) {
+                        const href = a.getAttribute('href') || '';
+                        if (href.startsWith('mailto:?')) continue;
+                        const email = href.replace('mailto:', '').split('?')[0].trim().toLowerCase();
+                        if (email && email.includes('@') && email.length > 5) {
+                            const isJunk = junkDomains.some(d => email.endsWith('@' + d) || email.includes('.' + d));
+                            if (!isJunk) found.push(email);
+                        }
+                    }
+
+                    // Regex on body text
+                    const bodyText = document.body ? document.body.innerText : '';
+                    const regex = /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi;
+                    let m;
+                    while ((m = regex.exec(bodyText)) !== null) {
+                        const email = m[0].toLowerCase();
+                        if (!found.includes(email)) {
+                            const isJunk = junkDomains.some(d => email.endsWith('@' + d) || email.includes('.' + d));
+                            if (!isJunk) found.push(email);
+                        }
+                    }
+
+                    return found;
+                }, { junkDomains: JUNK_EMAIL_DOMAINS });
+
+                if (emails.length > 0) {
+                    card.email = emails[0];
+                    card.all_emails = emails;
+                    fallbackEmails++;
+                }
+            } catch (e) {
+                // Skip failed detail pages silently
+            }
+        }
+
+        console.log(`[mcexpocomfortMiner] Fallback complete: +${fallbackEmails} emails from ${fallbackLimit} detail pages`);
+        enriched += fallbackEmails;
+    }
 
     // Build final cards (include ALL exhibitors, even those without GUID)
     const cards = exhibitorCards.map(c => ({
