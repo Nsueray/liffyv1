@@ -1,24 +1,21 @@
 /**
- * LIFFY MCE Expocomfort Miner v3.0
+ * LIFFY MCE Expocomfort Miner v4.0
  * ==================================
  *
  * Specialized miner for mcexpocomfort.it exhibitor directory.
  *
  * Two-phase pipeline:
- *   1. Infinite scroll — scroll the list page, collect exhibitor detail URLs
- *   2. Network interception — visit detail pages, capture API calls + mailto emails
- *
- * Phase 2 strategy:
- *   - DEBUG MODE: Visit first 3 detail pages with network interception
- *   - Log all API calls made by the page (reedexpo, organisations, exhibitors)
- *   - Also extract mailto: emails from HTML as fallback
- *   - Once correct API endpoint is identified, switch to bulk API mode
+ *   1. Infinite scroll (Playwright) — scroll list page, collect detail URLs
+ *   2. HTTP fetch (axios) — fetch each detail page HTML, extract emails via regex
+ *      No Playwright in Phase 2. Concurrency 20, ~10s timeout per request.
  *
  * Miner contract:
  *   - Returns raw card data only (no normalization, no DB writes)
  *   - Browser lifecycle managed by flowOrchestrator wrapper
  *   - Handles its own pagination internally (ownPagination: true, ownBrowser: true)
  */
+
+const axios = require('axios');
 
 // ─── Constants ───────────────────────────────────────────────────────
 
@@ -36,15 +33,12 @@ const JUNK_EMAIL_DOMAINS = [
 const DEFAULT_MAX_SCROLLS = 50;
 const DEFAULT_SCROLL_DELAY_MS = 2000;
 const DEFAULT_MAX_DETAILS = 2000;
-const DEFAULT_TOTAL_TIMEOUT = 300000; // 5 minutes
-const DEFAULT_DETAIL_DELAY_MS = 1500;
+const DEFAULT_TOTAL_TIMEOUT = 600000; // 10 minutes (increased for HTTP phase)
+const DEFAULT_CONCURRENCY = 20;
+const DEFAULT_REQUEST_TIMEOUT = 10000; // 10s per request
 
 // ─── Phase 1: Infinite Scroll — Collect Links ───────────────────────
 
-/**
- * Scroll the page to the bottom repeatedly until no new content loads.
- * Returns array of { detail_url, company_name, country }.
- */
 async function collectExhibitorLinks(page, url, config) {
     const maxScrolls = config.max_scrolls || DEFAULT_MAX_SCROLLS;
     const scrollDelay = config.scroll_delay_ms || DEFAULT_SCROLL_DELAY_MS;
@@ -55,7 +49,6 @@ async function collectExhibitorLinks(page, url, config) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     console.log(`[mcexpocomfortMiner] Phase 1: Page loaded (${Date.now() - startTime}ms)`);
 
-    // Wait for initial content to render
     try {
         await page.waitForSelector('a[href*="exhib_profile"]', { timeout: 10000 });
         console.log(`[mcexpocomfortMiner] Phase 1: Exhibitor links detected in DOM`);
@@ -64,7 +57,6 @@ async function collectExhibitorLinks(page, url, config) {
         await page.waitForTimeout(3000);
     }
 
-    // Extra settle time for JS-heavy pages
     await page.waitForTimeout(3000);
     console.log(`[mcexpocomfortMiner] Phase 1: Ready to scroll (${Date.now() - startTime}ms)`);
 
@@ -72,7 +64,7 @@ async function collectExhibitorLinks(page, url, config) {
     let noChangeCount = 0;
     let scrollCount = 0;
 
-    console.log(`[mcexpocomfortMiner] Phase 1: Starting infinite scroll (max ${maxScrolls} scrolls, initial height=${previousHeight})`);
+    console.log(`[mcexpocomfortMiner] Phase 1: Starting infinite scroll (max ${maxScrolls}, initial height=${previousHeight})`);
 
     while (scrollCount < maxScrolls && noChangeCount < 3) {
         scrollCount++;
@@ -92,13 +84,12 @@ async function collectExhibitorLinks(page, url, config) {
         previousHeight = currentHeight;
 
         if (shouldLog) {
-            const linkCount = await page.evaluate(() => {
-                return document.querySelectorAll('a[href*="exhib_profile"]').length;
-            });
+            const linkCount = await page.evaluate(() =>
+                document.querySelectorAll('a[href*="exhib_profile"]').length
+            );
             console.log(`[mcexpocomfortMiner] Scroll ${scrollCount}/${maxScrolls}: ${linkCount} links, height=${currentHeight}, noChange=${noChangeCount}`);
         }
 
-        // Phase 1 timeout guard (use half of total timeout)
         if (Date.now() - startTime > 150000) {
             console.log(`[mcexpocomfortMiner] Phase 1 timeout (150s) — stopping scroll`);
             break;
@@ -107,7 +98,6 @@ async function collectExhibitorLinks(page, url, config) {
 
     console.log(`[mcexpocomfortMiner] Scrolling done after ${scrollCount} scrolls (noChange=${noChangeCount}, ${Date.now() - startTime}ms)`);
 
-    // Collect all exhibitor detail links + company names from page
     const cardData = await page.evaluate(() => {
         const cards = [];
         const anchors = document.querySelectorAll('a[href*="exhib_profile"]');
@@ -125,14 +115,12 @@ async function collectExhibitorLinks(page, url, config) {
             if (seen.has(fullUrl)) continue;
             seen.add(fullUrl);
 
-            // Try to get company name from the card
             const card = a.closest('[class*="card"], [class*="exhibitor"], [class*="item"], li, article') || a;
             const nameEl = card.querySelector('h2, h3, h4, .title, [class*="name"], [class*="title"]');
             const companyName = nameEl
                 ? nameEl.textContent.trim()
                 : a.textContent.trim().split('\n')[0].trim();
 
-            // Try to get country/stand info
             const metaEl = card.querySelector('[class*="country"], [class*="location"], [class*="stand"], small, .meta');
             const meta = metaEl ? metaEl.textContent.trim() : null;
 
@@ -147,113 +135,85 @@ async function collectExhibitorLinks(page, url, config) {
     });
 
     console.log(`[mcexpocomfortMiner] Phase 1 complete: ${cardData.length} unique exhibitor links`);
-
     return cardData;
 }
 
-// ─── Phase 2: Network Interception + Detail Page Visit ──────────────
+// ─── Phase 2: HTTP Fetch + Email Regex ──────────────────────────────
 
 /**
- * Visit a detail page with network interception enabled.
- * Captures all API calls and extracts email from HTML.
- * Returns { apiCalls, email, allEmails }.
+ * Extract emails from raw HTML string.
  */
-async function visitDetailWithIntercept(page, detailUrl, junkDomains, debugMode) {
-    const apiCalls = [];
+function extractEmailsFromHTML(html) {
+    const emails = [];
+    if (!html) return emails;
 
-    // Set up network interception
-    const onRequest = (req) => {
-        const url = req.url();
-        if (url.includes('api.reedexpo.com') ||
-            url.includes('reedexpo') ||
-            url.includes('organisations') ||
-            url.includes('exhibitors')) {
-            apiCalls.push({
-                url: url,
-                method: req.method(),
-                headers: req.headers()
-            });
+    // 1. mailto: links
+    const mailtoRegex = /mailto:([a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,})/gi;
+    let m;
+    while ((m = mailtoRegex.exec(html)) !== null) {
+        const email = m[1].toLowerCase();
+        if (!emails.includes(email)) {
+            const isJunk = JUNK_EMAIL_DOMAINS.some(d => email.endsWith('@' + d) || email.includes('.' + d));
+            if (!isJunk) emails.push(email);
         }
-    };
+    }
 
-    page.on('request', onRequest);
+    // 2. General email regex on full HTML
+    const allMatches = html.match(EMAIL_REGEX) || [];
+    for (const raw of allMatches) {
+        const email = raw.toLowerCase();
+        if (emails.includes(email)) continue;
+        const isJunk = JUNK_EMAIL_DOMAINS.some(d => email.endsWith('@' + d) || email.includes('.' + d));
+        if (!isJunk) emails.push(email);
+    }
 
+    return emails;
+}
+
+/**
+ * Fetch a single detail page via HTTP and extract emails.
+ */
+async function fetchDetailPage(detailUrl, requestTimeout) {
     try {
-        await page.goto(detailUrl, { waitUntil: 'networkidle', timeout: 30000 });
+        const res = await axios.get(detailUrl, {
+            timeout: requestTimeout,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+            },
+            maxRedirects: 3,
+            validateStatus: (status) => status < 400,
+        });
+
+        const html = typeof res.data === 'string' ? res.data : '';
+        return extractEmailsFromHTML(html);
     } catch (e) {
-        // networkidle timeout is OK — page may keep loading ads etc.
-        if (debugMode) {
-            console.log(`[MCE DEBUG] goto timeout for ${detailUrl}: ${e.message}`);
-        }
+        // Timeout, network error, 4xx — skip silently
+        return null;
     }
+}
 
-    // Remove listener to avoid leaks
-    page.removeListener('request', onRequest);
-
-    // Extract mailto: email from HTML
-    let email = null;
-    try {
-        email = await page.$eval(
-            'a[href^="mailto:"]',
-            (el) => el.href.replace('mailto:', '').split('?')[0].trim().toLowerCase()
-        );
-    } catch (e) {
-        // No mailto: link found
-    }
-
-    // Also regex scan for emails in body text
-    const allEmails = await page.evaluate(({ junkDomains: jd }) => {
-        const found = [];
-
-        // mailto: links first
-        for (const a of document.querySelectorAll('a[href^="mailto:"]')) {
-            const href = a.getAttribute('href') || '';
-            if (href.startsWith('mailto:?')) continue;
-            const em = href.replace('mailto:', '').split('?')[0].trim().toLowerCase();
-            if (em && em.includes('@') && em.length > 5) {
-                const isJunk = jd.some(d => em.endsWith('@' + d) || em.includes('.' + d));
-                if (!isJunk && !found.includes(em)) found.push(em);
-            }
-        }
-
-        // Regex on body text
-        const bodyText = document.body ? document.body.innerText : '';
-        const regex = /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi;
-        let m;
-        while ((m = regex.exec(bodyText)) !== null) {
-            const em = m[0].toLowerCase();
-            if (!found.includes(em)) {
-                const isJunk = jd.some(d => em.endsWith('@' + d) || em.includes('.' + d));
-                if (!isJunk) found.push(em);
-            }
-        }
-
-        return found;
-    }, { junkDomains: junkDomains });
-
-    // Use first non-junk email
-    if (!email && allEmails.length > 0) {
-        email = allEmails[0];
-    }
-
-    // Validate email against junk list
-    if (email) {
-        const isJunk = junkDomains.some(d => email.endsWith('@' + d) || email.includes('.' + d));
-        if (isJunk) email = null;
-    }
-
-    return { apiCalls, email, allEmails };
+/**
+ * Process a chunk of cards concurrently.
+ */
+async function processChunk(chunk, requestTimeout) {
+    return Promise.all(chunk.map(async (card) => {
+        const emails = await fetchDetailPage(card.detail_url, requestTimeout);
+        return { card, emails };
+    }));
 }
 
 // ─── Main Entry Point ────────────────────────────────────────────────
 
 async function runMcexpocomfortMiner(page, url, config = {}) {
     const maxDetails = config.max_details || DEFAULT_MAX_DETAILS;
-    const detailDelay = config.delay_ms || DEFAULT_DETAIL_DELAY_MS;
+    const concurrency = config.concurrency || DEFAULT_CONCURRENCY;
     const totalTimeout = config.total_timeout || DEFAULT_TOTAL_TIMEOUT;
+    const requestTimeout = config.request_timeout || DEFAULT_REQUEST_TIMEOUT;
     const startTime = Date.now();
 
-    console.log(`[mcexpocomfortMiner] Starting for: ${url} (timeout: ${totalTimeout}ms)`);
+    console.log(`[mcexpocomfortMiner] Starting for: ${url} (timeout: ${totalTimeout}ms, concurrency: ${concurrency})`);
 
     // Total timeout wrapper
     const timeoutPromise = new Promise((_, reject) =>
@@ -271,84 +231,48 @@ async function runMcexpocomfortMiner(page, url, config = {}) {
         return [];
     }
 
-    // ─── Phase 2: Network Interception Debug + Email Extraction ──────
+    // ─── Phase 2: HTTP Fetch (axios, no Playwright) ─────────────────
 
     const detailLimit = Math.min(exhibitorCards.length, maxDetails);
-    console.log(`[mcexpocomfortMiner] Phase 2: Visiting ${detailLimit} detail pages (first 3 with network debug)...`);
+    const cardsToProcess = exhibitorCards.slice(0, detailLimit);
+    const estimatedSeconds = Math.ceil(detailLimit / concurrency) * 0.5; // ~0.5s avg per batch
+    console.log(`[mcexpocomfortMiner] Phase 2: ${detailLimit} pages, ~${estimatedSeconds} seconds estimated (concurrency: ${concurrency})`);
 
     let enriched = 0;
-    let consecutiveErrors = 0;
+    let errors = 0;
 
-    for (let i = 0; i < detailLimit; i++) {
+    for (let i = 0; i < cardsToProcess.length; i += concurrency) {
         // Timeout check
         if (Date.now() - startTime > totalTimeout) {
             console.log(`[mcexpocomfortMiner] Total timeout at ${i}/${detailLimit} — stopping.`);
             break;
         }
 
-        // Circuit breaker
-        if (consecutiveErrors >= 5) {
-            console.log(`[mcexpocomfortMiner] 5 consecutive errors — stopping detail crawl.`);
-            break;
-        }
+        const chunk = cardsToProcess.slice(i, i + concurrency);
+        const results = await processChunk(chunk, requestTimeout);
 
-        const card = exhibitorCards[i];
-        const isDebug = i < 3; // First 3 with full debug
-
-        try {
-            const result = await visitDetailWithIntercept(page, card.detail_url, JUNK_EMAIL_DOMAINS, isDebug);
-
-            // DEBUG: Log API calls for first 3 orgs
-            if (isDebug) {
-                console.log(`[MCE DEBUG] API calls for ${card.company_name || card.detail_url}:`);
-                if (result.apiCalls.length === 0) {
-                    console.log('  (none)');
-                } else {
-                    result.apiCalls.forEach(c => {
-                        console.log(`  ${c.method} ${c.url}`);
-                        // Log auth-related headers
-                        const authHeader = c.headers['authorization'] || c.headers['Authorization'] || null;
-                        const clientId = c.headers['x-clientid'] || c.headers['X-ClientId'] || null;
-                        if (authHeader) console.log(`    Authorization: ${authHeader.slice(0, 50)}...`);
-                        if (clientId) console.log(`    x-clientid: ${clientId}`);
-                    });
-                }
-                console.log(`[MCE DEBUG] mailto email: ${result.email || 'NOT FOUND'}`);
-                if (result.allEmails.length > 0) {
-                    console.log(`[MCE DEBUG] all emails: ${result.allEmails.join(', ')}`);
-                }
+        for (const { card, emails } of results) {
+            if (emails === null) {
+                errors++;
+                continue;
             }
 
-            consecutiveErrors = 0;
-
-            // Enrich card with email
-            if (result.allEmails.length > 0) {
-                card.email = result.allEmails[0];
-                card.all_emails = result.allEmails;
+            if (emails.length > 0) {
+                card.email = emails[0];
+                card.all_emails = emails;
                 enriched++;
-            } else if (result.email) {
-                card.email = result.email;
-                enriched++;
-            }
-
-            // Polite delay
-            await page.waitForTimeout(detailDelay);
-
-        } catch (e) {
-            consecutiveErrors++;
-            if (isDebug) {
-                console.log(`[MCE DEBUG] Error visiting ${card.detail_url}: ${e.message}`);
             }
         }
 
-        // Progress log every 25 detail pages
-        if ((i + 1) % 25 === 0) {
+        // Progress log every 100 pages
+        const processed = Math.min(i + concurrency, detailLimit);
+        if (processed % 100 === 0 || processed === detailLimit) {
             const elapsed = Math.round((Date.now() - startTime) / 1000);
-            console.log(`[mcexpocomfortMiner] Detail progress: ${i + 1}/${detailLimit}, +${enriched} emails (${elapsed}s)`);
+            console.log(`[mcexpocomfortMiner] Phase 2 progress: ${processed}/${detailLimit}, +${enriched} emails, ${errors} errors (${elapsed}s)`);
         }
     }
 
-    console.log(`[mcexpocomfortMiner] Phase 2 complete: ${enriched} emails from ${detailLimit} detail pages`);
+    console.log(`[mcexpocomfortMiner] Phase 2 complete: ${enriched} emails from ${detailLimit} pages, ${errors} errors`);
 
     // Build final cards
     const cards = exhibitorCards.map(c => ({
