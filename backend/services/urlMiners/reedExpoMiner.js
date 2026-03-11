@@ -27,8 +27,9 @@ const axios = require('axios');
 const GRAPHQL_URL = 'https://api.reedexpo.com/graphql/';
 const DEFAULT_CLIENT_ID = 'uhQVcmxLwXAjVtVpTvoerERiZSsNz0om';
 
-// Pattern: exhib_profile.COMPANY_NAME.org-GUID.html → extract "org-GUID"
-const ORG_GUID_REGEX = /exhib_profile\.[^.]+\.(org-[a-f0-9\-]+)\.html/i;
+// Pattern: org-GUID in URL — flexible extraction
+// Works with: exhib_profile.NAME.org-GUID.html, /exhibitor/org-GUID, /company/org-GUID, etc.
+const ORG_GUID_REGEX = /(org-[a-f0-9\-]{36})/i;
 
 // Pattern: eventEditionId (eve-UUID format)
 const EVE_ID_REGEX = /(eve-[a-f0-9\-]{36})/i;
@@ -218,15 +219,32 @@ async function collectExhibitorLinks(page, url, config) {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
     console.log(`[reedExpoMiner] Phase 1: Page loaded (${Date.now() - startTime}ms)`);
 
-    try {
-        await page.waitForSelector('a[href*="exhib_profile"]', { timeout: 10000 });
-        console.log(`[reedExpoMiner] Phase 1: Exhibitor links detected in DOM`);
-    } catch (e) {
-        console.log(`[reedExpoMiner] Phase 1: No exhibitor links after 10s, waiting 3s for JS render...`);
-        await page.waitForTimeout(3000);
+    // Wait for exhibitor links — try multiple selectors
+    const LINK_SELECTORS = [
+        'a[href*="exhib_profile"]',
+        'a[href*="exhibitor"]',
+        'a[href*="company"]',
+        'a[href*="/org-"]'
+    ];
+
+    let detectedSelector = null;
+    for (const sel of LINK_SELECTORS) {
+        try {
+            await page.waitForSelector(sel, { timeout: 5000 });
+            detectedSelector = sel;
+            console.log(`[reedExpoMiner] Phase 1: Links detected via ${sel}`);
+            break;
+        } catch (e) {
+            // Try next selector
+        }
     }
 
-    await page.waitForTimeout(3000);
+    if (!detectedSelector) {
+        console.log(`[reedExpoMiner] Phase 1: No links found with known selectors, waiting 5s for JS render...`);
+        await page.waitForTimeout(5000);
+    } else {
+        await page.waitForTimeout(3000);
+    }
 
     // Detect eventEditionId and clientId while page is loaded
     const eventEditionId = await detectEventEditionId(page, capturedEveIds);
@@ -261,9 +279,19 @@ async function collectExhibitorLinks(page, url, config) {
         previousHeight = currentHeight;
 
         if (shouldLog) {
-            const linkCount = await page.evaluate(() =>
-                document.querySelectorAll('a[href*="exhib_profile"]').length
-            );
+            const linkCount = await page.evaluate(() => {
+                // Count links matching any ReedExpo pattern
+                const orgRegex = /org-[a-f0-9\-]+/i;
+                let count = 0;
+                for (const a of document.querySelectorAll('a[href]')) {
+                    const h = a.getAttribute('href') || '';
+                    if (h.includes('exhib_profile') || h.includes('exhibitor') ||
+                        h.includes('company') || orgRegex.test(h)) {
+                        count++;
+                    }
+                }
+                return count;
+            });
             console.log(`[reedExpoMiner] Scroll ${scrollCount}/${maxScrolls}: ${linkCount} links, height=${currentHeight}, noChange=${noChangeCount}`);
         }
 
@@ -277,12 +305,21 @@ async function collectExhibitorLinks(page, url, config) {
 
     const cardData = await page.evaluate(() => {
         const cards = [];
-        const anchors = document.querySelectorAll('a[href*="exhib_profile"]');
         const seen = new Set();
+        const orgRegex = /org-[a-f0-9\-]+/i;
 
-        for (const a of anchors) {
-            const href = a.getAttribute('href');
+        // Broad selector: any <a> with href matching ReedExpo patterns
+        for (const a of document.querySelectorAll('a[href]')) {
+            const href = a.getAttribute('href') || '';
             if (!href) continue;
+
+            // Match: exhib_profile, exhibitor path, company path, or org-GUID in URL
+            const isMatch = href.includes('exhib_profile') ||
+                (href.includes('exhibitor') && (href.includes('/org-') || href.includes('profile'))) ||
+                (href.includes('company') && orgRegex.test(href)) ||
+                orgRegex.test(href);
+
+            if (!isMatch) continue;
 
             let fullUrl;
             try {
@@ -292,7 +329,7 @@ async function collectExhibitorLinks(page, url, config) {
             if (seen.has(fullUrl)) continue;
             seen.add(fullUrl);
 
-            const card = a.closest('[class*="card"], [class*="exhibitor"], [class*="item"], li, article') || a;
+            const card = a.closest('[class*="card"], [class*="exhibitor"], [class*="item"], li, article, [class*="company"]') || a;
             const nameEl = card.querySelector('h2, h3, h4, .title, [class*="name"], [class*="title"]');
             const companyName = nameEl
                 ? nameEl.textContent.trim()
@@ -310,6 +347,23 @@ async function collectExhibitorLinks(page, url, config) {
 
         return cards;
     });
+
+    // DEBUG: If 0 links found, log first 20 <a href> on the page
+    if (cardData.length === 0) {
+        const debugLinks = await page.evaluate(() => {
+            const links = [];
+            for (const a of document.querySelectorAll('a[href]')) {
+                const href = a.getAttribute('href') || '';
+                if (href && !href.startsWith('#') && !href.startsWith('javascript:')) {
+                    links.push(href);
+                }
+                if (links.length >= 20) break;
+            }
+            return links;
+        });
+        console.log(`[reedExpoMiner] DEBUG: 0 exhibitor links found. First 20 <a href> on page:`);
+        debugLinks.forEach((link, i) => console.log(`  ${i + 1}. ${link}`));
+    }
 
     // Extract organisationGuid from each detail URL
     for (const card of cardData) {
