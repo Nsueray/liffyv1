@@ -76,7 +76,8 @@ const REED_EXPO_DOMAINS = [
     'arabhealth.com',
     'bigshowafrica.com',
     'wtm.com',
-    'worldtravelmarket.com'
+    'worldtravelmarket.com',
+    'ishhvac.com'
 ];
 
 // VIS platform domains — Messe Düsseldorf VIS exhibitor catalogs

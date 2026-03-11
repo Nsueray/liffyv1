@@ -1,18 +1,16 @@
 /**
- * LIFFY ReedExpo Miner v1.0
+ * LIFFY ReedExpo Miner v1.1
  * ==========================
  *
  * Generic miner for all ReedExpo platform exhibitor directories.
  * Works with any ReedExpo-powered trade show site:
- *   - mcexpocomfort.it
- *   - arabhealth.com
- *   - bigshowafrica.com
- *   - wtm.com
- *   - ... and any other site on the ReedExpo platform
+ *   - mcexpocomfort.it, arabhealth.com, bigshowafrica.com
+ *   - wtm.com, ishhvac.com, ... any ReedExpo platform site
  *
  * Two-phase pipeline:
  *   1. Infinite scroll (Playwright) — scroll list page, collect detail URLs + org GUIDs
- *      Also auto-detects eventEditionId from __NEXT_DATA__ or network requests
+ *      Auto-detects eventEditionId from __NEXT_DATA__ / scripts / network
+ *      Auto-detects x-clientid from network requests (fallback: hardcoded)
  *   2. GraphQL API (axios) — batch query ReedExpo GraphQL for contactEmail/website/phone
  *      Concurrency 20, 10s timeout per request.
  *
@@ -27,13 +25,23 @@ const axios = require('axios');
 // ─── Constants ───────────────────────────────────────────────────────
 
 const GRAPHQL_URL = 'https://api.reedexpo.com/graphql/';
-const GRAPHQL_CLIENT_ID = 'uhQVcmxLwXAjVtVpTvoerERiZSsNz0om';
+const DEFAULT_CLIENT_ID = 'uhQVcmxLwXAjVtVpTvoerERiZSsNz0om';
 
 // Pattern: exhib_profile.COMPANY_NAME.org-GUID.html → extract "org-GUID"
 const ORG_GUID_REGEX = /exhib_profile\.[^.]+\.(org-[a-f0-9\-]+)\.html/i;
 
-// Pattern: eventEditionId in __NEXT_DATA__ or network requests
+// Pattern: eventEditionId (eve-UUID format)
 const EVE_ID_REGEX = /(eve-[a-f0-9\-]{36})/i;
+
+// Known ReedExpo platform hostnames
+const REED_EXPO_HOSTNAMES = [
+    'mcexpocomfort.it',
+    'arabhealth.com',
+    'bigshowafrica.com',
+    'wtm.com',
+    'worldtravelmarket.com',
+    'ishhvac.com'
+];
 
 const JUNK_EMAIL_DOMAINS = [
     'example.com', 'example.org', 'test.com', 'sentry.io',
@@ -51,18 +59,60 @@ const DEFAULT_TOTAL_TIMEOUT = 300000; // 5 minutes
 const DEFAULT_CONCURRENCY = 20;
 const DEFAULT_REQUEST_TIMEOUT = 10000; // 10s per request
 
-// ─── Phase 1: Infinite Scroll — Collect Links + Extract GUIDs ───────
+// ─── canHandle — Static URL Check ───────────────────────────────────
+
+/**
+ * Check if a URL belongs to a ReedExpo platform site.
+ * Can be called without a browser — pure URL/string check.
+ * @param {string} url - URL to check
+ * @param {string} [pageSource] - Optional page HTML source for deeper check
+ * @returns {boolean}
+ */
+function canHandle(url, pageSource) {
+    try {
+        const hostname = new URL(url).hostname.toLowerCase();
+
+        // Known ReedExpo hostnames
+        if (REED_EXPO_HOSTNAMES.some(d => hostname.includes(d))) return true;
+
+        // reedexpo.com in hostname (subdomains, etc.)
+        if (hostname.includes('reedexpo.com')) return true;
+    } catch (e) {
+        // Invalid URL
+    }
+
+    // Check page source for ReedExpo API references
+    if (pageSource && typeof pageSource === 'string') {
+        if (pageSource.includes('api.reedexpo.com')) return true;
+    }
+
+    return false;
+}
+
+// ─── Phase 1: Infinite Scroll — Collect Links + Auto-Detect Config ──
 
 /**
  * Auto-detect eventEditionId from page content and network requests.
- * Tries __NEXT_DATA__, script tags, and captured network requests.
+ * Tries structured __NEXT_DATA__ paths first, then regex fallbacks.
  */
 async function detectEventEditionId(page, capturedEveIds) {
-    // 1. Try __NEXT_DATA__
+    // 1. Try __NEXT_DATA__ — structured JSON paths
     const fromNextData = await page.evaluate(() => {
         const nextEl = document.getElementById('__NEXT_DATA__');
         if (!nextEl) return null;
         try {
+            const data = JSON.parse(nextEl.textContent);
+            const pp = data?.props?.pageProps;
+            if (!pp) return null;
+
+            // Try known paths
+            if (pp.eventEditionId) return pp.eventEditionId;
+            if (pp.eventEdition?.id) return pp.eventEdition.id;
+            if (pp.event?.eventEditionId) return pp.event.eventEditionId;
+            if (pp.config?.eventEditionId) return pp.config.eventEditionId;
+            if (pp.initialState?.eventEditionId) return pp.initialState.eventEditionId;
+
+            // Fallback: regex on full __NEXT_DATA__ text
             const text = nextEl.textContent;
             const match = text.match(/(eve-[a-f0-9\-]{36})/i);
             return match ? match[1] : null;
@@ -94,12 +144,11 @@ async function detectEventEditionId(page, capturedEveIds) {
 
     // 3. Try captured network requests
     if (capturedEveIds.length > 0) {
-        const eveId = capturedEveIds[0];
-        console.log(`[reedExpoMiner] eventEditionId from network: ${eveId}`);
-        return eveId;
+        console.log(`[reedExpoMiner] eventEditionId from network: ${capturedEveIds[0]}`);
+        return capturedEveIds[0];
     }
 
-    // 4. Try page HTML as last resort
+    // 4. Full HTML regex as last resort
     const fromHtml = await page.evaluate(() => {
         const html = document.documentElement.outerHTML;
         const match = html.match(/(eve-[a-f0-9\-]{36})/i);
@@ -115,22 +164,47 @@ async function detectEventEditionId(page, capturedEveIds) {
 }
 
 /**
+ * Auto-detect x-clientid from captured network requests to api.reedexpo.com.
+ */
+function detectClientId(capturedClientIds) {
+    if (capturedClientIds.length > 0) {
+        console.log(`[reedExpoMiner] x-clientid from network: ${capturedClientIds[0]}`);
+        return capturedClientIds[0];
+    }
+    console.log(`[reedExpoMiner] x-clientid fallback: ${DEFAULT_CLIENT_ID}`);
+    return DEFAULT_CLIENT_ID;
+}
+
+/**
  * Scroll the page to the bottom repeatedly until no new content loads.
- * Also captures eventEditionId from network requests.
- * Returns { cards, eventEditionId }.
+ * Captures eventEditionId and x-clientid from network requests.
+ * Returns { cards, eventEditionId, clientId }.
  */
 async function collectExhibitorLinks(page, url, config) {
     const maxScrolls = config.max_scrolls || DEFAULT_MAX_SCROLLS;
     const scrollDelay = config.scroll_delay_ms || DEFAULT_SCROLL_DELAY_MS;
     const startTime = Date.now();
 
-    // Capture eventEditionId from network requests
+    // Capture eventEditionId and x-clientid from network requests
     const capturedEveIds = [];
+    const capturedClientIds = [];
+
     const onRequest = (req) => {
         const reqUrl = req.url();
-        const match = reqUrl.match(EVE_ID_REGEX);
-        if (match && !capturedEveIds.includes(match[1])) {
-            capturedEveIds.push(match[1]);
+        const headers = req.headers();
+
+        // Capture eve-xxx from any request URL
+        const eveMatch = reqUrl.match(EVE_ID_REGEX);
+        if (eveMatch && !capturedEveIds.includes(eveMatch[1])) {
+            capturedEveIds.push(eveMatch[1]);
+        }
+
+        // Capture x-clientid from requests to reedexpo API
+        if (reqUrl.includes('reedexpo.com') || reqUrl.includes('reedexpo')) {
+            const clientId = headers['x-clientid'] || headers['X-ClientId'] || headers['x-ClientId'];
+            if (clientId && !capturedClientIds.includes(clientId)) {
+                capturedClientIds.push(clientId);
+            }
         }
     };
     page.on('request', onRequest);
@@ -150,13 +224,14 @@ async function collectExhibitorLinks(page, url, config) {
 
     await page.waitForTimeout(3000);
 
-    // Detect eventEditionId while page is loaded
+    // Detect eventEditionId and clientId while page is loaded
     const eventEditionId = await detectEventEditionId(page, capturedEveIds);
+    const clientId = detectClientId(capturedClientIds);
 
     // Remove network listener before scrolling (performance)
     page.removeListener('request', onRequest);
 
-    console.log(`[reedExpoMiner] Phase 1: Ready to scroll (${Date.now() - startTime}ms), eventEditionId: ${eventEditionId || 'NOT FOUND'}`);
+    console.log(`[reedExpoMiner] Phase 1: Ready to scroll (${Date.now() - startTime}ms), eventEditionId: ${eventEditionId || 'NOT FOUND'}, clientId: ${clientId}`);
 
     let previousHeight = await page.evaluate(() => document.body.scrollHeight);
     let noChangeCount = 0;
@@ -241,7 +316,7 @@ async function collectExhibitorLinks(page, url, config) {
     const withGuid = cardData.filter(c => c.org_guid).length;
     console.log(`[reedExpoMiner] Phase 1 complete: ${cardData.length} exhibitors, ${withGuid} with GUID`);
 
-    return { cards: cardData, eventEditionId };
+    return { cards: cardData, eventEditionId, clientId };
 }
 
 // ─── Phase 2: GraphQL API — Email Extraction ────────────────────────
@@ -249,7 +324,7 @@ async function collectExhibitorLinks(page, url, config) {
 /**
  * Query ReedExpo GraphQL for a single organisation.
  */
-async function queryGraphQL(orgGuid, eventEditionId, requestTimeout) {
+async function queryGraphQL(orgGuid, eventEditionId, clientId, requestTimeout) {
     try {
         const res = await axios.post(GRAPHQL_URL, {
             query: `{ exhibitingOrganisation(eventEditionId:"${eventEditionId}", organisationId:"${orgGuid}") { companyName contactEmail website phone } }`
@@ -257,7 +332,7 @@ async function queryGraphQL(orgGuid, eventEditionId, requestTimeout) {
             timeout: requestTimeout,
             headers: {
                 'Content-Type': 'application/json',
-                'x-clientid': GRAPHQL_CLIENT_ID
+                'x-clientid': clientId
             }
         });
 
@@ -286,10 +361,10 @@ async function queryGraphQL(orgGuid, eventEditionId, requestTimeout) {
 /**
  * Process a batch of cards concurrently via GraphQL.
  */
-async function processBatch(batch, eventEditionId, requestTimeout) {
+async function processBatch(batch, eventEditionId, clientId, requestTimeout) {
     return Promise.all(batch.map(async (card) => {
         if (!card.org_guid) return { card, result: null };
-        const result = await queryGraphQL(card.org_guid, eventEditionId, requestTimeout);
+        const result = await queryGraphQL(card.org_guid, eventEditionId, clientId, requestTimeout);
         return { card, result };
     }));
 }
@@ -310,7 +385,7 @@ async function runReedExpoMiner(page, url, config = {}) {
         setTimeout(() => reject(new Error(`reedExpoMiner total timeout (${totalTimeout}ms)`)), totalTimeout)
     );
 
-    // Phase 1: Scroll and collect all exhibitor links + GUIDs + eventEditionId
+    // Phase 1: Scroll and collect all exhibitor links + GUIDs + auto-detect config
     const phase1Result = await Promise.race([
         collectExhibitorLinks(page, url, config),
         timeoutPromise
@@ -318,6 +393,7 @@ async function runReedExpoMiner(page, url, config = {}) {
 
     const exhibitorCards = phase1Result.cards;
     const eventEditionId = config.event_edition_id || phase1Result.eventEditionId;
+    const clientId = phase1Result.clientId || DEFAULT_CLIENT_ID;
 
     if (exhibitorCards.length === 0) {
         console.log('[reedExpoMiner] No exhibitor links found — returning empty.');
@@ -345,7 +421,7 @@ async function runReedExpoMiner(page, url, config = {}) {
     const cardsToProcess = cardsWithGuid.slice(0, detailLimit);
     const estimatedBatches = Math.ceil(detailLimit / concurrency);
     const estimatedSeconds = Math.round(estimatedBatches * 0.5);
-    console.log(`[reedExpoMiner] Phase 2: ${detailLimit} orgs, ~${estimatedSeconds} seconds estimated (concurrency: ${concurrency}, eventEditionId: ${eventEditionId})`);
+    console.log(`[reedExpoMiner] Phase 2: ${detailLimit} orgs, ~${estimatedSeconds}s estimated (concurrency: ${concurrency}, eve: ${eventEditionId}, clientId: ${clientId})`);
 
     let enriched = 0;
     let errors = 0;
@@ -357,7 +433,7 @@ async function runReedExpoMiner(page, url, config = {}) {
         }
 
         const batch = cardsToProcess.slice(i, i + concurrency);
-        const results = await processBatch(batch, eventEditionId, requestTimeout);
+        const results = await processBatch(batch, eventEditionId, clientId, requestTimeout);
 
         for (const { card, result } of results) {
             if (!result) {
@@ -408,4 +484,4 @@ async function runReedExpoMiner(page, url, config = {}) {
 
 // ─── Exports ─────────────────────────────────────────────────────────
 
-module.exports = { runReedExpoMiner };
+module.exports = { runReedExpoMiner, canHandle };
