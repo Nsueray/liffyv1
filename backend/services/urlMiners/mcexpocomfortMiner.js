@@ -1,17 +1,18 @@
 /**
- * LIFFY MCE Expocomfort Miner v2.0
+ * LIFFY MCE Expocomfort Miner v3.0
  * ==================================
  *
  * Specialized miner for mcexpocomfort.it exhibitor directory.
  *
  * Two-phase pipeline:
  *   1. Infinite scroll — scroll the list page, collect exhibitor detail URLs
- *      and extract organisationGuid from each URL pattern
- *   2. ReedExpo API — fetch email/contact data via REST API (no Playwright needed)
+ *   2. Network interception — visit detail pages, capture API calls + mailto emails
  *
- * Phase 2 uses two API endpoints per organisation:
- *   - GET /v1/documents/public?organisationGuid=GUID&eventEditionId=EVE_ID
- *   - GET /v1/event-editions/EVE_ID/organisations/GUID
+ * Phase 2 strategy:
+ *   - DEBUG MODE: Visit first 3 detail pages with network interception
+ *   - Log all API calls made by the page (reedexpo, organisations, exhibitors)
+ *   - Also extract mailto: emails from HTML as fallback
+ *   - Once correct API endpoint is identified, switch to bulk API mode
  *
  * Miner contract:
  *   - Returns raw card data only (no normalization, no DB writes)
@@ -20,12 +21,6 @@
  */
 
 // ─── Constants ───────────────────────────────────────────────────────
-
-const REED_API_BASE = 'https://api.reedexpo.com/v1';
-const MCE_EVENT_EDITION_ID = 'eve-57a81c89-bb6c-4549-9448-a711fe3e7d22';
-
-// Pattern: exhib_profile.COMPANY_NAME.org-GUID.html → extract "org-GUID"
-const ORG_GUID_REGEX = /exhib_profile\.[^.]+\.(org-[a-f0-9\-]+)\.html/i;
 
 const EMAIL_REGEX = /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi;
 
@@ -42,13 +37,13 @@ const DEFAULT_MAX_SCROLLS = 50;
 const DEFAULT_SCROLL_DELAY_MS = 2000;
 const DEFAULT_MAX_DETAILS = 2000;
 const DEFAULT_TOTAL_TIMEOUT = 300000; // 5 minutes
-const DEFAULT_CONCURRENCY = 5;
+const DEFAULT_DETAIL_DELAY_MS = 1500;
 
-// ─── Phase 1: Infinite Scroll — Collect Links + Extract GUIDs ────────
+// ─── Phase 1: Infinite Scroll — Collect Links ───────────────────────
 
 /**
  * Scroll the page to the bottom repeatedly until no new content loads.
- * Returns array of { detail_url, company_name, country, org_guid }.
+ * Returns array of { detail_url, company_name, country }.
  */
 async function collectExhibitorLinks(page, url, config) {
     const maxScrolls = config.max_scrolls || DEFAULT_MAX_SCROLLS;
@@ -151,266 +146,121 @@ async function collectExhibitorLinks(page, url, config) {
         return cards;
     });
 
-    // Extract organisationGuid from each detail URL
-    for (const card of cardData) {
-        const match = card.detail_url.match(ORG_GUID_REGEX);
-        if (match) {
-            card.org_guid = match[1];
-        } else {
-            card.org_guid = null;
-        }
-    }
-
-    const withGuid = cardData.filter(c => c.org_guid).length;
-    console.log(`[mcexpocomfortMiner] Phase 1 complete: ${cardData.length} exhibitors, ${withGuid} with GUID`);
+    console.log(`[mcexpocomfortMiner] Phase 1 complete: ${cardData.length} unique exhibitor links`);
 
     return cardData;
 }
 
-// ─── Phase 2: ReedExpo API — Email Extraction ────────────────────────
-
-// DEBUG: counter for first 3 orgs — remove after testing
-let _debugOrgCount = 0;
+// ─── Phase 2: Network Interception + Detail Page Visit ──────────────
 
 /**
- * Fetch organisation data from ReedExpo API.
- * Tries two endpoints and merges results.
+ * Visit a detail page with network interception enabled.
+ * Captures all API calls and extracts email from HTML.
+ * Returns { apiCalls, email, allEmails }.
  */
-async function fetchOrgFromAPI(orgGuid, eventEditionId, apiHeaders = {}) {
-    const _shouldDebug = _debugOrgCount < 3;
-    if (_shouldDebug) _debugOrgCount++;
-    const results = {
-        emails: [],
-        phones: [],
-        website: null,
-        address: null,
-        country: null,
-        contact_name: null,
-        job_title: null,
-        description: null
+async function visitDetailWithIntercept(page, detailUrl, junkDomains, debugMode) {
+    const apiCalls = [];
+
+    // Set up network interception
+    const onRequest = (req) => {
+        const url = req.url();
+        if (url.includes('api.reedexpo.com') ||
+            url.includes('reedexpo') ||
+            url.includes('organisations') ||
+            url.includes('exhibitors')) {
+            apiCalls.push({
+                url: url,
+                method: req.method(),
+                headers: req.headers()
+            });
+        }
     };
 
-    // Endpoint 1: Documents/public — general organisation info
+    page.on('request', onRequest);
+
     try {
-        const docsUrl = `${REED_API_BASE}/documents/public?organisationGuid=${orgGuid}&eventEditionId=${eventEditionId}`;
-        const docsRes = await fetch(docsUrl, {
-            headers: apiHeaders,
-            signal: AbortSignal.timeout(10000)
-        });
-
-        if (docsRes.ok) {
-            const docsData = await docsRes.json();
-            if (_shouldDebug) {
-                console.log(`[MCE DEBUG] org: ${orgGuid}`);
-                console.log(`[MCE DEBUG] endpoint1 status: ${docsRes.status}`);
-                console.log(`[MCE DEBUG] endpoint1 response:`, JSON.stringify(docsData, null, 2));
-            }
-            extractFromDocsResponse(docsData, results);
-        } else if (_shouldDebug) {
-            console.log(`[MCE DEBUG] org: ${orgGuid}`);
-            console.log(`[MCE DEBUG] endpoint1 status: ${docsRes.status}`);
-        }
+        await page.goto(detailUrl, { waitUntil: 'networkidle', timeout: 30000 });
     } catch (e) {
-        if (_shouldDebug) console.log(`[MCE DEBUG] endpoint1 error for ${orgGuid}: ${e.message}`);
-        // Endpoint 1 failed — continue to endpoint 2
+        // networkidle timeout is OK — page may keep loading ads etc.
+        if (debugMode) {
+            console.log(`[MCE DEBUG] goto timeout for ${detailUrl}: ${e.message}`);
+        }
     }
 
-    // Endpoint 2: Event-editions/organisations — detailed org profile
+    // Remove listener to avoid leaks
+    page.removeListener('request', onRequest);
+
+    // Extract mailto: email from HTML
+    let email = null;
     try {
-        const orgUrl = `${REED_API_BASE}/event-editions/${eventEditionId}/organisations/${orgGuid}`;
-        const orgRes = await fetch(orgUrl, {
-            headers: apiHeaders,
-            signal: AbortSignal.timeout(10000)
-        });
-
-        if (orgRes.ok) {
-            const orgData = await orgRes.json();
-            if (_shouldDebug) {
-                console.log(`[MCE DEBUG] endpoint2 status: ${orgRes.status}`);
-                console.log(`[MCE DEBUG] endpoint2 response:`, JSON.stringify(orgData, null, 2));
-            }
-            extractFromOrgResponse(orgData, results);
-        } else if (_shouldDebug) {
-            console.log(`[MCE DEBUG] endpoint2 status: ${orgRes.status}`);
-        }
+        email = await page.$eval(
+            'a[href^="mailto:"]',
+            (el) => el.href.replace('mailto:', '').split('?')[0].trim().toLowerCase()
+        );
     } catch (e) {
-        if (_shouldDebug) console.log(`[MCE DEBUG] endpoint2 error for ${orgGuid}: ${e.message}`);
-        // Endpoint 2 failed
+        // No mailto: link found
     }
 
-    // Deduplicate emails
-    results.emails = [...new Set(results.emails)];
+    // Also regex scan for emails in body text
+    const allEmails = await page.evaluate(({ junkDomains: jd }) => {
+        const found = [];
 
-    return results;
-}
-
-/**
- * Extract contact info from /documents/public response.
- */
-function extractFromDocsResponse(data, results) {
-    if (!data) return;
-
-    // Handle array or single object
-    const items = Array.isArray(data) ? data : [data];
-
-    for (const item of items) {
-        // Email fields
-        extractEmailFromField(item.email, results);
-        extractEmailFromField(item.emailAddress, results);
-        extractEmailFromField(item.contactEmail, results);
-
-        // Nested contact object
-        if (item.contact) {
-            extractEmailFromField(item.contact.email, results);
-            extractEmailFromField(item.contact.emailAddress, results);
-            if (item.contact.phone) results.phones.push(item.contact.phone);
-            if (item.contact.firstName || item.contact.lastName) {
-                results.contact_name = [item.contact.firstName, item.contact.lastName].filter(Boolean).join(' ');
-            }
-            if (item.contact.jobTitle) results.job_title = item.contact.jobTitle;
-        }
-
-        // Phone
-        if (item.phone && !results.phones.includes(item.phone)) results.phones.push(item.phone);
-        if (item.telephone && !results.phones.includes(item.telephone)) results.phones.push(item.telephone);
-
-        // Website
-        if (item.website && !results.website) results.website = item.website;
-        if (item.websiteUrl && !results.website) results.website = item.websiteUrl;
-        if (item.url && !results.website) results.website = item.url;
-
-        // Address
-        if (item.address && !results.address) {
-            results.address = typeof item.address === 'string'
-                ? item.address
-                : [item.address.street, item.address.city, item.address.postCode, item.address.country].filter(Boolean).join(', ');
-        }
-
-        // Country
-        if (item.country && !results.country) results.country = item.country;
-        if (item.address && item.address.country && !results.country) results.country = item.address.country;
-
-        // Description
-        if (item.description && !results.description) results.description = item.description;
-        if (item.companyDescription && !results.description) results.description = item.companyDescription;
-
-        // Scan full text for emails
-        const jsonStr = JSON.stringify(item);
-        const foundEmails = jsonStr.match(EMAIL_REGEX) || [];
-        for (const email of foundEmails) {
-            extractEmailFromField(email, results);
-        }
-    }
-}
-
-/**
- * Extract contact info from /event-editions/.../organisations/... response.
- */
-function extractFromOrgResponse(data, results) {
-    if (!data) return;
-
-    // Direct fields
-    extractEmailFromField(data.email, results);
-    extractEmailFromField(data.emailAddress, results);
-    extractEmailFromField(data.contactEmail, results);
-
-    // Phone
-    if (data.phone && !results.phones.includes(data.phone)) results.phones.push(data.phone);
-    if (data.telephone && !results.phones.includes(data.telephone)) results.phones.push(data.telephone);
-    if (data.phoneNumber && !results.phones.includes(data.phoneNumber)) results.phones.push(data.phoneNumber);
-
-    // Website
-    if (data.website && !results.website) results.website = data.website;
-    if (data.websiteUrl && !results.website) results.website = data.websiteUrl;
-    if (data.companyWebsite && !results.website) results.website = data.companyWebsite;
-
-    // Address
-    if (data.address && !results.address) {
-        results.address = typeof data.address === 'string'
-            ? data.address
-            : [data.address.addressLine1, data.address.addressLine2, data.address.city, data.address.postCode, data.address.country].filter(Boolean).join(', ');
-    }
-
-    // Country
-    if (data.country && !results.country) results.country = data.country;
-    if (data.countryName && !results.country) results.country = data.countryName;
-    if (data.address && data.address.country && !results.country) results.country = data.address.country;
-
-    // Contact person
-    if (data.contacts && Array.isArray(data.contacts) && data.contacts.length > 0) {
-        const contact = data.contacts[0];
-        extractEmailFromField(contact.email, results);
-        extractEmailFromField(contact.emailAddress, results);
-        if (contact.phone && !results.phones.includes(contact.phone)) results.phones.push(contact.phone);
-        if (contact.firstName || contact.lastName) {
-            if (!results.contact_name) {
-                results.contact_name = [contact.firstName, contact.lastName].filter(Boolean).join(' ');
+        // mailto: links first
+        for (const a of document.querySelectorAll('a[href^="mailto:"]')) {
+            const href = a.getAttribute('href') || '';
+            if (href.startsWith('mailto:?')) continue;
+            const em = href.replace('mailto:', '').split('?')[0].trim().toLowerCase();
+            if (em && em.includes('@') && em.length > 5) {
+                const isJunk = jd.some(d => em.endsWith('@' + d) || em.includes('.' + d));
+                if (!isJunk && !found.includes(em)) found.push(em);
             }
         }
-        if (contact.jobTitle && !results.job_title) results.job_title = contact.jobTitle;
-    }
 
-    // Description
-    if (data.description && !results.description) results.description = data.description;
-    if (data.companyProfile && !results.description) results.description = data.companyProfile;
-
-    // Scan full text for emails
-    const jsonStr = JSON.stringify(data);
-    const foundEmails = jsonStr.match(EMAIL_REGEX) || [];
-    for (const email of foundEmails) {
-        extractEmailFromField(email, results);
-    }
-}
-
-/**
- * Validate and add email to results, filtering junk domains.
- */
-function extractEmailFromField(value, results) {
-    if (!value || typeof value !== 'string') return;
-    const email = value.trim().toLowerCase();
-    if (!email.includes('@') || email.length < 6) return;
-    if (results.emails.includes(email)) return;
-
-    const isJunk = JUNK_EMAIL_DOMAINS.some(d => email.endsWith('@' + d) || email.includes('.' + d));
-    if (isJunk) return;
-
-    results.emails.push(email);
-}
-
-/**
- * Process a batch of cards concurrently via API.
- */
-async function processBatch(batch, eventEditionId, apiHeaders) {
-    return Promise.all(batch.map(async (card) => {
-        if (!card.org_guid) return null;
-
-        try {
-            const data = await fetchOrgFromAPI(card.org_guid, eventEditionId, apiHeaders);
-            return { card, data };
-        } catch (e) {
-            console.warn(`[mcexpocomfortMiner] API error for ${card.org_guid}: ${e.message}`);
-            return null;
+        // Regex on body text
+        const bodyText = document.body ? document.body.innerText : '';
+        const regex = /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi;
+        let m;
+        while ((m = regex.exec(bodyText)) !== null) {
+            const em = m[0].toLowerCase();
+            if (!found.includes(em)) {
+                const isJunk = jd.some(d => em.endsWith('@' + d) || em.includes('.' + d));
+                if (!isJunk) found.push(em);
+            }
         }
-    }));
+
+        return found;
+    }, { junkDomains: junkDomains });
+
+    // Use first non-junk email
+    if (!email && allEmails.length > 0) {
+        email = allEmails[0];
+    }
+
+    // Validate email against junk list
+    if (email) {
+        const isJunk = junkDomains.some(d => email.endsWith('@' + d) || email.includes('.' + d));
+        if (isJunk) email = null;
+    }
+
+    return { apiCalls, email, allEmails };
 }
 
 // ─── Main Entry Point ────────────────────────────────────────────────
 
 async function runMcexpocomfortMiner(page, url, config = {}) {
     const maxDetails = config.max_details || DEFAULT_MAX_DETAILS;
-    const concurrency = config.concurrency || DEFAULT_CONCURRENCY;
+    const detailDelay = config.delay_ms || DEFAULT_DETAIL_DELAY_MS;
     const totalTimeout = config.total_timeout || DEFAULT_TOTAL_TIMEOUT;
-    const eventEditionId = config.event_edition_id || MCE_EVENT_EDITION_ID;
     const startTime = Date.now();
 
-    console.log(`[mcexpocomfortMiner] Starting for: ${url} (timeout: ${totalTimeout}ms, concurrency: ${concurrency})`);
+    console.log(`[mcexpocomfortMiner] Starting for: ${url} (timeout: ${totalTimeout}ms)`);
 
     // Total timeout wrapper
     const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error(`mcexpocomfortMiner total timeout (${totalTimeout}ms)`)), totalTimeout)
     );
 
-    // Phase 1: Scroll and collect all exhibitor links + GUIDs
+    // Phase 1: Scroll and collect all exhibitor links
     const exhibitorCards = await Promise.race([
         collectExhibitorLinks(page, url, config),
         timeoutPromise
@@ -421,172 +271,86 @@ async function runMcexpocomfortMiner(page, url, config = {}) {
         return [];
     }
 
-    // ─── Token & Cookie Capture (browser still open from Phase 1) ────
-    const token = await page.evaluate(() => {
-        // 1. RX state
-        if (window.__RX_STATE__?.auth?.accessToken)
-            return window.__RX_STATE__.auth.accessToken;
+    // ─── Phase 2: Network Interception Debug + Email Extraction ──────
 
-        // 2. Apollo GraphQL state
-        if (window.__APOLLO_STATE__) {
-            const str = JSON.stringify(window.__APOLLO_STATE__);
-            const m = str.match(/"accessToken":"([^"]+)"/);
-            if (m) return m[1];
-        }
+    const detailLimit = Math.min(exhibitorCards.length, maxDetails);
+    console.log(`[mcexpocomfortMiner] Phase 2: Visiting ${detailLimit} detail pages (first 3 with network debug)...`);
 
-        // 3. NEXT_DATA
-        const next = document.getElementById('__NEXT_DATA__');
-        if (next) {
-            try {
-                const data = JSON.parse(next.textContent);
-                const t =
-                    data?.props?.pageProps?.token ||
-                    data?.props?.pageProps?.authToken ||
-                    data?.props?.pageProps?.accessToken;
-                if (t) return t;
-            } catch {}
-        }
-
-        // 4. localStorage
-        for (const k of Object.keys(localStorage)) {
-            const v = localStorage.getItem(k);
-            if (v && v.includes('token')) return v;
-        }
-
-        // 5. script tag scan
-        const scripts = [...document.querySelectorAll('script')];
-        for (const s of scripts) {
-            const m = s.textContent.match(/accessToken["']?\s*:\s*["']([^"']+)["']/);
-            if (m) return m[1];
-        }
-
-        return null;
-    });
-
-    const cookies = await page.context().cookies();
-    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-
-    console.log(`[MCE DEBUG] Token: ${token ? token.slice(0, 40) + '...' : 'NOT FOUND'}`);
-    console.log(`[MCE DEBUG] Cookies: ${cookies.length} adet`);
-
-    // Build API headers — token + clientId + cookies
-    const apiHeaders = {
-        'Accept': 'application/json',
-        'x-clientid': 'uhQVcmxLwXAjVtVpTvoerERiZSsNz0om',
-    };
-    if (token) apiHeaders['Authorization'] = `Bearer ${token}`;
-    if (cookieHeader) apiHeaders['Cookie'] = cookieHeader;
-
-    // Filter to cards with GUIDs only, limit to maxDetails
-    const cardsWithGuid = exhibitorCards.filter(c => c.org_guid);
-    const cardsToProcess = cardsWithGuid.slice(0, maxDetails);
-
-    console.log(`[mcexpocomfortMiner] Phase 2: Fetching ${cardsToProcess.length} orgs via ReedExpo API (concurrency: ${concurrency})...`);
-
-    // Phase 2: Fetch data from API in batches
     let enriched = 0;
-    let apiErrors = 0;
+    let consecutiveErrors = 0;
 
-    for (let i = 0; i < cardsToProcess.length; i += concurrency) {
+    for (let i = 0; i < detailLimit; i++) {
         // Timeout check
         if (Date.now() - startTime > totalTimeout) {
-            console.log(`[mcexpocomfortMiner] Total timeout at ${i}/${cardsToProcess.length} — stopping.`);
+            console.log(`[mcexpocomfortMiner] Total timeout at ${i}/${detailLimit} — stopping.`);
             break;
         }
 
-        const batch = cardsToProcess.slice(i, i + concurrency);
-        const results = await processBatch(batch, eventEditionId, apiHeaders);
+        // Circuit breaker
+        if (consecutiveErrors >= 5) {
+            console.log(`[mcexpocomfortMiner] 5 consecutive errors — stopping detail crawl.`);
+            break;
+        }
 
-        for (const result of results) {
-            if (!result) {
-                apiErrors++;
-                continue;
+        const card = exhibitorCards[i];
+        const isDebug = i < 3; // First 3 with full debug
+
+        try {
+            const result = await visitDetailWithIntercept(page, card.detail_url, JUNK_EMAIL_DOMAINS, isDebug);
+
+            // DEBUG: Log API calls for first 3 orgs
+            if (isDebug) {
+                console.log(`[MCE DEBUG] API calls for ${card.company_name || card.detail_url}:`);
+                if (result.apiCalls.length === 0) {
+                    console.log('  (none)');
+                } else {
+                    result.apiCalls.forEach(c => {
+                        console.log(`  ${c.method} ${c.url}`);
+                        // Log auth-related headers
+                        const authHeader = c.headers['authorization'] || c.headers['Authorization'] || null;
+                        const clientId = c.headers['x-clientid'] || c.headers['X-ClientId'] || null;
+                        if (authHeader) console.log(`    Authorization: ${authHeader.slice(0, 50)}...`);
+                        if (clientId) console.log(`    x-clientid: ${clientId}`);
+                    });
+                }
+                console.log(`[MCE DEBUG] mailto email: ${result.email || 'NOT FOUND'}`);
+                if (result.allEmails.length > 0) {
+                    console.log(`[MCE DEBUG] all emails: ${result.allEmails.join(', ')}`);
+                }
             }
 
-            const { card, data } = result;
+            consecutiveErrors = 0;
 
-            if (data.emails.length > 0) {
-                card.email = data.emails[0];
-                card.all_emails = data.emails;
+            // Enrich card with email
+            if (result.allEmails.length > 0) {
+                card.email = result.allEmails[0];
+                card.all_emails = result.allEmails;
+                enriched++;
+            } else if (result.email) {
+                card.email = result.email;
                 enriched++;
             }
-            if (data.phones.length > 0) card.phone = data.phones[0];
-            if (data.website) card.website = data.website;
-            if (data.address) card.address = data.address;
-            if (data.country) card.country = data.country || card.country;
-            if (data.contact_name) card.contact_name = data.contact_name;
-            if (data.job_title) card.job_title = data.job_title;
-        }
 
-        // Progress log every 50 orgs
-        const processed = Math.min(i + concurrency, cardsToProcess.length);
-        if (processed % 50 === 0 || processed === cardsToProcess.length) {
-            const elapsed = Math.round((Date.now() - startTime) / 1000);
-            console.log(`[mcexpocomfortMiner] API progress: ${processed}/${cardsToProcess.length}, +${enriched} emails, ${apiErrors} errors (${elapsed}s)`);
-        }
-    }
+            // Polite delay
+            await page.waitForTimeout(detailDelay);
 
-    console.log(`[mcexpocomfortMiner] Phase 2 complete: ${enriched} emails from ${cardsToProcess.length} API calls, ${apiErrors} errors`);
-
-    // ─── Fallback: Detail page HTML for cards without email ──────────
-    const noEmailCards = exhibitorCards.filter(c => !c.email && c.detail_url);
-    const fallbackLimit = Math.min(noEmailCards.length, 50); // max 50 fallback visits
-    if (fallbackLimit > 0 && (Date.now() - startTime) < totalTimeout) {
-        console.log(`[mcexpocomfortMiner] Fallback: ${fallbackLimit} detail pages via HTML (no email from API)...`);
-        let fallbackEmails = 0;
-
-        for (let i = 0; i < fallbackLimit; i++) {
-            if (Date.now() - startTime > totalTimeout) break;
-
-            const card = noEmailCards[i];
-            try {
-                await page.goto(card.detail_url, { waitUntil: 'domcontentloaded', timeout: 10000 });
-                await page.waitForTimeout(1000);
-
-                const emails = await page.evaluate(({ junkDomains }) => {
-                    const found = [];
-
-                    // mailto: links
-                    for (const a of document.querySelectorAll('a[href^="mailto:"]')) {
-                        const href = a.getAttribute('href') || '';
-                        if (href.startsWith('mailto:?')) continue;
-                        const email = href.replace('mailto:', '').split('?')[0].trim().toLowerCase();
-                        if (email && email.includes('@') && email.length > 5) {
-                            const isJunk = junkDomains.some(d => email.endsWith('@' + d) || email.includes('.' + d));
-                            if (!isJunk) found.push(email);
-                        }
-                    }
-
-                    // Regex on body text
-                    const bodyText = document.body ? document.body.innerText : '';
-                    const regex = /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi;
-                    let m;
-                    while ((m = regex.exec(bodyText)) !== null) {
-                        const email = m[0].toLowerCase();
-                        if (!found.includes(email)) {
-                            const isJunk = junkDomains.some(d => email.endsWith('@' + d) || email.includes('.' + d));
-                            if (!isJunk) found.push(email);
-                        }
-                    }
-
-                    return found;
-                }, { junkDomains: JUNK_EMAIL_DOMAINS });
-
-                if (emails.length > 0) {
-                    card.email = emails[0];
-                    card.all_emails = emails;
-                    fallbackEmails++;
-                }
-            } catch (e) {
-                // Skip failed detail pages silently
+        } catch (e) {
+            consecutiveErrors++;
+            if (isDebug) {
+                console.log(`[MCE DEBUG] Error visiting ${card.detail_url}: ${e.message}`);
             }
         }
 
-        console.log(`[mcexpocomfortMiner] Fallback complete: +${fallbackEmails} emails from ${fallbackLimit} detail pages`);
-        enriched += fallbackEmails;
+        // Progress log every 25 detail pages
+        if ((i + 1) % 25 === 0) {
+            const elapsed = Math.round((Date.now() - startTime) / 1000);
+            console.log(`[mcexpocomfortMiner] Detail progress: ${i + 1}/${detailLimit}, +${enriched} emails (${elapsed}s)`);
+        }
     }
 
-    // Build final cards (include ALL exhibitors, even those without GUID)
+    console.log(`[mcexpocomfortMiner] Phase 2 complete: ${enriched} emails from ${detailLimit} detail pages`);
+
+    // Build final cards
     const cards = exhibitorCards.map(c => ({
         company_name: c.company_name || null,
         email: c.email || null,
