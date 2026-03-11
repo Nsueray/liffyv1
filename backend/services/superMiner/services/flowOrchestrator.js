@@ -536,6 +536,53 @@ class FlowOrchestrator {
                 console.log('[FlowOrchestrator] mcexpocomfortMiner not available:', err.message);
             }
 
+            // reedExpoMiner: try/catch load (generic ReedExpo platform exhibitor directories)
+            // This miner manages its OWN pagination (infinite scroll) (ownPagination: true, ownBrowser: true)
+            try {
+                const { runReedExpoMiner } = require('../../urlMiners/reedExpoMiner');
+                const { chromium: chromiumReed } = require('playwright');
+
+                this.miners.reedExpoMiner = {
+                    name: 'reedExpoMiner',
+                    mine: async (job) => {
+                        console.log(`[reedExpoMiner] Starting for: ${job.input}`);
+                        let browser = null;
+                        try {
+                            browser = await chromiumReed.launch({ headless: true });
+                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            const page = await context.newPage();
+                            const rawCards = await runReedExpoMiner(page, job.input, job.config || {});
+                            await browser.close();
+                            browser = null;
+
+                            const contacts = rawCards.map(card => ({
+                                company_name: card.company_name,
+                                email: card.email || null,
+                                phone: card.phone,
+                                website: card.website,
+                                country: card.country,
+                                address: card.address,
+                                contact_name: card.contact_name || null,
+                                job_title: card.job_title || null
+                            }));
+                            const emails = rawCards
+                                .map(c => c.email)
+                                .filter(e => e && typeof e === 'string' && e.includes('@') && e.length > 5);
+
+                            console.log(`[reedExpoMiner] Result: ${contacts.length} contacts, ${emails.length} emails`);
+
+                            return this.normalizeResult({ contacts, emails }, 'reedExpoMiner');
+                        } catch (err) {
+                            if (browser) await browser.close().catch(() => {});
+                            throw err;
+                        }
+                    }
+                };
+                console.log('[FlowOrchestrator] reedExpoMiner loaded ✅');
+            } catch (err) {
+                console.log('[FlowOrchestrator] reedExpoMiner not available:', err.message);
+            }
+
             // contactPageMiner: try/catch load (company website email discovery)
             // Used by Flow 2 to find emails on company websites (contact/about pages)
             // Browser lifecycle managed by wrapper
@@ -1260,6 +1307,8 @@ class FlowOrchestrator {
                     inputType = 'flipbook_html';
                 } else if (analysis.pageType === PAGE_TYPES.MCE_EXPOCOMFORT) {
                     inputType = 'mce_expocomfort';
+                } else if (analysis.pageType === PAGE_TYPES.REED_EXPO) {
+                    inputType = 'reed_expo';
                 } else if (analysis.pageType === PAGE_TYPES.DOCUMENT_VIEWER) {
                     inputType = 'document';
                 } else if (analysis.pageType === PAGE_TYPES.EXHIBITOR_TABLE || analysis.pageType === 'website') {
@@ -1300,7 +1349,8 @@ class FlowOrchestrator {
                         primaryStepMiner === 'spaNetworkMiner' || inputType === 'spa_catalog' ||
                         primaryStepMiner === 'visExhibitorMiner' || inputType === 'vis_exhibitor' ||
                         primaryStepMiner === 'flipbookMiner' || inputType === 'flipbook_html' ||
-                        primaryStepMiner === 'mcexpocomfortMiner' || inputType === 'mce_expocomfort'
+                        primaryStepMiner === 'mcexpocomfortMiner' || inputType === 'mce_expocomfort' ||
+                        primaryStepMiner === 'reedExpoMiner' || inputType === 'reed_expo'
                     );
                     const paginationInfo = skipExternalPagination
                         ? { isPaginated: false, totalPages: 1, pageUrls: [job.input] }
@@ -1483,7 +1533,8 @@ class FlowOrchestrator {
             selectedMiner === 'spaNetworkMiner' || routeDecision.pageType === PAGE_TYPES.SPA_CATALOG ||
             selectedMiner === 'visExhibitorMiner' || routeDecision.pageType === PAGE_TYPES.VIS_EXHIBITOR ||
             selectedMiner === 'flipbookMiner' || routeDecision.pageType === PAGE_TYPES.FLIPBOOK_HTML ||
-            selectedMiner === 'mcexpocomfortMiner' || routeDecision.pageType === PAGE_TYPES.MCE_EXPOCOMFORT
+            selectedMiner === 'mcexpocomfortMiner' || routeDecision.pageType === PAGE_TYPES.MCE_EXPOCOMFORT ||
+            selectedMiner === 'reedExpoMiner' || routeDecision.pageType === PAGE_TYPES.REED_EXPO
         );
         const paginationInfo = skipPagination
             ? { isPaginated: false, totalPages: 1, pageUrls: [job.input] }

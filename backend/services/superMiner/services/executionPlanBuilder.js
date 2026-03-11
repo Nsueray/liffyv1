@@ -74,6 +74,13 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
     return plan;
   }
 
+  // ReedExpo platform — generic exhibitor directory (infinite scroll + GraphQL API).
+  // Handles its own pagination internally (ownPagination: true).
+  if (resolvedInputType === 'reed_expo') {
+    addStep('reedExpoMiner', 'legacy', 'ReedExpo platform exhibitor extraction');
+    return plan;
+  }
+
   // SPA catalog sites — spaNetworkMiner handles its own data fetching via network interception.
   // No pagination wrapper needed (ownPagination: true).
   if (resolvedInputType === 'spa_catalog') {

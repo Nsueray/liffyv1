@@ -39,12 +39,22 @@ try {
     console.log('[urlMiners] ⚠️ McexpocomfortMiner not available:', e.message);
 }
 
+// ReedExpo Miner (generic ReedExpo platform exhibitor directories)
+let reedExpoMiner = null;
+try {
+    reedExpoMiner = require('./reedExpoMiner');
+    console.log('[urlMiners] ✅ ReedExpoMiner loaded');
+} catch (e) {
+    console.log('[urlMiners] ⚠️ ReedExpoMiner not available:', e.message);
+}
+
 module.exports = {
     // Miners
     playwrightTableMiner,
     aiMiner,
     documentMiner,
     mcexpocomfortMiner,
+    reedExpoMiner,
 
     // Utilities
     cloudflareDecoder,
@@ -63,6 +73,9 @@ module.exports = {
         }
         if (mcexpocomfortMiner) {
             miners.push({ name: 'McexpocomfortMiner', run: mcexpocomfortMiner.runMcexpocomfortMiner });
+        }
+        if (reedExpoMiner) {
+            miners.push({ name: 'ReedExpoMiner', run: reedExpoMiner.runReedExpoMiner });
         }
         return miners;
     }

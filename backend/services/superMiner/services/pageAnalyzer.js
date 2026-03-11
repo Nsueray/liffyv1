@@ -32,6 +32,7 @@ const PAGE_TYPES = {
     VIS_EXHIBITOR: 'vis_exhibitor',        // Messe Düsseldorf VIS platform exhibitor catalogs
     FLIPBOOK_HTML: 'flipbook_html',        // Flipbuilder/FlipHTML5 basic-html flipbook pages
     MCE_EXPOCOMFORT: 'mce_expocomfort',    // MCE Expocomfort infinite scroll exhibitor directory
+    REED_EXPO: 'reed_expo',                // Generic ReedExpo platform exhibitor directories
     UNKNOWN: 'unknown'
 };
 
@@ -68,6 +69,14 @@ const FLIPBOOK_DOMAINS = [
 // MCE Expocomfort domains — infinite scroll exhibitor directory
 const MCE_EXPOCOMFORT_DOMAINS = [
     'mcexpocomfort.it'
+];
+
+// ReedExpo platform domains — generic exhibitor directories (infinite scroll + GraphQL API)
+const REED_EXPO_DOMAINS = [
+    'arabhealth.com',
+    'bigshowafrica.com',
+    'wtm.com',
+    'worldtravelmarket.com'
 ];
 
 // VIS platform domains — Messe Düsseldorf VIS exhibitor catalogs
@@ -218,6 +227,23 @@ class PageAnalyzer {
                             miner: 'mcexpocomfortMiner',
                             useCache: false,
                             reason: 'MCE Expocomfort exhibitor directory (early hostname match)',
+                            ownPagination: true
+                        }
+                    };
+                }
+
+                // ReedExpo platform sites (generic — arabhealth, bigshowafrica, wtm, etc.)
+                if (REED_EXPO_DOMAINS.some(d => hostname.includes(d)) && fullUrl.includes('exhibitor-directory')) {
+                    console.log(`[PageAnalyzer] Early detection: REED_EXPO via hostname: ${hostname}`);
+                    return {
+                        url,
+                        pageType: PAGE_TYPES.REED_EXPO,
+                        isReedExpo: true,
+                        analysisTime: Date.now() - startTime,
+                        recommendation: {
+                            miner: 'reedExpoMiner',
+                            useCache: false,
+                            reason: 'ReedExpo platform exhibitor directory (early hostname match)',
                             ownPagination: true
                         }
                     };
@@ -717,6 +743,7 @@ module.exports = {
     MESSE_FRANKFURT_DOMAINS,
     MEMBER_TABLE_DOMAINS,
     MCE_EXPOCOMFORT_DOMAINS,
+    REED_EXPO_DOMAINS,
     VIS_DOMAINS,
     FLIPBOOK_DOMAINS
 };
@@ -1055,6 +1082,14 @@ PageAnalyzer.prototype.getRecommendation = function(analysis) {
             miner: 'mcexpocomfortMiner',
             useCache: false,
             reason: 'MCE Expocomfort exhibitor directory, using mcexpocomfortMiner',
+            ownPagination: true
+        };
+    }
+    if (analysis.pageType === PAGE_TYPES.REED_EXPO) {
+        return {
+            miner: 'reedExpoMiner',
+            useCache: false,
+            reason: 'ReedExpo platform exhibitor directory, using reedExpoMiner',
             ownPagination: true
         };
     }
