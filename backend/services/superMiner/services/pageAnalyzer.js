@@ -32,6 +32,7 @@ const PAGE_TYPES = {
     VIS_EXHIBITOR: 'vis_exhibitor',        // Messe Düsseldorf VIS platform exhibitor catalogs
     FLIPBOOK_HTML: 'flipbook_html',        // Flipbuilder/FlipHTML5 basic-html flipbook pages
     MCE_EXPOCOMFORT: 'mce_expocomfort',    // MCE Expocomfort infinite scroll exhibitor directory
+    REED_EXPO_MAILTO: 'reed_expo_mailto',  // ReedExpo platform with mailto: emails in HTML (no GUID)
     REED_EXPO: 'reed_expo',                // Generic ReedExpo platform exhibitor directories
     UNKNOWN: 'unknown'
 };
@@ -373,7 +374,25 @@ class PageAnalyzer {
             }
             
             // Post-fetch ReedExpo detection — check HTML for api.reedexpo.com references
-            // This catches ReedExpo sites not in the hostname list (e.g. batimat.com with custom domain)
+            // Check mailto variant FIRST (has mailto: + api.reedexpo.com + NO exhib_profile)
+            if (html && html.includes('api.reedexpo.com') && html.includes('mailto:') && !html.includes('exhib_profile')) {
+                console.log(`[PageAnalyzer] Post-fetch detection: REED_EXPO_MAILTO via api.reedexpo.com + mailto in HTML`);
+                return {
+                    url,
+                    pageType: PAGE_TYPES.REED_EXPO_MAILTO,
+                    isReedExpoMailto: true,
+                    fromCache,
+                    analysisTime: Date.now() - startTime,
+                    recommendation: {
+                        miner: 'reedExpoMailtoMiner',
+                        useCache: false,
+                        reason: 'ReedExpo platform with mailto: emails in HTML',
+                        ownPagination: true
+                    }
+                };
+            }
+
+            // Generic ReedExpo (GUID-based, GraphQL) — exhib_profile links present
             if (html && html.includes('api.reedexpo.com') && url.toLowerCase().includes('exhibitor')) {
                 console.log(`[PageAnalyzer] Post-fetch detection: REED_EXPO via api.reedexpo.com in HTML`);
                 return {
@@ -1106,6 +1125,14 @@ PageAnalyzer.prototype.getRecommendation = function(analysis) {
             miner: 'mcexpocomfortMiner',
             useCache: false,
             reason: 'MCE Expocomfort exhibitor directory, using mcexpocomfortMiner',
+            ownPagination: true
+        };
+    }
+    if (analysis.pageType === PAGE_TYPES.REED_EXPO_MAILTO) {
+        return {
+            miner: 'reedExpoMailtoMiner',
+            useCache: false,
+            reason: 'ReedExpo platform with mailto: emails, using reedExpoMailtoMiner',
             ownPagination: true
         };
     }

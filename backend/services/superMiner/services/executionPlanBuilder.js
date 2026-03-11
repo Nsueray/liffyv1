@@ -74,6 +74,13 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
     return plan;
   }
 
+  // ReedExpo mailto — exhibitor directory with mailto: emails in HTML.
+  // Handles its own pagination internally (ownPagination: true).
+  if (resolvedInputType === 'reed_expo_mailto') {
+    addStep('reedExpoMailtoMiner', 'legacy', 'ReedExpo mailto exhibitor extraction');
+    return plan;
+  }
+
   // ReedExpo platform — generic exhibitor directory (infinite scroll + GraphQL API).
   // Handles its own pagination internally (ownPagination: true).
   if (resolvedInputType === 'reed_expo') {

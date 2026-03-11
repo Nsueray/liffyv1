@@ -48,6 +48,15 @@ try {
     console.log('[urlMiners] ⚠️ ReedExpoMiner not available:', e.message);
 }
 
+// ReedExpo Mailto Miner (ReedExpo sites with mailto: emails in HTML)
+let reedExpoMailtoMiner = null;
+try {
+    reedExpoMailtoMiner = require('./reedExpoMailtoMiner');
+    console.log('[urlMiners] ✅ ReedExpoMailtoMiner loaded');
+} catch (e) {
+    console.log('[urlMiners] ⚠️ ReedExpoMailtoMiner not available:', e.message);
+}
+
 module.exports = {
     // Miners
     playwrightTableMiner,
@@ -55,6 +64,7 @@ module.exports = {
     documentMiner,
     mcexpocomfortMiner,
     reedExpoMiner,
+    reedExpoMailtoMiner,
 
     // Utilities
     cloudflareDecoder,
@@ -76,6 +86,9 @@ module.exports = {
         }
         if (reedExpoMiner) {
             miners.push({ name: 'ReedExpoMiner', run: reedExpoMiner.runReedExpoMiner });
+        }
+        if (reedExpoMailtoMiner) {
+            miners.push({ name: 'ReedExpoMailtoMiner', run: reedExpoMailtoMiner.runReedExpoMailtoMiner });
         }
         return miners;
     }

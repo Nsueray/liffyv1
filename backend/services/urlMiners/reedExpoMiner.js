@@ -379,6 +379,9 @@ async function collectExhibitorLinks(page, url, config) {
 
 // ─── Phase 2: GraphQL API — Email Extraction ────────────────────────
 
+// Module-level error counter for debug logging
+let _graphqlErrorCount = 0;
+
 /**
  * Query ReedExpo GraphQL for a single organisation.
  */
@@ -395,7 +398,13 @@ async function queryGraphQL(orgGuid, eventEditionId, clientId, requestTimeout) {
         });
 
         const org = res.data?.data?.exhibitingOrganisation;
-        if (!org) return null;
+        if (!org) {
+            _graphqlErrorCount++;
+            if (_graphqlErrorCount <= 3) {
+                console.error(`[reedExpoMiner] ERROR DETAIL #${_graphqlErrorCount}: ${orgGuid} — API returned null org`, `status: ${res.status}`, `response: ${JSON.stringify(res.data).slice(0, 200)}`);
+            }
+            return null;
+        }
 
         // Validate email against junk list
         let email = org.contactEmail || null;
@@ -411,7 +420,11 @@ async function queryGraphQL(orgGuid, eventEditionId, clientId, requestTimeout) {
             phone: org.phone || null,
             company_name: org.companyName || null
         };
-    } catch (e) {
+    } catch (err) {
+        _graphqlErrorCount++;
+        if (_graphqlErrorCount <= 3) {
+            console.error(`[reedExpoMiner] ERROR DETAIL #${_graphqlErrorCount}: ${orgGuid} —`, err.message, err.response?.status, JSON.stringify(err.response?.data)?.slice(0, 200));
+        }
         return null;
     }
 }
@@ -483,6 +496,7 @@ async function runReedExpoMiner(page, url, config = {}) {
 
     let enriched = 0;
     let errors = 0;
+    _graphqlErrorCount = 0; // Reset per-run
 
     for (let i = 0; i < cardsToProcess.length; i += concurrency) {
         if (Date.now() - startTime > totalTimeout) {
@@ -519,7 +533,7 @@ async function runReedExpoMiner(page, url, config = {}) {
         }
     }
 
-    console.log(`[reedExpoMiner] Phase 2 complete: ${enriched} emails from ${detailLimit} orgs, ${errors} errors`);
+    console.log(`[reedExpoMiner] Phase 2 complete: ${enriched} emails from ${detailLimit} orgs, ${errors} errors (${_graphqlErrorCount} logged)`);
 
     // Build final cards (include ALL exhibitors, even those without GUID)
     const cards = exhibitorCards.map(c => ({
