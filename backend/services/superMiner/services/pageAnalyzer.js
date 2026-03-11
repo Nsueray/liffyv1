@@ -77,7 +77,11 @@ const REED_EXPO_DOMAINS = [
     'bigshowafrica.com',
     'wtm.com',
     'worldtravelmarket.com',
-    'ishhvac.com'
+    'ishhvac.com',
+    'batimat.com',
+    'reed-exhibitions.com',
+    'reedexpo.com',
+    'informa.com'
 ];
 
 // VIS platform domains — Messe Düsseldorf VIS exhibitor catalogs
@@ -368,9 +372,28 @@ class PageAnalyzer {
                 await this.cache.set(url, html, { httpCode: fetchResult.httpCode });
             }
             
+            // Post-fetch ReedExpo detection — check HTML for api.reedexpo.com references
+            // This catches ReedExpo sites not in the hostname list (e.g. batimat.com with custom domain)
+            if (html && html.includes('api.reedexpo.com') && url.toLowerCase().includes('exhibitor')) {
+                console.log(`[PageAnalyzer] Post-fetch detection: REED_EXPO via api.reedexpo.com in HTML`);
+                return {
+                    url,
+                    pageType: PAGE_TYPES.REED_EXPO,
+                    isReedExpo: true,
+                    fromCache,
+                    analysisTime: Date.now() - startTime,
+                    recommendation: {
+                        miner: 'reedExpoMiner',
+                        useCache: false,
+                        reason: 'ReedExpo platform detected via api.reedexpo.com in HTML',
+                        ownPagination: true
+                    }
+                };
+            }
+
             // Analyze the HTML
             const analysis = this.analyzeHtml(html, url);
-            
+
             // Determine recommendation
             const recommendation = this.getRecommendation(analysis);
             

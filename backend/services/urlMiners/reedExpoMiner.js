@@ -40,7 +40,11 @@ const REED_EXPO_HOSTNAMES = [
     'bigshowafrica.com',
     'wtm.com',
     'worldtravelmarket.com',
-    'ishhvac.com'
+    'ishhvac.com',
+    'batimat.com',
+    'reed-exhibitions.com',
+    'reedexpo.com',
+    'informa.com'
 ];
 
 const JUNK_EMAIL_DOMAINS = [
