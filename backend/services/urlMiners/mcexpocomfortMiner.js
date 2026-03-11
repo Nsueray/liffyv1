@@ -1,13 +1,13 @@
 /**
- * LIFFY MCE Expocomfort Miner v5.0
+ * LIFFY MCE Expocomfort Miner v6.0
  * ==================================
  *
  * Specialized miner for mcexpocomfort.it exhibitor directory.
  *
  * Two-phase pipeline:
- *   1. Infinite scroll (Playwright) — scroll list page, collect detail URLs
- *   2. Playwright detail pages — 3 concurrent browser tabs, mailto: + regex email extraction
- *      20s timeout per page, 8 min total timeout.
+ *   1. Infinite scroll (Playwright) — scroll list page, collect detail URLs + org GUIDs
+ *   2. GraphQL API (axios) — batch query ReedExpo GraphQL for contactEmail/website/phone
+ *      Concurrency 20, 10s timeout per request. ~41s for 1635 orgs.
  *
  * Miner contract:
  *   - Returns raw card data only (no normalization, no DB writes)
@@ -15,9 +15,16 @@
  *   - Handles its own pagination internally (ownPagination: true, ownBrowser: true)
  */
 
+const axios = require('axios');
+
 // ─── Constants ───────────────────────────────────────────────────────
 
-const EMAIL_REGEX = /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi;
+const GRAPHQL_URL = 'https://api.reedexpo.com/graphql/';
+const GRAPHQL_CLIENT_ID = 'uhQVcmxLwXAjVtVpTvoerERiZSsNz0om';
+const MCE_EVENT_EDITION_ID = 'eve-57a81c89-bb6c-4549-9448-a711fe3e7d22';
+
+// Pattern: exhib_profile.COMPANY_NAME.org-GUID.html → extract "org-GUID"
+const ORG_GUID_REGEX = /exhib_profile\.[^.]+\.(org-[a-f0-9\-]+)\.html/i;
 
 const JUNK_EMAIL_DOMAINS = [
     'example.com', 'example.org', 'test.com', 'sentry.io',
@@ -31,11 +38,11 @@ const JUNK_EMAIL_DOMAINS = [
 const DEFAULT_MAX_SCROLLS = 50;
 const DEFAULT_SCROLL_DELAY_MS = 2000;
 const DEFAULT_MAX_DETAILS = 2000;
-const DEFAULT_TOTAL_TIMEOUT = 480000; // 8 minutes
-const DEFAULT_CONCURRENCY = 3;
-const DEFAULT_PAGE_TIMEOUT = 20000; // 20s per detail page
+const DEFAULT_TOTAL_TIMEOUT = 300000; // 5 minutes
+const DEFAULT_CONCURRENCY = 20;
+const DEFAULT_REQUEST_TIMEOUT = 10000; // 10s per request
 
-// ─── Phase 1: Infinite Scroll — Collect Links ───────────────────────
+// ─── Phase 1: Infinite Scroll — Collect Links + Extract GUIDs ───────
 
 async function collectExhibitorLinks(page, url, config) {
     const maxScrolls = config.max_scrolls || DEFAULT_MAX_SCROLLS;
@@ -132,86 +139,65 @@ async function collectExhibitorLinks(page, url, config) {
         return cards;
     });
 
-    console.log(`[mcexpocomfortMiner] Phase 1 complete: ${cardData.length} unique exhibitor links`);
+    // Extract organisationGuid from each detail URL
+    for (const card of cardData) {
+        const match = card.detail_url.match(ORG_GUID_REGEX);
+        card.org_guid = match ? match[1] : null;
+    }
+
+    const withGuid = cardData.filter(c => c.org_guid).length;
+    console.log(`[mcexpocomfortMiner] Phase 1 complete: ${cardData.length} exhibitors, ${withGuid} with GUID`);
     return cardData;
 }
 
-// ─── Phase 2: Playwright Concurrent Detail Pages ────────────────────
+// ─── Phase 2: GraphQL API — Email Extraction ────────────────────────
 
 /**
- * Extract emails from a Playwright page (mailto: links + body text regex).
+ * Query ReedExpo GraphQL for a single organisation.
  */
-async function extractEmailsFromPage(detailPage, junkDomains) {
-    return detailPage.evaluate(({ jd }) => {
-        const found = [];
-
-        // 1. mailto: links
-        for (const a of document.querySelectorAll('a[href^="mailto:"]')) {
-            const href = a.getAttribute('href') || '';
-            if (href.startsWith('mailto:?')) continue;
-            const em = href.replace('mailto:', '').split('?')[0].trim().toLowerCase();
-            if (em && em.includes('@') && em.length > 5) {
-                const isJunk = jd.some(d => em.endsWith('@' + d) || em.includes('.' + d));
-                if (!isJunk && !found.includes(em)) found.push(em);
-            }
-        }
-
-        // 2. Regex on visible text
-        const bodyText = document.body ? document.body.innerText : '';
-        const regex = /[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}/gi;
-        let m;
-        while ((m = regex.exec(bodyText)) !== null) {
-            const em = m[0].toLowerCase();
-            if (!found.includes(em)) {
-                const isJunk = jd.some(d => em.endsWith('@' + d) || em.includes('.' + d));
-                if (!isJunk) found.push(em);
-            }
-        }
-
-        return found;
-    }, { jd: junkDomains });
-}
-
-/**
- * Visit a single detail page in a dedicated tab, extract emails.
- * Returns array of emails or null on error.
- */
-async function visitDetailPage(context, detailUrl, pageTimeout, junkDomains) {
-    let detailPage;
+async function queryGraphQL(orgGuid, eventEditionId, requestTimeout) {
     try {
-        detailPage = await context.newPage();
-
-        await detailPage.goto(detailUrl, {
-            waitUntil: 'domcontentloaded',
-            timeout: pageTimeout
+        const res = await axios.post(GRAPHQL_URL, {
+            query: `{ exhibitingOrganisation(eventEditionId:"${eventEditionId}", organisationId:"${orgGuid}") { companyName contactEmail website phone } }`
+        }, {
+            timeout: requestTimeout,
+            headers: {
+                'Content-Type': 'application/json',
+                'x-clientid': GRAPHQL_CLIENT_ID
+            }
         });
 
-        // Brief wait for JS-rendered mailto: links
-        try {
-            await detailPage.waitForSelector('a[href^="mailto:"]', { timeout: 3000 });
-        } catch (e) {
-            // No mailto: found quickly — still try regex
+        const org = res.data?.data?.exhibitingOrganisation;
+        if (!org) return null;
+
+        // Validate email against junk list
+        let email = org.contactEmail || null;
+        if (email) {
+            email = email.trim().toLowerCase();
+            const isJunk = JUNK_EMAIL_DOMAINS.some(d => email.endsWith('@' + d) || email.includes('.' + d));
+            if (isJunk) email = null;
         }
 
-        const emails = await extractEmailsFromPage(detailPage, junkDomains);
-        return emails;
+        return {
+            email,
+            website: org.website || null,
+            phone: org.phone || null,
+            company_name: org.companyName || null
+        };
     } catch (e) {
-        // Timeout, navigation error — skip
+        // Timeout, network error, GraphQL error — skip
         return null;
-    } finally {
-        if (detailPage) {
-            await detailPage.close().catch(() => {});
-        }
     }
 }
 
 /**
- * Process a chunk of cards concurrently using separate browser tabs.
+ * Process a batch of cards concurrently via GraphQL.
  */
-async function processChunk(context, chunk, pageTimeout, junkDomains) {
-    return Promise.all(chunk.map(async (card) => {
-        const emails = await visitDetailPage(context, card.detail_url, pageTimeout, junkDomains);
-        return { card, emails };
+async function processBatch(batch, eventEditionId, requestTimeout) {
+    return Promise.all(batch.map(async (card) => {
+        if (!card.org_guid) return { card, result: null };
+        const result = await queryGraphQL(card.org_guid, eventEditionId, requestTimeout);
+        return { card, result };
     }));
 }
 
@@ -221,7 +207,8 @@ async function runMcexpocomfortMiner(page, url, config = {}) {
     const maxDetails = config.max_details || DEFAULT_MAX_DETAILS;
     const concurrency = config.concurrency || DEFAULT_CONCURRENCY;
     const totalTimeout = config.total_timeout || DEFAULT_TOTAL_TIMEOUT;
-    const pageTimeout = config.page_timeout || DEFAULT_PAGE_TIMEOUT;
+    const requestTimeout = config.request_timeout || DEFAULT_REQUEST_TIMEOUT;
+    const eventEditionId = config.event_edition_id || MCE_EVENT_EDITION_ID;
     const startTime = Date.now();
 
     console.log(`[mcexpocomfortMiner] Starting for: ${url} (timeout: ${totalTimeout}ms, concurrency: ${concurrency})`);
@@ -231,7 +218,7 @@ async function runMcexpocomfortMiner(page, url, config = {}) {
         setTimeout(() => reject(new Error(`mcexpocomfortMiner total timeout (${totalTimeout}ms)`)), totalTimeout)
     );
 
-    // Phase 1: Scroll and collect all exhibitor links
+    // Phase 1: Scroll and collect all exhibitor links + GUIDs
     const exhibitorCards = await Promise.race([
         collectExhibitorLinks(page, url, config),
         timeoutPromise
@@ -242,13 +229,14 @@ async function runMcexpocomfortMiner(page, url, config = {}) {
         return [];
     }
 
-    // ─── Phase 2: Playwright detail pages (concurrent tabs) ─────────
+    // ─── Phase 2: GraphQL API (axios, no Playwright) ────────────────
 
-    const context = page.context();
-    const detailLimit = Math.min(exhibitorCards.length, maxDetails);
-    const cardsToProcess = exhibitorCards.slice(0, detailLimit);
-    const estimatedSeconds = Math.ceil(detailLimit / concurrency) * 3; // ~3s avg per batch of 3
-    console.log(`[mcexpocomfortMiner] Phase 2: ${detailLimit} pages, ~${estimatedSeconds}s estimated (concurrency: ${concurrency})`);
+    const cardsWithGuid = exhibitorCards.filter(c => c.org_guid);
+    const detailLimit = Math.min(cardsWithGuid.length, maxDetails);
+    const cardsToProcess = cardsWithGuid.slice(0, detailLimit);
+    const estimatedBatches = Math.ceil(detailLimit / concurrency);
+    const estimatedSeconds = Math.round(estimatedBatches * 0.5);
+    console.log(`[mcexpocomfortMiner] Phase 2: ${detailLimit} orgs, ~${estimatedSeconds} seconds estimated (concurrency: ${concurrency})`);
 
     let enriched = 0;
     let errors = 0;
@@ -260,34 +248,39 @@ async function runMcexpocomfortMiner(page, url, config = {}) {
             break;
         }
 
-        const chunk = cardsToProcess.slice(i, i + concurrency);
-        const results = await processChunk(context, chunk, pageTimeout, JUNK_EMAIL_DOMAINS);
+        const batch = cardsToProcess.slice(i, i + concurrency);
+        const results = await processBatch(batch, eventEditionId, requestTimeout);
 
-        for (const { card, emails } of results) {
-            if (emails === null) {
+        for (const { card, result } of results) {
+            if (!result) {
                 errors++;
                 continue;
             }
 
-            if (emails.length > 0) {
-                card.email = emails[0];
-                card.all_emails = emails;
+            if (result.email) {
+                card.email = result.email;
                 enriched++;
+            }
+            if (result.website) card.website = result.website;
+            if (result.phone) card.phone = result.phone;
+            // GraphQL may return a better company name
+            if (result.company_name && !card.company_name) {
+                card.company_name = result.company_name;
             }
         }
 
-        // Progress log every 50 pages
+        // Progress log every 100 orgs
         const processed = Math.min(i + concurrency, detailLimit);
-        if (processed % 50 < concurrency || processed === detailLimit) {
+        if (processed % 100 < concurrency || processed === detailLimit) {
             const elapsed = Math.round((Date.now() - startTime) / 1000);
-            const rate = enriched > 0 ? Math.round((enriched / processed) * 100) : 0;
+            const rate = processed > 0 ? Math.round((enriched / processed) * 100) : 0;
             console.log(`[mcexpocomfortMiner] Phase 2: ${processed}/${detailLimit}, +${enriched} emails (${rate}%), ${errors} errors (${elapsed}s)`);
         }
     }
 
-    console.log(`[mcexpocomfortMiner] Phase 2 complete: ${enriched} emails from ${detailLimit} pages, ${errors} errors`);
+    console.log(`[mcexpocomfortMiner] Phase 2 complete: ${enriched} emails from ${detailLimit} orgs, ${errors} errors`);
 
-    // Build final cards
+    // Build final cards (include ALL exhibitors, even those without GUID)
     const cards = exhibitorCards.map(c => ({
         company_name: c.company_name || null,
         email: c.email || null,
