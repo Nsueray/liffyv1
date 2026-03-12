@@ -429,8 +429,8 @@ async function mine(job) {
         
         // Navigate
         const response = await page.goto(url, {
-            waitUntil: 'networkidle',
-            timeout: 30000
+            waitUntil: 'domcontentloaded',
+            timeout: 60000
         });
         
         // Check for blocks

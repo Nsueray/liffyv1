@@ -23,8 +23,10 @@ Her kayıt:
 ### nashel.ru
 - URL: https://nashel.ru/cn/info/sttexpo/
 - Miner: playwrightTableMiner
-- Sorun: 1153 email buldu ama company/contact kolonları boş — column-aware parse yoktu
-- Çözüm: playwrightTableMiner'a column-aware parse eklendi (Çince/çok dilli header desteği)
+- Sorun 1: 1153 email buldu ama company/contact kolonları boş — column-aware parse yoktu
+- Çözüm 1: playwrightTableMiner'a column-aware parse eklendi (Çince/çok dilli header desteği)
+- Sorun 2: page.goto 30s timeout yetersiz, yavaş site timeout'a düşüyor
+- Çözüm 2: Timeout 60s + waitUntil domcontentloaded (networkidle yerine)
 - Tarih: 2026-03-12
 
 ### avrasyapencerekapifuari.com
