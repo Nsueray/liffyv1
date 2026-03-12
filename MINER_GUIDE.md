@@ -388,7 +388,7 @@ triggerCanonicalAggregation():
 
 | Miner | Type | Specialty | Status |
 |-------|------|-----------|--------|
-| `playwrightTableMiner` | Playwright | Table/list extraction from structured HTML | ACTIVE |
+| `playwrightTableMiner` | Playwright | Table/list extraction from structured HTML. Column-aware parse with multilingual header detection (EN/TR/ZH/RU/FR/DE/ES), heuristic fallback. | ACTIVE |
 | `aiMiner` | Claude AI | Intelligent extraction using AI analysis | ACTIVE |
 | `documentMiner` | HTTP + PDF | Flipbook/PDF/document parsing (pdfplumber table extraction + columnar text parser) | ACTIVE |
 | `directoryMiner` | Playwright | Business directories (card-based layouts, Yellow Pages, etc.) | ACTIVE |
@@ -396,6 +396,9 @@ triggerCanonicalAggregation():
 | `memberTableMiner` | Playwright | HTML table member/exhibitor lists (associations, chambers, federations) | ACTIVE |
 | `visExhibitorMiner` | Playwright + API | Messe Düsseldorf VIS platform exhibitor catalogs (Valve World Expo, wire, Tube, interpack, MEDICA, etc.) | ACTIVE |
 | `flipbookMiner` | Playwright | Flipbuilder/FlipHTML5 basic-html flipbook pages (Yellow Pages, catalogs, directories) | ACTIVE |
+| `mcexpocomfortMiner` | Playwright + GraphQL | MCE Expocomfort infinite scroll exhibitor directory (hardcoded eventEditionId) | ACTIVE |
+| `reedExpoMiner` | Playwright + GraphQL | Generic ReedExpo platform exhibitor directories (auto-detect eventEditionId + x-clientid). batimat.com, arabhealth.com, wtm.com, etc. | ACTIVE |
+| `reedExpoMailtoMiner` | Playwright | ReedExpo sites with mailto: emails in HTML (no GraphQL). Also used as enrichment step after reedExpoMiner for emailless orgs. | ACTIVE |
 | `httpBasicMiner` | HTTP | Basic HTTP fetch + regex (alias for playwrightTableMiner) | ACTIVE (alias) |
 | `fullMiner` | Composite | Runs playwrightTableMiner only (aiMiner removed from free mode) | ACTIVE |
 | `playwrightMiner` | Playwright | General Playwright crawl (alias for fullMiner) | ACTIVE (alias) |

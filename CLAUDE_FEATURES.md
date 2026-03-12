@@ -819,3 +819,43 @@ We are a B2B exhibitor discovery platform. Generic CRM-style filtering is intent
 **Only system-level non-human emails are filtered:** noreply, no-reply, mailer-daemon, postmaster, hostmaster, abuse, spam, webmaster, test, example domains.
 
 This is intentional and must NOT be reverted without explicit instruction.
+
+---
+
+## reedExpoMiner — ReedExpo Platform Exhibitor Extraction
+
+Generic miner for all ReedExpo/Informa platform exhibitor directories.
+
+**Sites:** batimat.com, arabhealth.com, mcexpocomfort.it, wtm.com, ishhvac.com, bigshowafrica.com, etc.
+
+**Pipeline:**
+1. Phase 1: Playwright infinite scroll — collect exhibitor links + org GUIDs + auto-detect `eventEditionId` + `x-clientid`
+2. Phase 2: GraphQL API (`api.reedexpo.com/graphql/`) — batch query for contactEmail/website/phone (concurrency 20)
+
+**Email rate:** ~28% (batimat.com: 430/1519). Phase 2 "not_found" error'ları normal — tüm org'lar GraphQL API'de kayıtlı değil, beklenen davranış.
+
+**Enrichment:** `reedExpoMailtoMiner` step 2 olarak çalışır — emailsiz org'ları company-name match ile mailto: linklerinden zenginleştirir.
+
+## reedExpoMailtoMiner — ReedExpo Mailto Fallback
+
+ReedExpo sites where emails are visible as `mailto:` links directly in HTML (no GraphQL needed).
+
+**Pipeline:** Single-phase Playwright infinite scroll — collects mailto: emails + nearest company name + external website links from DOM.
+
+**Usage:** (1) Standalone miner for `reed_expo_mailto` page type, (2) Enrichment step after `reedExpoMiner` for emailless orgs.
+
+## playwrightTableMiner — Column-Aware Table Parse
+
+**Added:** Multilingual column-aware structured table parser.
+
+**How it works:**
+1. Detects header row (`<th>` or first `<tr>`)
+2. Maps column headers to fields via keyword matching (EN/TR/ZH/RU/FR/DE/ES)
+3. Extracts data from each row using column index mapping
+
+**Keyword fields:** company, email, country, website, phone
+**Languages:** English, Turkish, Chinese, Russian, French, German, Spanish
+
+**Matching strategy:** Two-pass — exact match first, then longest substring match. Prevents ambiguous matches (e.g., `公司网站` → website, not company).
+
+**Fallback:** If column-aware produces 0 results, falls back to existing heuristic (bold text, first line, card selectors).

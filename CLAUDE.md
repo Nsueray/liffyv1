@@ -193,3 +193,6 @@ Active refactor in progress. See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLA
 Steps 1-6 ✅ DONE. Steps 7-8 DEFERRED. Step 9 (directoryMiner) phases 1-5 ✅ DONE. Step 10 ✅ DONE.
 messeFrankfurtMiner ✅ DONE — Messe Frankfurt exhibition exhibitor catalogs (API + detail page extraction).
 memberTableMiner ✅ DONE — HTML table member/exhibitor lists (associations, chambers, federations).
+reedExpoMiner ✅ DONE — Generic ReedExpo platform exhibitor directories (infinite scroll + GraphQL API). batimat.com, arabhealth.com, wtm.com, etc. Phase 2 "not_found" error'ları normal — API'de kayıtsız org'lar için beklenen davranış.
+reedExpoMailtoMiner ✅ DONE — ReedExpo sites with mailto: emails in HTML (GraphQL'siz fallback). reedExpoMiner sonrası emailsiz org'lar için company-name match ile enrichment.
+playwrightTableMiner: column-aware parse ✅ DONE — Çince/Rusça/Türkçe/çok dilli tablo header desteği. Longest-match keyword eşleştirme. Eski heuristic fallback korundu.

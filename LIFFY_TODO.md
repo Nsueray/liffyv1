@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-03-06*
+*Updated: 2026-03-12*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -82,6 +82,11 @@
 |---|------|----------|--------|
 | F1 | URL test results → identify new miner needs | P1 | TESTING |
 | F2 | flipbookMiner production test — Ghana Yellow Pages 834 pages, 9,246 results, 77% company coverage | P1 | ✅ DONE |
+| F3 | reedExpoMiner — generic ReedExpo platform miner (infinite scroll + GraphQL API) | P1 | ✅ DONE |
+| F4 | reedExpoMailtoMiner — mailto fallback for ReedExpo emailless orgs (company-name enrichment) | P1 | ✅ DONE |
+| F5 | playwrightTableMiner column-aware parse — multilingual header detection (ZH/RU/TR/EN) | P1 | ✅ DONE |
+| F6 | nashel.ru — column-aware parse test sonucu doğrula (company_name dolmalı) | P1 | PENDING |
+| F7 | batimat.com — reedExpoMailtoMiner enrichment test et (emailless org'lar zenginleşmeli) | P1 | PENDING |
 
 ## G. EMAIL TRACKING & PROSPECTS
 
