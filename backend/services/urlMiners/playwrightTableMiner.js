@@ -82,6 +82,194 @@ function extractWebsites(html, baseUrl) {
     return Array.from(websites);
 }
 
+// ─── Column-Aware Table Parser ──────────────────────────────────────
+
+// Column header keywords → field mapping (lowercase)
+const COLUMN_KEYWORDS = {
+    company: ['company', 'name', 'firma', 'şirket', 'société', 'empresa', 'unternehmen',
+              'organisation', 'organization', '公司', '名称', '公司名称', 'exhibitor',
+              'participant', 'katılımcı', 'aussteller'],
+    email:   ['email', 'e-mail', 'mail', '邮件', '电子邮件', 'correo', 'e-posta'],
+    country: ['country', 'ülke', '国家', 'pays', 'land', 'location', 'город', 'страна', 'region'],
+    website: ['website', 'web', 'site', 'url', 'homepage', '网站', '公司网站', 'www'],
+    phone:   ['phone', 'tel', 'telephone', 'telefon', 'teléfono', 'fax', '电话', 'телефон', 'mobile']
+};
+
+/**
+ * Detect which field a column header maps to.
+ * Uses two passes: exact match first (avoids "公司网站" matching "公司" as company),
+ * then substring match.
+ * @param {string} headerText - Column header text
+ * @returns {string|null} - Field name or null
+ */
+function detectColumnField(headerText) {
+    const lower = headerText.toLowerCase().trim();
+    if (!lower) return null;
+
+    // Pass 1: exact match (higher priority)
+    for (const [field, keywords] of Object.entries(COLUMN_KEYWORDS)) {
+        for (const kw of keywords) {
+            if (lower === kw) return field;
+        }
+    }
+
+    // Pass 2: longest substring match (avoids "公司" matching before "公司网站")
+    let bestMatch = null;
+    let bestLen = 0;
+    for (const [field, keywords] of Object.entries(COLUMN_KEYWORDS)) {
+        for (const kw of keywords) {
+            if (lower.includes(kw) && kw.length > bestLen) {
+                bestMatch = field;
+                bestLen = kw.length;
+            }
+        }
+    }
+
+    return bestMatch;
+}
+
+/**
+ * Column-aware table parser.
+ * Reads header row, maps columns to fields, extracts structured contacts.
+ * Returns contacts array or empty array if no structured table found.
+ */
+async function parseColumnAwareTable(page, baseUrl) {
+    const tableData = await page.evaluate(() => {
+        const tables = document.querySelectorAll('table');
+        const allTables = [];
+
+        for (const table of tables) {
+            const rows = table.querySelectorAll('tr');
+            if (rows.length < 2) continue; // Need header + at least 1 data row
+
+            // Find header row: first row with <th>, or first <tr> if no <th>
+            let headerRow = null;
+            let dataStartIndex = 0;
+
+            for (let i = 0; i < rows.length; i++) {
+                const ths = rows[i].querySelectorAll('th');
+                if (ths.length >= 2) {
+                    headerRow = rows[i];
+                    dataStartIndex = i + 1;
+                    break;
+                }
+            }
+
+            // Fallback: use first row as header if it has td cells
+            if (!headerRow && rows.length >= 2) {
+                const firstCells = rows[0].querySelectorAll('td, th');
+                if (firstCells.length >= 2) {
+                    headerRow = rows[0];
+                    dataStartIndex = 1;
+                }
+            }
+
+            if (!headerRow) continue;
+
+            const headerCells = headerRow.querySelectorAll('th, td');
+            const headers = Array.from(headerCells).map(c => c.innerText.trim());
+
+            // Extract data rows
+            const dataRows = [];
+            for (let i = dataStartIndex; i < rows.length; i++) {
+                const cells = rows[i].querySelectorAll('td');
+                if (cells.length < 2) continue;
+                const cellData = Array.from(cells).map(c => ({
+                    text: c.innerText.trim(),
+                    html: c.innerHTML
+                }));
+                dataRows.push(cellData);
+            }
+
+            if (dataRows.length > 0) {
+                allTables.push({ headers, dataRows });
+            }
+        }
+
+        return allTables;
+    });
+
+    if (tableData.length === 0) return [];
+
+    const contacts = [];
+
+    for (const table of tableData) {
+        // Map header indices to field names
+        const columnMap = {};
+        for (let i = 0; i < table.headers.length; i++) {
+            const field = detectColumnField(table.headers[i]);
+            if (field && !columnMap[field]) {
+                columnMap[field] = i;
+            }
+        }
+
+        // Need at least email column to be useful
+        if (columnMap.email === undefined) continue;
+
+        console.log(`[TableMiner] Column-aware: mapped ${Object.keys(columnMap).join(', ')} from headers: [${table.headers.join(' | ')}]`);
+
+        for (const row of table.dataRows) {
+            const getCell = (field) => {
+                const idx = columnMap[field];
+                if (idx === undefined || idx >= row.length) return null;
+                return row[idx];
+            };
+
+            // Extract email
+            const emailCell = getCell('email');
+            if (!emailCell) continue;
+
+            const emailText = emailCell.text.trim().toLowerCase();
+            // Also try extracting from HTML (for CF-encoded or mailto: links)
+            const emailsFromHtml = extractAllEmails(emailCell.html) || [];
+            const emailsFromText = extractAllEmails(emailText) || [];
+            const emails = [...new Set([...emailsFromHtml, ...emailsFromText])];
+            if (emails.length === 0) continue;
+
+            // Extract other fields
+            const companyCell = getCell('company');
+            const countryCell = getCell('country');
+            const websiteCell = getCell('website');
+            const phoneCell = getCell('phone');
+
+            let website = null;
+            if (websiteCell) {
+                // Try to extract URL from HTML first (href), then text
+                const hrefMatch = websiteCell.html.match(/href="(https?:\/\/[^"]+)"/i);
+                website = hrefMatch ? hrefMatch[1] : null;
+                if (!website) {
+                    const urlMatch = websiteCell.text.match(/https?:\/\/\S+/i);
+                    website = urlMatch ? urlMatch[0] : null;
+                }
+                if (!website && websiteCell.text.match(/^[\w.-]+\.\w{2,}$/)) {
+                    website = 'https://' + websiteCell.text.trim();
+                }
+                // Filter out base site and social media
+                if (website) {
+                    try {
+                        const wHost = new URL(website).hostname;
+                        const baseHost = baseUrl ? new URL(baseUrl).hostname : '';
+                        if (wHost === baseHost || ['facebook.com', 'twitter.com', 'linkedin.com', 'instagram.com', 'youtube.com'].some(s => wHost.includes(s))) {
+                            website = null;
+                        }
+                    } catch (e) { website = null; }
+                }
+            }
+
+            contacts.push({
+                companyName: companyCell ? companyCell.text.trim() || null : null,
+                emails,
+                phones: phoneCell ? extractPhones(phoneCell.text).slice(0, 3) : [],
+                address: countryCell ? countryCell.text.trim() || null : null,
+                website,
+                raw: row.map(c => c.text).join(' | ').substring(0, 500)
+            });
+        }
+    }
+
+    return contacts;
+}
+
 /**
  * Parse table rows into structured data
  */
@@ -289,19 +477,15 @@ async function mine(job) {
         const pageText = await page.evaluate(() => document.body.innerText);
         const allPhones = extractPhones(pageText);
         const allWebsites = extractWebsites(html, url);
-        
-        // Parse structured data blocks
-        const dataBlocks = await parseTableData(page);
-        console.log(`[TableMiner] Found ${dataBlocks.length} data blocks`);
-        
-        // Extract contacts from blocks
-        const contacts = [];
-        const usedEmails = new Set();
-        
-        for (const block of dataBlocks) {
-            const contact = extractContactFromBlock(block, allEmails, allPhones, allWebsites);
-            if (contact && contact.emails.length > 0) {
-                // Avoid duplicates
+
+        // ─── Strategy A: Column-aware table parser (structured tables) ───
+        let contacts = [];
+        const columnAwareContacts = await parseColumnAwareTable(page, url);
+
+        if (columnAwareContacts.length > 0) {
+            console.log(`[TableMiner] Column-aware: ${columnAwareContacts.length} contacts extracted`);
+            const usedEmails = new Set();
+            for (const contact of columnAwareContacts) {
                 const newEmails = contact.emails.filter(e => !usedEmails.has(e));
                 if (newEmails.length > 0) {
                     contact.emails = newEmails;
@@ -310,18 +494,39 @@ async function mine(job) {
                 }
             }
         }
-        
-        // If we found emails but couldn't structure them, create basic contacts
-        if (contacts.length === 0 && allEmails.length > 0) {
-            for (const email of allEmails) {
-                contacts.push({
-                    companyName: null,
-                    emails: [email],
-                    phones: [],
-                    address: null,
-                    website: null,
-                    raw: null
-                });
+
+        // ─── Strategy B: Heuristic fallback (cards, bold labels, etc.) ───
+        if (contacts.length === 0) {
+            console.log(`[TableMiner] Column-aware found nothing, falling back to heuristic`);
+            const dataBlocks = await parseTableData(page);
+            console.log(`[TableMiner] Found ${dataBlocks.length} data blocks`);
+
+            const usedEmails = new Set();
+
+            for (const block of dataBlocks) {
+                const contact = extractContactFromBlock(block, allEmails, allPhones, allWebsites);
+                if (contact && contact.emails.length > 0) {
+                    const newEmails = contact.emails.filter(e => !usedEmails.has(e));
+                    if (newEmails.length > 0) {
+                        contact.emails = newEmails;
+                        newEmails.forEach(e => usedEmails.add(e));
+                        contacts.push(contact);
+                    }
+                }
+            }
+
+            // If we found emails but couldn't structure them, create basic contacts
+            if (contacts.length === 0 && allEmails.length > 0) {
+                for (const email of allEmails) {
+                    contacts.push({
+                        companyName: null,
+                        emails: [email],
+                        phones: [],
+                        address: null,
+                        website: null,
+                        raw: null
+                    });
+                }
             }
         }
         
