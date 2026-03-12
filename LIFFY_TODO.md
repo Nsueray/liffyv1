@@ -85,8 +85,9 @@
 | F3 | reedExpoMiner — generic ReedExpo platform miner (infinite scroll + GraphQL API) | P1 | ✅ DONE |
 | F4 | reedExpoMailtoMiner — mailto fallback for ReedExpo emailless orgs (company-name enrichment) | P1 | ✅ DONE |
 | F5 | playwrightTableMiner column-aware parse — multilingual header detection (ZH/RU/TR/EN) | P1 | ✅ DONE |
-| F6 | nashel.ru — column-aware parse test sonucu doğrula (company_name dolmalı) | P1 | PENDING |
-| F7 | batimat.com — reedExpoMailtoMiner enrichment test et (emailless org'lar zenginleşmeli) | P1 | PENDING |
+| F6 | playwrightTableMiner timeout fix — 30s→60s + networkidle→domcontentloaded | P1 | ✅ DONE |
+| F7 | nashel.ru/cn/info/sttexpo/ — 1152 contact, company isimleri doldu | P1 | ✅ DONE |
+| F8 | batimat.com — reedExpoMailtoMiner enrichment test et (emailless org'lar zenginleşmeli) | P1 | PENDING |
 
 ## G. EMAIL TRACKING & PROSPECTS
 

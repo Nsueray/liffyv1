@@ -27,6 +27,7 @@ Her kayıt:
 - Çözüm 1: playwrightTableMiner'a column-aware parse eklendi (Çince/çok dilli header desteği)
 - Sorun 2: page.goto 30s timeout yetersiz, yavaş site timeout'a düşüyor
 - Çözüm 2: Timeout 60s + waitUntil domcontentloaded (networkidle yerine)
+- Sonuç: 1152 contact ✅
 - Tarih: 2026-03-12
 
 ### avrasyapencerekapifuari.com
