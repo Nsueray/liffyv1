@@ -85,6 +85,7 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
   // Handles its own pagination internally (ownPagination: true).
   if (resolvedInputType === 'reed_expo') {
     addStep('reedExpoMiner', 'legacy', 'ReedExpo platform exhibitor extraction');
+    addStep('reedExpoMailtoMiner', 'legacy', 'ReedExpo mailto enrichment for emailless orgs');
     return plan;
   }
 

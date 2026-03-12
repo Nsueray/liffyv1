@@ -1522,6 +1522,47 @@ class FlowOrchestrator {
                         }
                     }
 
+                    // Reed Expo enrichment: merge mailto emails into emailless contacts by company name
+                    if (inputType === 'reed_expo' && minerResults.length >= 2) {
+                        const primaryContacts = minerResults[0]?.contacts || [];
+                        const mailtoContacts = minerResults[1]?.contacts || [];
+
+                        if (mailtoContacts.length > 0) {
+                            // Build email lookup by normalized company name
+                            const emailByCompany = new Map();
+                            for (const c of mailtoContacts) {
+                                if (c.email && c.company_name) {
+                                    const key = c.company_name.toLowerCase().trim();
+                                    if (!emailByCompany.has(key)) {
+                                        emailByCompany.set(key, c);
+                                    }
+                                }
+                            }
+
+                            // Enrich emailless contacts from reedExpoMiner
+                            let enrichedCount = 0;
+                            for (const c of primaryContacts) {
+                                if (!c.email && c.company_name) {
+                                    const key = c.company_name.toLowerCase().trim();
+                                    const match = emailByCompany.get(key);
+                                    if (match) {
+                                        c.email = match.email;
+                                        if (match.website && !c.website) c.website = match.website;
+                                        enrichedCount++;
+                                    }
+                                }
+                            }
+
+                            // Update emails array in primary result
+                            if (enrichedCount > 0) {
+                                const newEmails = primaryContacts.map(c => c.email).filter(Boolean);
+                                minerResults[0].emails = [...new Set([...(minerResults[0].emails || []), ...newEmails])];
+                            }
+
+                            console.log(`[Flow1] Reed Expo mailto enrichment: ${enrichedCount}/${primaryContacts.filter(c => !c.email || enrichedCount).length} emailless contacts enriched from ${mailtoContacts.length} mailto results`);
+                        }
+                    }
+
                     console.log(`[Flow1] Step 3: Aggregating (V1 → Redis)... minerResults=${minerResults.length}, totalContacts=${minerResults.reduce((s, r) => s + (r.contacts?.length || 0), 0)}`);
 
                     const aggregationResult = await this.aggregator.aggregateV1(
