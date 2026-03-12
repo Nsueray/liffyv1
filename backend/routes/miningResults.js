@@ -426,7 +426,11 @@ router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (r
     );
 
     const countRes = await db.query(
-      `SELECT COUNT(*)::int AS total
+      `SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE COALESCE(array_length(mr.emails, 1), 0) > 0)::int AS with_email,
+        COUNT(*) FILTER (WHERE mr.company_name IS NOT NULL AND mr.company_name != '')::int AS with_company,
+        COUNT(*) FILTER (WHERE mr.phone IS NOT NULL AND mr.phone != '')::int AS with_phone
       FROM mining_results mr
       JOIN mining_jobs mj ON mj.id = mr.job_id
       WHERE ${whereSql}`,
@@ -434,6 +438,9 @@ router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (r
     );
 
     const total = countRes.rows[0]?.total || 0;
+    const withEmail = countRes.rows[0]?.with_email || 0;
+    const withCompany = countRes.rows[0]?.with_company || 0;
+    const withPhone = countRes.rows[0]?.with_phone || 0;
 
     return res.json({
       results: resultsRes.rows.map(mapResultRow),
@@ -442,6 +449,13 @@ router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (r
         limit,
         total,
         total_pages: Math.ceil(total / limit)
+      },
+      summary: {
+        total,
+        with_email: withEmail,
+        without_email: total - withEmail,
+        with_company: withCompany,
+        with_phone: withPhone
       }
     });
   } catch (err) {
