@@ -30,7 +30,7 @@
 | A20 | NaN enrichment guard — shouldTriggerFlow2 undefined/NaN default to 100% (safe skip) | P1 | ✅ DONE |
 | A21 | Redis truncate limit kaldır (Starter plan upgrade) | P1 | ✅ DONE |
 | A22 | PDF name/company extraction — pdfContacts bypass in execution plan path (all 3 normalizer calls fixed) | P1 | ✅ DONE |
-| A23 | Node.js heap limit (NODE_OPTIONS env var) | P1 | TODO (manual Render config) |
+| A23 | Node.js heap limit (NODE_OPTIONS env var) | P1 | ✅ DONE (startup log + Render manual config) |
 | A24 | Excel mining quality — column mapping improvement | P2 | TODO |
 | A25 | flipbookMiner v2 — dual-path extraction (column-position + isolateSegment for pre/code layouts) | P1 | ✅ DONE |
 | A26 | AI Miner Generator v2 — AXTree integration (Playwright ariaSnapshot) | P1 | ✅ DONE |
@@ -64,7 +64,7 @@
 
 | # | Task | Priority | Status |
 |---|------|----------|--------|
-| D1 | Performance indexes on campaign_events | P2 | TODO |
+| D1 | Performance indexes on campaign_events | P2 | ✅ DONE |
 | D2 | Pagination metrics in mining_job_logs | P3 | TODO |
 
 ## E. PHASE 4 — LEGACY REMOVAL

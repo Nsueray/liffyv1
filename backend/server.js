@@ -1,3 +1,5 @@
+console.log('[Startup] Heap limit:', require('v8').getHeapStatistics().heap_size_limit / 1024 / 1024, 'MB');
+
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
