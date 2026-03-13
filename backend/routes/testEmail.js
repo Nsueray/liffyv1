@@ -112,19 +112,17 @@ router.post('/api/test-email', async (req, res) => {
       sendgridApiKey: organizer.sendgrid_api_key
     });
 
-    // 5) Insert into email_logs
-    const status = mailResponse.success ? 'sent' : 'failed';
+    // 5) Record in campaign_events (test email)
+    const eventType = mailResponse.success ? 'sent' : 'failed';
 
     await db.query(
-      `INSERT INTO email_logs 
-       (organizer_id, campaign_id, template_id, recipient_email, recipient_data, status, provider_response, sent_at)
-       VALUES ($1, NULL, $2, $3, $4, $5, $6, NOW())`,
+      `INSERT INTO campaign_events
+       (organizer_id, campaign_id, event_type, email, provider_response, occurred_at)
+       VALUES ($1, NULL, $2, $3, $4, NOW())`,
       [
         organizer_id,
-        template_id,
+        eventType,
         recipient_email,
-        sender ? { sender_identity_id: sender.id } : null,
-        status,
         mailResponse
       ]
     );
