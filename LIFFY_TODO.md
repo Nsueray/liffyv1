@@ -100,7 +100,7 @@
 | G5 | Reply count in campaign analytics UI (commit: 9b88042 liffy-ui) | P2 | ✅ DONE |
 | G6 | Unsubscribe tracking — unsubscribe olanları UI'da göster | P1 | ✅ DONE |
 | G7 | Unsubscribe listesi sayfası — kim, ne zaman, hangi campaign'den unsubscribe oldu | P2 | ✅ DONE |
-| G8 | Prospect conversion — reply detected → lead becomes prospect | P2 | TODO |
+| G8 | Prospect conversion — reply detected → lead becomes prospect | P2 | ✅ DONE |
 
 ### Context
 

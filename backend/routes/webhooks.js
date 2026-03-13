@@ -695,6 +695,16 @@ router.post(
     // 5. Record prospect_intent (intent_type='reply')
     await recordProspectIntent(recipient, recipient.email, 'reply', replyTime);
 
+    // 6. Update campaign_recipient status to 'replied'
+    try {
+      await db.query(
+        `UPDATE campaign_recipients SET status = 'replied', replied_at = $2 WHERE id = $1`,
+        [recipient.id, replyTime]
+      );
+    } catch (statusErr) {
+      console.warn(`  ⚠️ Failed to update recipient status to replied:`, statusErr.message);
+    }
+
     console.log(`  📝 Reply recorded for ${recipient.email} (campaign: ${recipient.campaign_id})`);
 
     // 6. Forward reply to organizer's inbox (best-effort, never blocks response)

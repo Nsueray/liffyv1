@@ -98,62 +98,102 @@ router.post('/api/prospects', authRequired, async (req, res) => {
 
 /**
  * GET /api/prospects
- * Filters: email, country, sector, verification_status, list_id
+ * Canonical prospect list: persons with prospect_intents, joined with affiliations
+ * Filters: search, intent_type
+ * Pagination: page, limit
  */
 router.get('/api/prospects', authRequired, async (req, res) => {
   try {
-    const organizer_id = req.auth.organizer_id;
-    const { email, country, sector, verification_status, list_id } = req.query;
+    const organizerId = req.auth.organizer_id;
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const offset = (page - 1) * limit;
 
-    let query = `
-      SELECT p.*
-      FROM prospects p
-    `;
-    const where = [`p.organizer_id = $1`];
-    const params = [organizer_id];
+    const { search, intent_type } = req.query;
+
+    let where = ['pi.organizer_id = $1'];
+    const params = [organizerId];
     let idx = 2;
 
-    if (list_id) {
-      query += `
-        JOIN list_members lm 
-          ON lm.prospect_id = p.id 
-         AND lm.list_id = $${idx}
-      `;
-      params.push(list_id);
+    if (intent_type) {
+      where.push(`pi.intent_type = $${idx}`);
+      params.push(intent_type);
       idx++;
     }
 
-    if (email) {
-      where.push(`p.email ILIKE $${idx}`);
-      params.push(`%${email}%`);
+    if (search) {
+      where.push(`(
+        p.email ILIKE $${idx} OR
+        p.first_name ILIKE $${idx} OR
+        p.last_name ILIKE $${idx} OR
+        a.company_name ILIKE $${idx} OR
+        c.name ILIKE $${idx}
+      )`);
+      params.push(`%${search}%`);
       idx++;
     }
 
-    if (country) {
-      where.push(`p.country = $${idx}`);
-      params.push(country);
-      idx++;
-    }
+    const whereClause = where.join(' AND ');
 
-    if (sector) {
-      where.push(`p.sector = $${idx}`);
-      params.push(sector);
-      idx++;
-    }
+    const countRes = await db.query(
+      `SELECT COUNT(*) FROM prospect_intents pi
+       JOIN persons p ON p.id = pi.person_id
+       LEFT JOIN affiliations a ON a.person_id = p.id AND a.organizer_id = pi.organizer_id
+       LEFT JOIN campaigns c ON c.id = pi.campaign_id
+       WHERE ${whereClause}`,
+      params
+    );
+    const total = parseInt(countRes.rows[0].count, 10);
 
-    if (verification_status) {
-      where.push(`p.verification_status = $${idx}`);
-      params.push(verification_status);
-      idx++;
-    }
+    const dataRes = await db.query(
+      `SELECT
+         pi.id,
+         pi.person_id,
+         p.email,
+         p.first_name,
+         p.last_name,
+         a.company_name,
+         a.job_title,
+         pi.intent_type,
+         pi.campaign_id,
+         c.name AS campaign_name,
+         pi.source,
+         pi.confidence,
+         pi.occurred_at,
+         pi.created_at
+       FROM prospect_intents pi
+       JOIN persons p ON p.id = pi.person_id
+       LEFT JOIN LATERAL (
+         SELECT company_name, job_title FROM affiliations
+         WHERE person_id = p.id AND organizer_id = pi.organizer_id
+         ORDER BY is_primary DESC NULLS LAST, created_at DESC
+         LIMIT 1
+       ) a ON true
+       LEFT JOIN campaigns c ON c.id = pi.campaign_id
+       WHERE ${whereClause}
+       ORDER BY pi.occurred_at DESC
+       LIMIT $${idx} OFFSET $${idx + 1}`,
+      [...params, limit, offset]
+    );
 
-    query += ` WHERE ${where.join(" AND ")} ORDER BY p.created_at DESC`;
+    // Stats summary
+    const statsRes = await db.query(
+      `SELECT
+         COUNT(DISTINCT pi.person_id)::int AS total_prospects,
+         COUNT(*)::int AS total_signals,
+         COUNT(*) FILTER (WHERE pi.intent_type = 'reply')::int AS replies,
+         COUNT(*) FILTER (WHERE pi.intent_type = 'click_through')::int AS clicks
+       FROM prospect_intents pi
+       WHERE pi.organizer_id = $1`,
+      [organizerId]
+    );
 
-    const result = await db.query(query, params);
-
-    return res.json({
-      success: true,
-      prospects: result.rows
+    res.json({
+      total,
+      page,
+      limit,
+      stats: statsRes.rows[0],
+      prospects: dataRes.rows
     });
 
   } catch (err) {
