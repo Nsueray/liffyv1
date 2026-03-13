@@ -139,6 +139,6 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 |---|------|----------|--------|
 | H1 | Re-mine butonu — mevcut job'u tekrar başlat (aynı URL + config ile yeni job) | P2 | ✅ DONE |
 | H2 | New Mining Job formunda Free mode default olsun (şu an AI mode default) | P1 | ✅ DONE |
-| H3 | Campaign scheduling — gün ve saat seçerek otomatik gönderim | P2 | TODO |
+| H3 | Campaign scheduling — gün ve saat seçerek otomatik gönderim | P2 | ✅ DONE |
 | H4 | Mining Jobs Strategy kolonu — miner_used, mining_mode, flow2_status detaylı gösterim | P1 | ✅ DONE |
 | H5 | Excel/CSV Export buttons — mining results, contacts, list detail pages (commit: 72d175f liffy-ui) | P1 | ✅ DONE |
