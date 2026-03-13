@@ -469,7 +469,7 @@ router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (r
  * Process a single batch of mining results for import.
  * Called by the background processor within a transaction.
  */
-async function processImportBatch(client, batchRows, organizerId, jobId, tagsArray, listId) {
+async function processImportBatch(client, batchRows, organizerId, jobId, tagsArray, listId, onRowProgress) {
   let imported = 0, skipped = 0, duplicates = 0;
   let personsUpserted = 0, affiliationsUpserted = 0;
   const errors = [];
@@ -621,6 +621,9 @@ async function processImportBatch(client, batchRows, organizerId, jobId, tagsArr
       // Release savepoint on success
       await client.query(`RELEASE SAVEPOINT ${savepointName}`);
       imported++;
+
+      // Report row-level progress (throttled by caller)
+      if (onRowProgress) onRowProgress(imported, skipped);
     } catch (rowErr) {
       // Rollback to savepoint — transaction stays valid for remaining rows
       await client.query(`ROLLBACK TO SAVEPOINT ${savepointName}`);
@@ -683,7 +686,27 @@ async function processImportInBackground(jobId, organizerId, tagsArray, listId) 
       const client = await db.connect();
       try {
         await client.query('BEGIN');
-        const result = await processImportBatch(client, batchRes.rows, organizerId, jobId, tagsArray, listId);
+
+        // Throttled row-level progress: update DB every 25 rows
+        let lastProgressUpdate = 0;
+        const onRowProgress = (batchImported, batchSkipped) => {
+          const currentTotal = totalImported + batchImported;
+          if (currentTotal - lastProgressUpdate >= 25 || currentTotal === totalToProcess) {
+            lastProgressUpdate = currentTotal;
+            // Fire-and-forget progress update (outside transaction)
+            db.query(
+              `UPDATE mining_jobs SET import_progress = $2 WHERE id = $1`,
+              [jobId, JSON.stringify({
+                imported: currentTotal,
+                skipped: totalSkipped + batchSkipped,
+                duplicates: totalDuplicates,
+                total: totalToProcess,
+              })]
+            ).catch(() => {});
+          }
+        };
+
+        const result = await processImportBatch(client, batchRes.rows, organizerId, jobId, tagsArray, listId, onRowProgress);
         await client.query('COMMIT');
 
         totalImported += result.imported;
