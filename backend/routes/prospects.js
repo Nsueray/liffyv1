@@ -138,7 +138,11 @@ router.get('/api/prospects', authRequired, async (req, res) => {
     const countRes = await db.query(
       `SELECT COUNT(*) FROM prospect_intents pi
        JOIN persons p ON p.id = pi.person_id
-       LEFT JOIN affiliations a ON a.person_id = p.id AND a.organizer_id = pi.organizer_id
+       LEFT JOIN LATERAL (
+         SELECT company_name FROM affiliations
+         WHERE person_id = p.id AND organizer_id = pi.organizer_id
+         ORDER BY created_at DESC LIMIT 1
+       ) a ON true
        LEFT JOIN campaigns c ON c.id = pi.campaign_id
        WHERE ${whereClause}`,
       params
@@ -153,7 +157,7 @@ router.get('/api/prospects', authRequired, async (req, res) => {
          p.first_name,
          p.last_name,
          a.company_name,
-         a.job_title,
+         a.position AS job_title,
          pi.intent_type,
          pi.campaign_id,
          c.name AS campaign_name,
@@ -164,9 +168,9 @@ router.get('/api/prospects', authRequired, async (req, res) => {
        FROM prospect_intents pi
        JOIN persons p ON p.id = pi.person_id
        LEFT JOIN LATERAL (
-         SELECT company_name, job_title FROM affiliations
+         SELECT company_name, position FROM affiliations
          WHERE person_id = p.id AND organizer_id = pi.organizer_id
-         ORDER BY is_primary DESC NULLS LAST, created_at DESC
+         ORDER BY created_at DESC
          LIMIT 1
        ) a ON true
        LEFT JOIN campaigns c ON c.id = pi.campaign_id
