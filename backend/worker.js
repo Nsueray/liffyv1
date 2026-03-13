@@ -481,7 +481,8 @@ async function triggerManualAssist(job) {
   try {
     await db.query(
       `UPDATE mining_jobs
-       SET manual_required=true, manual_reason='blocked_source'
+       SET manual_required=true, manual_reason='blocked_source',
+           status='needs_manual', completed_at=NOW()
        WHERE id=$1`,
       [job.id]
     );

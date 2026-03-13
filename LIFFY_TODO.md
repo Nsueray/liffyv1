@@ -15,8 +15,8 @@
 | A5 | Heuristic directory detection (DOM pattern) | P3 | FUTURE |
 | A6 | directoryMiner max_pages UI config | P3 | FUTURE |
 | A7 | Local miner fix + orchestrator integration (commits: 28ea802, fb9e7d5) | P1 | DONE |
-| A8 | Job status "needs_manual" for blocked sites — completed yerine farklı status | P2 | TODO |
-| A9 | Email'de gerçek MINING_API_TOKEN kullan, "some-long-random-secret" değil | P2 | TODO |
+| A8 | Job status "needs_manual" for blocked sites — completed yerine farklı status | P2 | ✅ DONE |
+| A9 | Email'de gerçek MINING_API_TOKEN kullan, "some-long-random-secret" değil | P2 | ✅ DONE (zaten process.env.MINING_API_TOKEN kullanıyordu) |
 | A10 | Free mode'da aiMiner çalışmaması fix'i (commit: 2a7ecd2) | P1 | DONE |
 | A11 | Block detection email notification (commits: 2a7ecd2, fb9e7d5) | P1 | DONE |
 | A12 | spaNetworkMiner v1 complete — token capture, fast path, 257/259 coverage | P1 | ✅ DONE |
@@ -53,7 +53,7 @@
 
 | # | Task | Priority | Status |
 |---|------|----------|--------|
-| C1 | /api/stats 401 Unauthorized — sidebar polling | P2 | OPEN |
+| C1 | /api/stats 401 Unauthorized — sidebar polling | P2 | ✅ DONE |
 | C2 | Prospects page search backend missing | P3 | OPEN |
 | C3 | Template editor HTML escaping — pasted raw HTML tags shown as text in emails | P1 | ✅ DONE |
 | C4 | Campaign analytics Sent=0 — worker not recording sent events to campaign_events | P1 | ✅ DONE |

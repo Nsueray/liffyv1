@@ -691,8 +691,13 @@ async function saveMergedResults(job, contacts) {
 
 async function updateJobStatus(job, result, executionTime) {
     try {
+        // Don't overwrite needs_manual status set by triggerManualAssist
+        const currentRes = await db.query('SELECT status FROM mining_jobs WHERE id = $1', [job.id]);
+        const currentStatus = currentRes.rows[0]?.status;
+        if (currentStatus === 'needs_manual') return;
+
         const status = result.status === 'BLOCKED' ? 'blocked' : 'completed';
-        
+
         await db.query(`
             UPDATE mining_jobs SET
                 status = $1,

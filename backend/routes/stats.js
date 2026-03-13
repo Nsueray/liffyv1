@@ -5,20 +5,34 @@
 
 const express = require('express');
 const router = express.Router();
+const jwt = require('jsonwebtoken');
 const db = require('../db');
 
-// Auth middleware (same pattern as other routes)
-const authRequired = (req, res, next) => {
-  if (!req.session || !req.session.user) {
-    return res.status(401).json({ error: 'Unauthorized' });
+const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
+
+function authRequired(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader) {
+      return res.status(401).json({ error: 'Missing Authorization header' });
+    }
+    const token = authHeader.replace('Bearer ', '').trim();
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.auth = {
+      user_id: payload.user_id,
+      organizer_id: payload.organizer_id,
+      role: payload.role
+    };
+    next();
+  } catch (err) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
   }
-  next();
-};
+}
 
 // GET /api/stats - Get sidebar counts
 router.get('/api/stats', authRequired, async (req, res) => {
   try {
-    const organizerId = req.session.user.organizer_id;
+    const organizerId = req.auth.organizer_id;
     
     // Count running/pending mining jobs
     const jobsResult = await db.query(
