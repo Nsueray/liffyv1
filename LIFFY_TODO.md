@@ -45,7 +45,7 @@
 | # | Task | Priority | Status |
 |---|------|----------|--------|
 | B1 | Zoho CRM Push UI — push button, module select, push history | P3 | TODO |
-| B2 | Frontend import-all polling — progress bar | P2 | TODO |
+| B2 | Frontend import-all polling — progress bar | P2 | ✅ DONE |
 | B3 | Mining console page — log writing + /logs endpoint | P3 | FUTURE |
 | B4 | Excel/CSV Export — mining results, contacts, list members (exceljs + exportHelper.js) (commits: 1e6f06d, 72d175f) | P1 | ✅ DONE |
 

@@ -921,6 +921,36 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
 
 
 /**
+ * GET /api/mining/jobs/:id/import-status
+ * Lightweight polling endpoint for import progress
+ */
+router.get('/api/mining/jobs/:id/import-status', authRequired, validateJobId, async (req, res) => {
+  try {
+    const jobId = req.params.id;
+    const organizerId = req.auth.organizer_id;
+
+    const result = await db.query(
+      `SELECT import_status, import_progress FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      [jobId, organizerId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Job not found' });
+    }
+
+    const { import_status, import_progress } = result.rows[0];
+
+    res.json({
+      import_status: import_status || 'idle',
+      progress: import_progress || null
+    });
+  } catch (err) {
+    console.error('GET /api/mining/jobs/:id/import-status error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * GET /api/mining/jobs/:id/import-preview
  * Preview how many results will be imported (with email, not yet imported)
  */
