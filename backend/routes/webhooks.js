@@ -419,8 +419,55 @@ function extractName(fromField) {
 }
 
 /**
+ * Strip quoted reply history from email body.
+ * Removes "On [date] ... wrote:" lines and subsequent > quoted lines.
+ */
+function stripQuotedHistory(text) {
+  if (!text) return text;
+  const lines = text.split('\n');
+  const result = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    // "On ... wrote:" pattern (English) — may span 2 lines
+    // e.g. "On Mon, 16 Mar 2026 at 14:57, Elif AY <elif@elan-expo.com> wrote:"
+    if (/^On\s.+wrote:\s*$/i.test(line)) break;
+    // "On ..." first line, "wrote:" on next line
+    if (/^On\s.+[^:]\s*$/i.test(line) && i + 1 < lines.length && /wrote:\s*$/i.test(lines[i + 1])) break;
+    // Greek: "Στις ... έγραψε:" — may span 2 lines
+    if (/^Στις\s.+έγραψε:\s*$/i.test(line)) break;
+    if (/^Στις\s.+/i.test(line) && i + 1 < lines.length && /έγραψε:\s*$/i.test(lines[i + 1])) break;
+    // German: "Am ... schrieb ..."
+    if (/^Am\s.+schrieb\s.+:?\s*$/i.test(line)) break;
+    // French: "Le ... a écrit :"
+    if (/^Le\s.+a écrit\s*:?\s*$/i.test(line)) break;
+    // Turkish: "tarihinde ... yazdı:"
+    if (/tarihinde\s.+yazdı:\s*$/i.test(line)) break;
+    // Generic: line starts with ">" (quoted text)
+    if (/^\s*>/.test(line)) break;
+    // "---------- Forwarded message ----------" or similar separators
+    if (/^-{5,}\s*(Forwarded|Original)\s/i.test(line)) break;
+    // "From: ... Sent: ..." Outlook-style quote header
+    if (/^From:\s.+/i.test(line) && i > 0 && lines[i - 1].trim() === '') {
+      // Check if next lines look like Outlook headers (Sent:, To:, Subject:)
+      if (i + 1 < lines.length && /^(Sent|To|Date|Subject):\s/i.test(lines[i + 1])) break;
+    }
+
+    result.push(line);
+  }
+
+  // Trim trailing empty lines
+  while (result.length > 0 && result[result.length - 1].trim() === '') {
+    result.pop();
+  }
+
+  return result.length > 0 ? result.join('\n') : text;
+}
+
+/**
  * Build HTML body for the reply forward wrapper email.
- * Clean, professional notification — no raw headers exposed.
+ * Clean, minimal — just metadata header + reply content.
  */
 function buildReplyForwardHtml({ senderEmail, senderName, campaignName, replyBody, replyTime }) {
   const escapedBody = (replyBody || '(no content)')
@@ -491,9 +538,14 @@ async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyT
 
     const senderEmail = extractEmail(from);
     const senderName = extractName(from);
-    const replyBody = text || null;
+    const replyBody = stripQuotedHistory(text) || null;
 
     const forwardSubject = `Re: ${subject || '(no subject)'}`;
+
+    // Display name: "Raffaella Presciani via Liffy" (prospect name in FROM)
+    const displayName = senderName && senderName !== senderEmail
+      ? `${senderName} via Liffy`
+      : `${senderEmail} via Liffy`;
 
     const forwardHtml = buildReplyForwardHtml({
       senderEmail,
@@ -517,7 +569,7 @@ async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyT
       html: forwardHtml,
       text: forwardText,
       from_email: process.env.FORWARD_FROM_EMAIL || 'notify@liffy.app',
-      from_name: process.env.FORWARD_FROM_NAME || 'Liffy Reply Notification',
+      from_name: displayName,
       reply_to: senderEmail, // Organizer can hit Reply to respond directly
       sendgrid_api_key: sendgrid_api_key,
     });
