@@ -34,6 +34,7 @@ const { getPageAnalyzer, PAGE_TYPES, PAGINATION_TYPES } = require('./pageAnalyze
 const { buildExecutionPlan } = require('./executionPlanBuilder');
 const documentTextNormalizer = require('./documentTextNormalizer');
 const { UnifiedContact } = require('../types/UnifiedContact');
+const { getLaunchOptions, getContextOptions, applyStealthScripts } = require('../../../utils/playwrightHelper');
 const {
     buildPageUrl,
     detectTotalPages,
@@ -206,8 +207,8 @@ class FlowOrchestrator {
                         console.log(`[directoryMiner] Starting for: ${job.input}`);
                         let browser = null;
                         try {
-                            browser = await chromium.launch({ headless: true });
-                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            browser = await chromium.launch(getLaunchOptions());
+                            const context = await browser.newContext(getContextOptions());
                             const page = await context.newPage();
                             const rawCards = await runDirectoryMiner(page, job.input, job.config || {});
                             await browser.close();
@@ -258,8 +259,8 @@ class FlowOrchestrator {
                         console.log(`[spaNetworkMiner] Starting for: ${job.input}`);
                         let browser = null;
                         try {
-                            browser = await chromium.launch({ headless: true });
-                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            browser = await chromium.launch(getLaunchOptions());
+                            const context = await browser.newContext(getContextOptions());
                             const page = await context.newPage();
                             const rawCards = await runSpaNetworkMiner(page, job.input, job.config || {});
                             await browser.close();
@@ -308,8 +309,8 @@ class FlowOrchestrator {
                         console.log(`[messeFrankfurtMiner] Starting for: ${job.input}`);
                         let browser = null;
                         try {
-                            browser = await chromium.launch({ headless: true });
-                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            browser = await chromium.launch(getLaunchOptions());
+                            const context = await browser.newContext(getContextOptions());
                             const page = await context.newPage();
                             const rawCards = await runMesseFrankfurtMiner(page, job.input, job.config || {});
                             await browser.close();
@@ -356,8 +357,8 @@ class FlowOrchestrator {
                         console.log(`[memberTableMiner] Starting for: ${job.input}`);
                         let browser = null;
                         try {
-                            browser = await chromium.launch({ headless: true });
-                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            browser = await chromium.launch(getLaunchOptions());
+                            const context = await browser.newContext(getContextOptions());
                             const page = await context.newPage();
                             const rawCards = await runMemberTableMiner(page, job.input, job.config || {});
                             await browser.close();
@@ -405,8 +406,8 @@ class FlowOrchestrator {
                         console.log(`[visExhibitorMiner] Starting for: ${job.input}`);
                         let browser = null;
                         try {
-                            browser = await chromium.launch({ headless: true });
-                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            browser = await chromium.launch(getLaunchOptions());
+                            const context = await browser.newContext(getContextOptions());
                             const page = await context.newPage();
                             const rawCards = await runVisExhibitorMiner(page, job.input, job.config || {});
                             await browser.close();
@@ -454,8 +455,8 @@ class FlowOrchestrator {
                         console.log(`[flipbookMiner] Starting for: ${job.input}`);
                         let browser = null;
                         try {
-                            browser = await chromium.launch({ headless: true });
-                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            browser = await chromium.launch(getLaunchOptions());
+                            const context = await browser.newContext(getContextOptions());
                             const page = await context.newPage();
                             const rawCards = await runFlipbookMiner(page, job.input, job.config || {});
                             await browser.close();
@@ -501,8 +502,8 @@ class FlowOrchestrator {
                         console.log(`[mcexpocomfortMiner] Starting for: ${job.input}`);
                         let browser = null;
                         try {
-                            browser = await chromium.launch({ headless: true });
-                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            browser = await chromium.launch(getLaunchOptions());
+                            const context = await browser.newContext(getContextOptions());
                             const page = await context.newPage();
                             const rawCards = await runMcexpocomfortMiner(page, job.input, job.config || {});
                             await browser.close();
@@ -549,7 +550,7 @@ class FlowOrchestrator {
                         let browser = null;
                         try {
                             browser = await chromiumMailto.launch({ headless: true });
-                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            const context = await browser.newContext(getContextOptions());
                             const page = await context.newPage();
                             const rawCards = await runReedExpoMailtoMiner(page, job.input, job.config || {});
                             await browser.close();
@@ -596,7 +597,7 @@ class FlowOrchestrator {
                         let browser = null;
                         try {
                             browser = await chromiumReed.launch({ headless: true });
-                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            const context = await browser.newContext(getContextOptions());
                             const page = await context.newPage();
                             const rawCards = await runReedExpoMiner(page, job.input, job.config || {});
                             await browser.close();
@@ -645,8 +646,8 @@ class FlowOrchestrator {
                         const { chromium } = require('playwright');
                         let browser = null;
                         try {
-                            browser = await chromium.launch({ headless: true });
-                            const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                            browser = await chromium.launch(getLaunchOptions());
+                            const context = await browser.newContext(getContextOptions());
                             const page = await context.newPage();
                             const rawResults = await runContactPageMiner(page, job.input, job.config || {});
                             await browser.close();
@@ -1744,8 +1745,8 @@ class FlowOrchestrator {
             const { chromium } = require('playwright');
             let browser = null;
             try {
-                browser = await chromium.launch({ headless: true });
-                const context = await browser.newContext({ ignoreHTTPSErrors: true });
+                browser = await chromium.launch(getLaunchOptions());
+                const context = await browser.newContext(getContextOptions());
 
                 let enriched = 0;
 

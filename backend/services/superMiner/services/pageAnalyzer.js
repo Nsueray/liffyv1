@@ -158,7 +158,8 @@ class PageAnalyzer {
     constructor() {
         this.cache = getHtmlCache();
         this.timeout = 15000;
-        this.userAgent = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36';
+        const { getRandomUserAgent } = require('../../../utils/playwrightHelper');
+        this.userAgent = getRandomUserAgent();
     }
     
     /**

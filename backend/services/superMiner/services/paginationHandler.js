@@ -138,7 +138,8 @@ function detectTotalPages(html, url) {
  */
 async function fetchPage(url, options = {}) {
     const timeout = options.timeout || 15000;
-    const userAgent = options.userAgent || 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36';
+    const { getRandomUserAgent } = require('../../../utils/playwrightHelper');
+    const userAgent = options.userAgent || getRandomUserAgent();
 
     try {
         const response = await axios.get(url, {

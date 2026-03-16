@@ -33,17 +33,11 @@ async function scrapeWebsite(url, options = {}) {
     };
     
     try {
-        browser = await chromium.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-dev-shm-usage']
-        });
-        
-        const context = await browser.newContext({
-            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-            ignoreHTTPSErrors: true
-        });
-        
+        const { getLaunchOptions, getContextOptions, applyStealthScripts } = require('../../../utils/playwrightHelper');
+        browser = await chromium.launch(getLaunchOptions());
+        const context = await browser.newContext(getContextOptions());
         const page = await context.newPage();
+        await applyStealthScripts(page);
         
         // Pages to check for contact info
         const contactPages = [

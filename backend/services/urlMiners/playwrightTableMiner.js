@@ -13,6 +13,7 @@
 
 const { chromium } = require('playwright');
 const { extractAllEmails } = require('./cloudflareDecoder');
+const { getLaunchOptions, getContextOptions, applyStealthScripts, navigateWithCfHandling } = require('../../utils/playwrightHelper');
 
 // Phone regex patterns for various formats
 const PHONE_PATTERNS = [
@@ -414,35 +415,23 @@ async function mine(job) {
     
     let browser;
     try {
-        browser = await chromium.launch({
-            headless: true,
-            args: ['--no-sandbox', '--disable-dev-shm-usage']
-        });
-        
-        const context = await browser.newContext({
-            userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            viewport: { width: 1280, height: 800 },
-            ignoreHTTPSErrors: true
-        });
-        
+        browser = await chromium.launch(getLaunchOptions());
+        const context = await browser.newContext(getContextOptions());
         const page = await context.newPage();
-        
-        // Navigate
-        const response = await page.goto(url, {
-            waitUntil: 'domcontentloaded',
-            timeout: 60000
-        });
-        
-        // Check for blocks
-        if (response && [403, 401, 429].includes(response.status())) {
-            console.log(`[TableMiner] HTTP ${response.status()} - might be blocked`);
+        await applyStealthScripts(page);
+
+        // Navigate with Cloudflare handling (wait & retry for JS challenges)
+        const nav = await navigateWithCfHandling(page, url, { timeout: 60000, waitUntil: 'domcontentloaded' });
+        const response = nav.response;
+
+        if (!nav.success) {
+            console.log(`[TableMiner] Navigation failed: ${nav.cfStatus}`);
             return {
                 status: 'BLOCKED',
                 emails: [],
                 contacts: [],
                 extracted_links: [],
-                http_code: response.status(),
-                meta: { source: 'tableMiner', error: `HTTP ${response.status()}` }
+                meta: { source: 'tableMiner', error: nav.cfStatus }
             };
         }
         

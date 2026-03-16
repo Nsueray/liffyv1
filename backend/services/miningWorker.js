@@ -1,5 +1,6 @@
 const { chromium } = require("playwright");
 const db = require("../db");
+const { getLaunchOptions, getContextOptions, applyStealthScripts, navigateWithCfHandling, checkBlock: checkBlockEnhanced } = require('../utils/playwrightHelper');
 
 // Shadow Mode Integration (Phase 1 - Step C)
 const { normalizeMinerOutput } = require('./normalizer');
@@ -60,44 +61,14 @@ function guessWebsiteFromEmail(emails) {
 
 /**
  * Check if the page is blocked (Cloudflare, 403, etc.)
+ * Delegates to enhanced playwrightHelper.checkBlock for Cloudflare-specific patterns.
  */
 async function checkBlock(page, response) {
-  // 1. HTTP Status
-  if (response && [401, 403, 406, 429].includes(response.status())) {
-    console.log(`🚨 BLOCK: HTTP Status ${response.status()}`);
-    return true;
+  const result = await checkBlockEnhanced(page, response);
+  if (result.blocked) {
+    console.log(`🚨 BLOCK: ${result.reason}`);
   }
-
-  // 2. Page Content Heuristics
-  const stats = await page.evaluate(() => {
-    const text = (document.body?.innerText || "").toLowerCase();
-    const title = (document.title || "").toLowerCase();
-    return {
-      text,
-      title,
-      cloudflare: text.includes("cloudflare") || document.querySelector(".cf-error-details") !== null,
-      anchors: document.querySelectorAll("a").length
-    };
-  });
-
-  if (stats.cloudflare) {
-    console.log("🚨 BLOCK: Cloudflare detected");
-    return true;
-  }
-
-  const blockKeywords = ["forbidden", "access denied", "security check", "verify you are human", "captcha"];
-  if (blockKeywords.some(kw => stats.text.includes(kw) || stats.title.includes(kw))) {
-    console.log("🚨 BLOCK: Suspicious text detected");
-    return true;
-  }
-
-  // If extremely low anchor count on a list page, it's likely a soft block or empty render
-  if (stats.anchors < 3) {
-    console.log(`🚨 BLOCK: Very low anchor count (${stats.anchors})`);
-    return true;
-  }
-
-  return false;
+  return result.blocked;
 }
 
 /**
@@ -392,18 +363,10 @@ async function runPlaywrightStrategy(job) {
   const config = job.config || {};
   console.log(`🌐 [Miner] Starting for: ${url}`);
 
-  const browser = await chromium.launch({ 
-    headless: true,
-    args: ["--no-sandbox", "--disable-dev-shm-usage"]
-  });
-  
-  const context = await browser.newContext({
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 800 },
-    ignoreHTTPSErrors: true
-  });
-
+  const browser = await chromium.launch(getLaunchOptions());
+  const context = await browser.newContext(getContextOptions());
   const page = await context.newPage();
+  await applyStealthScripts(page);
   const allResults = [];
 
   try {
