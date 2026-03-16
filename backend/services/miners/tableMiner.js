@@ -89,6 +89,28 @@ function mineWithHeaders(sheet) {
             }
         }
 
+        // Merge first_name + last_name → name
+        if (contact.first_name || contact.last_name) {
+            if (!contact.name) {
+                // No "name" column — combine first + last
+                contact.name = [contact.first_name, contact.last_name].filter(Boolean).join(' ');
+            } else {
+                // "name" column exists alongside first/last — append missing parts
+                const nameLower = (contact.name || '').toLowerCase();
+                const parts = [];
+                if (contact.first_name && !nameLower.includes(contact.first_name.toLowerCase())) {
+                    parts.push(contact.first_name);
+                }
+                parts.push(contact.name);
+                if (contact.last_name && !nameLower.includes(contact.last_name.toLowerCase())) {
+                    parts.push(contact.last_name);
+                }
+                contact.name = parts.join(' ');
+            }
+            delete contact.first_name;
+            delete contact.last_name;
+        }
+
         // Capture unmapped columns into _extra (e.g. "Lead Source")
         const extra = {};
         for (let i = 0; i < row.length; i++) {

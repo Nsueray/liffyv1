@@ -184,18 +184,21 @@ function detectHeaders(rows) {
     }
 
     // Common header keywords (multi-language)
-    // Order matters: source BEFORE name to prevent "lead source" matching "name" via "ad" substring
+    // Order matters: longer/more specific multi-word keywords first to prevent false positives.
+    // Two-pass matching: exact match first, then longest substring match.
     const headerKeywords = {
-        email: ['email', 'e-mail', 'mail', 'e-posta', 'eposta', 'correo', 'courriel', 'البريد'],
-        company: ['company', 'organization', 'organisation', 'firm', 'firma', 'şirket', 'kuruluş', 'société', 'entreprise', 'empresa', 'unternehmen', 'azienda', 'شركة', '公司'],
+        email: ['email', 'e-mail', 'email address', 'e-mail address', 'mail', 'e-posta', 'eposta', 'correo', 'courriel', 'البريد', '邮件', '电子邮件'],
+        company: ['company', 'company name', 'organization', 'organisation', 'firm', 'firma', 'şirket', 'kuruluş', 'société', 'entreprise', 'empresa', 'unternehmen', 'azienda', 'exhibitor', 'participant', 'شركة', '公司', '公司名称'],
         source: ['source', 'lead source', 'lead_source', 'kaynak', 'kanal', 'channel', 'origin', 'referral source', 'acquisition'],
-        name: ['name', 'contact', 'person', 'isim', 'ad', 'kişi', 'nom', 'prénom', 'nombre', 'nome', 'اسم', '姓名', 'full name', 'fullname', 'contact name'],
-        phone: ['phone', 'tel', 'telephone', 'mobile', 'cell', 'gsm', 'telefon', 'cep', 'téléphone', 'teléfono', 'telefono', 'هاتف', '电话'],
-        country: ['country', 'nation', 'ülke', 'pays', 'país', 'land', 'paese', 'بلد', '国家'],
-        city: ['city', 'şehir', 'il', 'ville', 'ciudad', 'stadt', 'città', 'مدينة', '城市'],
+        first_name: ['first name', 'first_name', 'firstname', 'given name', 'prénom', 'vorname', 'nombre', 'adi', 'adı'],
+        last_name: ['last name', 'last_name', 'lastname', 'surname', 'family name', 'nom de famille', 'nachname', 'apellido', 'soyad', 'soyadi', 'soyadı'],
+        name: ['name', 'contact', 'person', 'isim', 'ad', 'kişi', 'nom', 'nombre', 'nome', 'اسم', '姓名', 'full name', 'fullname', 'contact name', 'contact person', 'katılımcı', 'ad soyad', 'adı soyadı', 'ad soyadı', 'adı soyad'],
+        phone: ['phone', 'tel', 'telephone', 'mobile', 'cell', 'gsm', 'fax', 'telefon', 'cep', 'téléphone', 'teléfono', 'telefono', 'هاتف', '电话', 'телефон', 'phone number'],
+        country: ['country', 'nation', 'ülke', 'pays', 'país', 'land', 'paese', 'location', 'region', 'بلد', '国家', 'страна'],
+        city: ['city', 'şehir', 'il', 'ville', 'ciudad', 'stadt', 'città', 'town', 'مدينة', '城市', 'город'],
         address: ['address', 'adres', 'adresse', 'dirección', 'indirizzo', 'عنوان', '地址'],
-        website: ['website', 'web', 'url', 'site', 'sitio', 'موقع', '网站'],
-        title: ['title', 'position', 'role', 'job', 'pozisyon', 'ünvan', 'görev', 'titre', 'poste', 'título', 'cargo', 'وظيفة', '职位'],
+        website: ['website', 'web', 'url', 'site', 'homepage', 'www', 'sitio', 'موقع', '网站', '公司网站'],
+        title: ['title', 'position', 'role', 'job', 'job title', 'designation', 'department', 'pozisyon', 'ünvan', 'görev', 'titre', 'poste', 'título', 'cargo', 'وظيفة', '职位'],
     };
 
     // Check first 5 rows for potential headers
@@ -207,15 +210,41 @@ function detectHeaders(rows) {
         let matchCount = 0;
         const columnMap = {};
 
+        // Two-pass matching per cell: exact match first, then longest substring match
         rowLower.forEach((cell, colIndex) => {
+            if (!cell) return;
+
+            // Pass 1: exact match (highest priority)
+            let matched = false;
             for (const [field, keywords] of Object.entries(headerKeywords)) {
-                if (keywords.some(kw => cellMatchesKeyword(cell, kw))) {
-                    if (!columnMap[field]) {
+                if (columnMap[field]) continue;
+                for (const kw of keywords) {
+                    if (cell === kw) {
                         columnMap[field] = colIndex;
                         matchCount++;
+                        matched = true;
+                        break;
                     }
-                    break;
                 }
+                if (matched) break;
+            }
+            if (matched) return;
+
+            // Pass 2: longest substring match (avoids "company" matching before "company name")
+            let bestField = null;
+            let bestLen = 0;
+            for (const [field, keywords] of Object.entries(headerKeywords)) {
+                if (columnMap[field]) continue;
+                for (const kw of keywords) {
+                    if (cellMatchesKeyword(cell, kw) && kw.length > bestLen) {
+                        bestField = field;
+                        bestLen = kw.length;
+                    }
+                }
+            }
+            if (bestField) {
+                columnMap[bestField] = colIndex;
+                matchCount++;
             }
         });
 

@@ -31,7 +31,7 @@
 | A21 | Redis truncate limit kaldır (Starter plan upgrade) | P1 | ✅ DONE |
 | A22 | PDF name/company extraction — pdfContacts bypass in execution plan path (all 3 normalizer calls fixed) | P1 | ✅ DONE |
 | A23 | Node.js heap limit (NODE_OPTIONS env var) | P1 | ✅ DONE (startup log + Render manual config) |
-| A24 | Excel mining quality — column mapping improvement | P2 | TODO |
+| A24 | Excel mining quality — column mapping improvement (two-pass matching, first/last name merge, multilingual keywords) | P2 | ✅ DONE |
 | A25 | flipbookMiner v2 — dual-path extraction (column-position + isolateSegment for pre/code layouts) | P1 | ✅ DONE |
 | A26 | AI Miner Generator v2 — AXTree integration (Playwright ariaSnapshot) | P1 | ✅ DONE |
 | A27 | AI Miner Generator v2 — GenericExtractor templates (config-driven, anchor+container+bulk modes) | P1 | ✅ DONE |
