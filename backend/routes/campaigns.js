@@ -482,9 +482,9 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
       const placeholders = [];
 
       eligibleProspects.forEach((ep, idx) => {
-        const baseIndex = idx * 6;
+        const baseIndex = idx * 7;
         placeholders.push(
-          `($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3}, $${baseIndex + 4}, $${baseIndex + 5}, $${baseIndex + 6})`
+          `($${baseIndex + 1}, $${baseIndex + 2}, $${baseIndex + 3}, $${baseIndex + 4}, $${baseIndex + 5}, $${baseIndex + 6}, $${baseIndex + 7})`
         );
 
         // Build enriched meta from canonical + legacy data
@@ -509,13 +509,14 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
           ep.prospect_id,
           ep.email,
           ep.name || null,
-          JSON.stringify(enrichedMeta)
+          JSON.stringify(enrichedMeta),
+          ep.person_id || null
         );
       });
 
       const insertQuery = `
         INSERT INTO campaign_recipients
-          (organizer_id, campaign_id, prospect_id, email, name, meta)
+          (organizer_id, campaign_id, prospect_id, email, name, meta, person_id)
         VALUES ${placeholders.join(', ')}
         RETURNING id
       `;

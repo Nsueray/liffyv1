@@ -51,14 +51,15 @@ router.post('/api/campaigns/:id/recipients', authRequired, async (req, res) => {
       const email = r.email;
       const name = r.name || null;
       const meta = r.meta || null;
+      const person_id = r.person_id || null;
 
       if (!email) return;
 
-      values.push(organizer_id, campaign_id, email, name, meta);
-      const baseIndex = idx * 5;
+      values.push(organizer_id, campaign_id, email, name, meta, person_id);
+      const baseIndex = idx * 6;
 
       placeholders.push(
-        `($${baseIndex+1}, $${baseIndex+2}, $${baseIndex+3}, $${baseIndex+4}, $${baseIndex+5})`
+        `($${baseIndex+1}, $${baseIndex+2}, $${baseIndex+3}, $${baseIndex+4}, $${baseIndex+5}, $${baseIndex+6})`
       );
     });
 
@@ -68,7 +69,7 @@ router.post('/api/campaigns/:id/recipients', authRequired, async (req, res) => {
 
     const query = `
       INSERT INTO campaign_recipients
-      (organizer_id, campaign_id, email, name, meta)
+      (organizer_id, campaign_id, email, name, meta, person_id)
       VALUES ${placeholders.join(",")}
       RETURNING *;
     `;
