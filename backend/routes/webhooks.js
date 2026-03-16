@@ -146,7 +146,7 @@ async function processWebhookEvent(event) {
       await db.query(
         `UPDATE campaign_recipients
          SET status = 'delivered', delivered_at = $2
-         WHERE id = $1 AND status = 'sent'`,
+         WHERE id = $1 AND status = 'sent' AND status NOT IN ('replied', 'unsubscribed')`,
         [recipient.id, eventTime]
       );
       break;
@@ -154,7 +154,7 @@ async function processWebhookEvent(event) {
     case 'open':
       await db.query(
         `UPDATE campaign_recipients
-         SET status = 'opened',
+         SET status = CASE WHEN status IN ('replied', 'unsubscribed') THEN status ELSE 'opened' END,
              opened_at = COALESCE(opened_at, $2),
              open_count = COALESCE(open_count, 0) + 1
          WHERE id = $1`,
@@ -165,7 +165,7 @@ async function processWebhookEvent(event) {
     case 'click':
       await db.query(
         `UPDATE campaign_recipients
-         SET status = 'clicked',
+         SET status = CASE WHEN status IN ('replied', 'unsubscribed') THEN status ELSE 'clicked' END,
              clicked_at = COALESCE(clicked_at, $2),
              click_count = COALESCE(click_count, 0) + 1
          WHERE id = $1`,
@@ -422,7 +422,7 @@ function extractName(fromField) {
  * Build HTML body for the reply forward wrapper email.
  * Clean, professional notification — no raw headers exposed.
  */
-function buildReplyForwardHtml({ senderEmail, senderName, campaignName, replySubject, replyBody, replyTime }) {
+function buildReplyForwardHtml({ senderEmail, senderName, campaignName, replyBody, replyTime }) {
   const escapedBody = (replyBody || '(no content)')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -431,38 +431,14 @@ function buildReplyForwardHtml({ senderEmail, senderName, campaignName, replySub
 
   return `
 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
-  <div style="background: #f0f9ff; border-left: 4px solid #2563eb; padding: 16px 20px; margin-bottom: 20px; border-radius: 0 8px 8px 0;">
-    <div style="font-size: 16px; font-weight: 600; color: #1e40af; margin-bottom: 4px;">New Reply Received</div>
-    <div style="font-size: 13px; color: #64748b;">You can reply directly to this email to respond.</div>
+  <div style="font-size: 13px; color: #64748b; margin-bottom: 16px;">
+    <strong>From:</strong> ${senderName || senderEmail} &lt;${senderEmail}&gt;<br>
+    <strong>Campaign:</strong> ${campaignName || '(unknown)'}<br>
+    <strong>Date:</strong> ${replyTime.toISOString().replace('T', ' ').substring(0, 19)} UTC
   </div>
 
-  <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px;">
-    <tr>
-      <td style="padding: 6px 12px; color: #64748b; width: 100px;">From</td>
-      <td style="padding: 6px 12px; font-weight: 500;">${senderName || senderEmail} &lt;${senderEmail}&gt;</td>
-    </tr>
-    <tr>
-      <td style="padding: 6px 12px; color: #64748b;">Campaign</td>
-      <td style="padding: 6px 12px;">${campaignName || '(unknown)'}</td>
-    </tr>
-    <tr>
-      <td style="padding: 6px 12px; color: #64748b;">Subject</td>
-      <td style="padding: 6px 12px;">${replySubject || '(no subject)'}</td>
-    </tr>
-    <tr>
-      <td style="padding: 6px 12px; color: #64748b;">Received</td>
-      <td style="padding: 6px 12px;">${replyTime.toISOString().replace('T', ' ').substring(0, 19)} UTC</td>
-    </tr>
-  </table>
-
-  <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;">
-
-  <div style="background: #fafafa; border-radius: 8px; padding: 16px 20px; font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;">
+  <div style="font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;">
 ${escapedBody}
-  </div>
-
-  <div style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #e2e8f0; font-size: 12px; color: #94a3b8; text-align: center;">
-    Forwarded by Liffy &mdash; <a href="https://liffy.app" style="color: #64748b;">liffy.app</a>
   </div>
 </div>`;
 }
@@ -515,32 +491,24 @@ async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyT
 
     const senderEmail = extractEmail(from);
     const senderName = extractName(from);
-    const replyBody = text ? text.substring(0, 500) : null;
+    const replyBody = text || null;
 
-    const forwardSubject = `Re: ${subject || '(no subject)'} — Reply from ${senderName || senderEmail || 'unknown'}`;
+    const forwardSubject = `Re: ${subject || '(no subject)'}`;
 
     const forwardHtml = buildReplyForwardHtml({
       senderEmail,
       senderName,
       campaignName: campaign_name,
-      replySubject: subject,
       replyBody,
       replyTime,
     });
 
     const forwardText = [
-      `New Reply Received`,
       `From: ${senderName || senderEmail} <${senderEmail}>`,
       `Campaign: ${campaign_name || '(unknown)'}`,
-      `Subject: ${subject || '(no subject)'}`,
-      `Received: ${replyTime.toISOString().replace('T', ' ').substring(0, 19)} UTC`,
-      ``,
-      `---`,
+      `Date: ${replyTime.toISOString().replace('T', ' ').substring(0, 19)} UTC`,
       ``,
       replyBody || '(no content)',
-      ``,
-      `---`,
-      `Forwarded by Liffy — liffy.app`,
     ].join('\n');
 
     const result = await sendEmail({

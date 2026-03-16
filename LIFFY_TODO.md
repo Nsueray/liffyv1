@@ -101,6 +101,8 @@
 | G6 | Unsubscribe tracking — unsubscribe olanları UI'da göster | P1 | ✅ DONE |
 | G7 | Unsubscribe listesi sayfası — kim, ne zaman, hangi campaign'den unsubscribe oldu | P2 | ✅ DONE |
 | G8 | Prospect conversion — reply detected → lead becomes prospect | P2 | ✅ DONE |
+| G9 | Reply forward template sadeleştirme — banner/footer kaldır, truncation kaldır, clean subject | P1 | ✅ DONE |
+| G10 | Replied status overwrite bug fix — open/click event'leri replied/unsubscribed status'u koruyor | P1 | ✅ DONE |
 
 ### Context
 
@@ -142,3 +144,13 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | H3 | Campaign scheduling — gün ve saat seçerek otomatik gönderim | P2 | ✅ DONE |
 | H4 | Mining Jobs Strategy kolonu — miner_used, mining_mode, flow2_status detaylı gösterim | P1 | ✅ DONE |
 | H5 | Excel/CSV Export buttons — mining results, contacts, list detail pages (commit: 72d175f liffy-ui) | P1 | ✅ DONE |
+
+## I. PHASE 6 — CONVERSATION LAYER (FUTURE)
+
+| # | Task | Priority | Status |
+|---|------|----------|--------|
+| I1 | Message storage — reply body'leri DB'de persist et (messages/reply_bodies table) | P2 | FUTURE |
+| I2 | Thread view — campaign email + reply'ları kronolojik conversation timeline'da göster | P2 | FUTURE |
+| I3 | Reply composer — UI'dan prospect'e reply yazıp gönder (send-on-behalf via SendGrid) | P2 | FUTURE |
+| I4 | Inbox page — tüm reply'ları tek sayfada göster, conversation navigate | P2 | FUTURE |
+| I5 | Email threading headers — Message-ID, In-Reply-To, References (RFC 5322 threading) | P3 | FUTURE |
