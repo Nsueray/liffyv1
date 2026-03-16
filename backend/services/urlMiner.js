@@ -367,11 +367,11 @@ async function runUrlMiningJob(jobId, organizerId) {
       prospectIds.forEach((pid, i) => {
         const idx = i * 3;
         values.push(organizerId, listId, pid);
-        placeholders.push(`($${idx+1}, $${idx+2}, $${idx+3})`);
+        placeholders.push(`($${idx+1}, $${idx+2}, $${idx+3}, (SELECT pn.id FROM persons pn JOIN prospects pr ON LOWER(pn.email) = LOWER(pr.email) AND pn.organizer_id = $${idx+1} WHERE pr.id = $${idx+3} LIMIT 1))`);
       });
 
       await client.query(
-        `INSERT INTO list_members (organizer_id, list_id, prospect_id)
+        `INSERT INTO list_members (organizer_id, list_id, prospect_id, person_id)
          VALUES ${placeholders.join(",")}
          ON CONFLICT DO NOTHING`,
         values

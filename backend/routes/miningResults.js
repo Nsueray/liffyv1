@@ -588,6 +588,14 @@ async function processImportBatch(client, batchRows, organizerId, jobId, tagsArr
       personsUpserted++;
       const personId = personResult.rows[0].id;
 
+      // Dual-write: set person_id on list_members (persons UPSERT happens after list_members INSERT)
+      if (listId && personId) {
+        await client.query(
+          `UPDATE list_members SET person_id = $1 WHERE list_id = $2 AND prospect_id = $3 AND person_id IS NULL`,
+          [personId, listId, prospectId]
+        );
+      }
+
       // Canonical: affiliations table UPSERT (skip email addresses and pipe-separated junk)
       if (mr.company_name && !mr.company_name.includes('@') && !mr.company_name.includes('|')) {
         await client.query(

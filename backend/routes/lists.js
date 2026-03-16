@@ -262,6 +262,14 @@ async function processCSVRowsInBackground(validRows, organizerId, listId, tags) 
             personsUpserted++;
             const personId = personResult.rows[0].id;
 
+            // Dual-write: set person_id on list_members
+            if (personId && prospectId) {
+              await client.query(
+                `UPDATE list_members SET person_id = $1 WHERE list_id = $2 AND prospect_id = $3 AND person_id IS NULL`,
+                [personId, listId, prospectId]
+              );
+            }
+
             // Canonical: affiliations table UPSERT (skip email addresses and pipe-separated junk)
             if (row.company && !row.company.includes('@') && !row.company.includes('|')) {
               await client.query(
@@ -519,6 +527,14 @@ router.post('/upload-csv', authRequired, upload.single('file'), async (req, res)
           );
           personsUpserted++;
           const personId = personResult.rows[0].id;
+
+          // Dual-write: set person_id on list_members
+          if (personId && prospectId) {
+            await client.query(
+              `UPDATE list_members SET person_id = $1 WHERE list_id = $2 AND prospect_id = $3 AND person_id IS NULL`,
+              [personId, newList.id, prospectId]
+            );
+          }
 
           // Canonical: affiliations table UPSERT (skip email addresses and pipe-separated junk)
           if (row.company && !row.company.includes('@') && !row.company.includes('|')) {
@@ -837,8 +853,10 @@ router.post('/create-with-filters', authRequired, async (req, res) => {
     });
 
     const insertQuery = `
-      INSERT INTO list_members (list_id, prospect_id, organizer_id)
-      SELECT $${paramIndex}, id, $1 FROM prospects ${whereClause}
+      INSERT INTO list_members (list_id, prospect_id, organizer_id, person_id)
+      SELECT $${paramIndex}, id, $1,
+        (SELECT pn.id FROM persons pn WHERE LOWER(pn.email) = LOWER(prospects.email) AND pn.organizer_id = $1 LIMIT 1)
+      FROM prospects ${whereClause}
       ON CONFLICT (list_id, prospect_id) DO NOTHING
     `;
 
@@ -1211,10 +1229,10 @@ router.post('/:id/add-manual', authRequired, async (req, res) => {
 
     // Add to list (ignore if already exists)
     await db.query(
-      `INSERT INTO list_members (list_id, prospect_id, organizer_id)
-       VALUES ($1, $2, $3)
+      `INSERT INTO list_members (list_id, prospect_id, organizer_id, person_id)
+       VALUES ($1, $2, $3, (SELECT id FROM persons WHERE LOWER(email) = $4 AND organizer_id = $3 LIMIT 1))
        ON CONFLICT (list_id, prospect_id) DO NOTHING`,
-      [listId, prospectId, organizerId]
+      [listId, prospectId, organizerId, trimmedEmail]
     );
 
     res.status(201).json({ success: true, prospect_id: prospectId });
@@ -1290,10 +1308,10 @@ router.post('/:id/import-bulk', authRequired, async (req, res) => {
 
         // Add to list
         await db.query(
-          `INSERT INTO list_members (list_id, prospect_id, organizer_id)
-           VALUES ($1, $2, $3)
+          `INSERT INTO list_members (list_id, prospect_id, organizer_id, person_id)
+           VALUES ($1, $2, $3, (SELECT id FROM persons WHERE LOWER(email) = $4 AND organizer_id = $3 LIMIT 1))
            ON CONFLICT (list_id, prospect_id) DO NOTHING`,
-          [listId, prospectId, organizerId]
+          [listId, prospectId, organizerId, trimmedEmail]
         );
 
         imported++;

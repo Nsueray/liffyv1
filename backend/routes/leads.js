@@ -351,8 +351,8 @@ router.post('/import', authRequired, async (req, res) => {
         // Add prospects to list_members
         for (const prospectId of importedProspectIds) {
           await client.query(`
-            INSERT INTO list_members (organizer_id, list_id, prospect_id, created_at)
-            VALUES ($1, $2, $3, NOW())
+            INSERT INTO list_members (organizer_id, list_id, prospect_id, person_id, created_at)
+            VALUES ($1, $2, $3, (SELECT pn.id FROM persons pn JOIN prospects pr ON LOWER(pn.email) = LOWER(pr.email) AND pn.organizer_id = $1 WHERE pr.id = $3 LIMIT 1), NOW())
             ON CONFLICT DO NOTHING
           `, [organizerId, createdList.id, prospectId]);
         }
