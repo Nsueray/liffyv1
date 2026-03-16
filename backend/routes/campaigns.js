@@ -358,9 +358,9 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
     }
 
     const prospectsQuery = `
-      SELECT DISTINCT ON (p.id)
-        p.id AS prospect_id,
-        p.email,
+      SELECT DISTINCT ON (pn.id)
+        lm.prospect_id AS prospect_id,
+        pn.email,
         COALESCE(CONCAT_WS(' ', pn.first_name, pn.last_name), p.name) AS name,
         COALESCE(aff.company_name, p.company) AS company,
         COALESCE(aff.country_code, p.country) AS country,
@@ -376,31 +376,30 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
         aff.website AS affiliation_website,
         aff.phone AS affiliation_phone
       FROM list_members lm
-      INNER JOIN prospects p ON p.id = lm.prospect_id
-      LEFT JOIN persons pn ON LOWER(pn.email) = LOWER(p.email) AND pn.organizer_id = $2
+      INNER JOIN persons pn ON pn.id = lm.person_id
+      LEFT JOIN prospects p ON p.id = lm.prospect_id
       LEFT JOIN LATERAL (
         SELECT company_name, position, country_code, city, website, phone
         FROM affiliations
         WHERE person_id = pn.id AND organizer_id = $2
         ORDER BY created_at DESC LIMIT 1
-      ) aff ON pn.id IS NOT NULL
+      ) aff ON true
       WHERE lm.list_id = $1
         AND lm.organizer_id = $2
-        AND p.organizer_id = $2
-        AND p.email IS NOT NULL
-        AND TRIM(p.email) != ''
+        AND pn.email IS NOT NULL
+        AND TRIM(pn.email) != ''
         AND ${verificationFilter}
         AND NOT EXISTS (
           SELECT 1 FROM unsubscribes u
           WHERE u.organizer_id = $2
-            AND LOWER(u.email) = LOWER(p.email)
+            AND LOWER(u.email) = LOWER(pn.email)
         )
         AND NOT EXISTS (
           SELECT 1 FROM campaign_recipients cr
           WHERE cr.campaign_id = $3
-            AND cr.prospect_id = p.id
+            AND cr.prospect_id = lm.prospect_id
         )
-      ORDER BY p.id, p.created_at ASC
+      ORDER BY pn.id, pn.created_at ASC
     `;
 
     const prospectsRes = await client.query(prospectsQuery, [
@@ -421,8 +420,8 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
     const invalidCountRes = await client.query(
       `SELECT COUNT(*) AS count
        FROM list_members lm
-       INNER JOIN prospects p ON p.id = lm.prospect_id
-       LEFT JOIN persons pn ON LOWER(pn.email) = LOWER(p.email) AND pn.organizer_id = $2
+       INNER JOIN persons pn ON pn.id = lm.person_id
+       LEFT JOIN prospects p ON p.id = lm.prospect_id
        WHERE lm.list_id = $1
          AND lm.organizer_id = $2
          AND COALESCE(pn.verification_status, p.verification_status, 'unknown') = 'invalid'`,
@@ -435,8 +434,8 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
       const riskyCountRes = await client.query(
         `SELECT COUNT(*) AS count
          FROM list_members lm
-         INNER JOIN prospects p ON p.id = lm.prospect_id
-         LEFT JOIN persons pn ON LOWER(pn.email) = LOWER(p.email) AND pn.organizer_id = $2
+         INNER JOIN persons pn ON pn.id = lm.person_id
+         LEFT JOIN prospects p ON p.id = lm.prospect_id
          WHERE lm.list_id = $1
            AND lm.organizer_id = $2
            AND COALESCE(pn.verification_status, p.verification_status, 'unknown') = 'risky'`,
@@ -450,8 +449,8 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
       const unverifiedCountRes = await client.query(
         `SELECT COUNT(*) AS count
          FROM list_members lm
-         INNER JOIN prospects p ON p.id = lm.prospect_id
-         LEFT JOIN persons pn ON LOWER(pn.email) = LOWER(p.email) AND pn.organizer_id = $2
+         INNER JOIN persons pn ON pn.id = lm.person_id
+         LEFT JOIN prospects p ON p.id = lm.prospect_id
          WHERE lm.list_id = $1
            AND lm.organizer_id = $2
            AND COALESCE(pn.verification_status, p.verification_status, 'unknown') NOT IN ('valid', 'catchall', 'invalid')`,
@@ -463,13 +462,13 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
     const unsubCountRes = await client.query(
       `SELECT COUNT(*) AS count
        FROM list_members lm
-       INNER JOIN prospects p ON p.id = lm.prospect_id
+       INNER JOIN persons pn ON pn.id = lm.person_id
        WHERE lm.list_id = $1
          AND lm.organizer_id = $2
          AND EXISTS (
            SELECT 1 FROM unsubscribes u
            WHERE u.organizer_id = $2
-             AND LOWER(u.email) = LOWER(p.email)
+             AND LOWER(u.email) = LOWER(pn.email)
          )`,
       [campaign.list_id, organizerId]
     );

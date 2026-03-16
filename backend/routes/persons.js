@@ -274,7 +274,7 @@ router.get('/export', authRequired, async (req, res) => {
           SELECT 1 FROM prospect_intents pi WHERE pi.person_id = p.id AND pi.organizer_id = p.organizer_id
         ) AS is_prospect,
         (SELECT pi2.intent_type FROM prospect_intents pi2 WHERE pi2.person_id = p.id AND pi2.organizer_id = p.organizer_id ORDER BY pi2.created_at DESC LIMIT 1) AS latest_intent,
-        (SELECT STRING_AGG(DISTINCT l.name, ', ') FROM list_members lm JOIN lists l ON l.id = lm.list_id JOIN prospects pr ON pr.id = lm.prospect_id WHERE LOWER(pr.email) = LOWER(p.email) AND l.organizer_id = p.organizer_id) AS lists
+        (SELECT STRING_AGG(DISTINCT l.name, ', ') FROM list_members lm JOIN lists l ON l.id = lm.list_id WHERE lm.person_id = p.id AND l.organizer_id = p.organizer_id) AS lists
       FROM persons p
       LEFT JOIN LATERAL (
         SELECT company_name, position, country_code, city, website, phone

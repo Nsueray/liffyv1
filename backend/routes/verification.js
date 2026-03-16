@@ -128,13 +128,13 @@ router.post('/verify-list', authRequired, async (req, res) => {
     let emailList = [];
 
     if (list_id) {
-      // Fetch emails from list_members JOIN prospects
+      // Fetch emails from list_members via person_id
       const membersRes = await db.query(
-        `SELECT DISTINCT p.email
+        `SELECT DISTINCT pn.email
          FROM list_members lm
-         JOIN prospects p ON p.id = lm.prospect_id
+         JOIN persons pn ON pn.id = lm.person_id
          WHERE lm.list_id = $1 AND lm.organizer_id = $2
-           AND p.email IS NOT NULL AND TRIM(p.email) != ''`,
+           AND pn.email IS NOT NULL AND TRIM(pn.email) != ''`,
         [list_id, organizer_id]
       );
       emailList = membersRes.rows.map(r => r.email);
@@ -201,9 +201,9 @@ router.get('/queue-status', authRequired, async (req, res) => {
         FROM verification_queue vq
         WHERE vq.organizer_id = $1
           AND LOWER(vq.email) IN (
-            SELECT LOWER(p.email)
+            SELECT LOWER(pn.email)
             FROM list_members lm
-            JOIN prospects p ON p.id = lm.prospect_id
+            JOIN persons pn ON pn.id = lm.person_id
             WHERE lm.list_id = $2 AND lm.organizer_id = $1
           )
         GROUP BY vq.status`;

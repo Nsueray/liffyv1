@@ -71,13 +71,12 @@ router.post('/push-list', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'module must be Leads or Contacts' });
     }
 
-    // Resolve list members → person IDs via email join
+    // Resolve list members → person IDs via person_id FK
     const membersRes = await db.query(
-      `SELECT DISTINCT p.id AS person_id
+      `SELECT DISTINCT lm.person_id
        FROM list_members lm
-       JOIN prospects pr ON pr.id = lm.prospect_id AND pr.organizer_id = $1
-       JOIN persons p ON LOWER(p.email) = LOWER(pr.email) AND p.organizer_id = $1
-       WHERE lm.list_id = $2 AND lm.organizer_id = $1`,
+       WHERE lm.list_id = $2 AND lm.organizer_id = $1
+         AND lm.person_id IS NOT NULL`,
       [organizer_id, list_id]
     );
 

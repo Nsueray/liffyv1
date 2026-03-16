@@ -72,7 +72,7 @@
 | # | Task | Priority | Status |
 |---|------|----------|--------|
 | E1 | prospects table dual-write removal | P2 | DEFER — cascading dependency, ayrı oturum gerekli |
-| E2 | list_members.person_id dual-column (migration 029) | P2 | IN PROGRESS — dual-column |
+| E2 | list_members.person_id (migration 029) — queries migrated | P2 | ✅ DONE |
 | E3 | campaign_recipients.person_id (migration 028) | P2 | ✅ DONE |
 | E4 | email_logs table archive/drop | P3 | ✅ DONE |
 
