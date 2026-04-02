@@ -584,10 +584,36 @@ Body:
 - JWT token (same as web UI) — `Authorization: Bearer <jwt>`
 - Or `MINING_API_TOKEN` env var (also supports legacy `MANUAL_MINER_TOKEN`)
 
+### Global Email Pollution Detection
+
+Trade fair sites have organizer emails (e.g. `info@schall-messen.de`) in page header/footer/sidebar. Since `extractEmails()` runs page-wide regex on each exhibitor detail page, these emails get assigned to every exhibitor.
+
+**Fix:** `deduplicateGlobalEmails()` — frequency-based post-processing filter.
+
+- Runs after all exhibitors are mined, before results are posted/saved
+- Counts email frequency across all results
+- Emails appearing in ≥ 30% of exhibitors = pollution → removed
+- Skipped if < 5 total results (small sets, false positive risk)
+- Removed emails logged to console (No Silent Data Loss)
+
+**Example — blechexpo-messe.de (181 exhibitors):**
+```
+🧹 GLOBAL EMAIL POLLUTION DETECTED
+   Threshold: appears in >= 55/181 exhibitors (30%)
+   ❌ knauer@schall-messen.de — found in 181 exhibitors (removed)
+   ❌ info@schall-messen.de — found in 181 exhibitors (removed)
+   🧹 Removed 362 polluted email entries across 181 exhibitors
+```
+
+**Before:** 612 total emails (every exhibitor had 2 extra organizer emails)
+**After:** 250 clean emails (only exhibitor-specific emails remain)
+
+**Code:** `mine.js:293` (`deduplicateGlobalEmails` function), called at `mine.js:1508`
+
 ### Local Miner Repo
 - **Repo:** `liffy-local-miner/` (separate repo, NOT modified by backend changes)
 - **Entry:** `mine.js` — CLI tool with Playwright
-- **Supports:** pagination, checkpoint/resume, test mode, multi-strategy link extraction
+- **Supports:** pagination, checkpoint/resume, test mode, multi-strategy link extraction, global email pollution detection
 
 ---
 

@@ -96,6 +96,43 @@ See [MINER_GUIDE.md](./MINER_GUIDE.md) section 7 for full local miner documentat
 
 ---
 
+## Local Miner — Global Email Pollution Detection
+
+Trade fair sites have organizer emails in header/footer/sidebar that appear on every exhibitor detail page. The local miner's `extractEmails()` uses page-wide regex, causing these emails to be assigned to every exhibitor.
+
+**Solution:** Frequency-based post-processing filter (`deduplicateGlobalEmails()`).
+
+**How it works:**
+```
+allResults collected (all exhibitors mined)
+  → Count email frequency across all results
+  → Threshold: ceil(totalResults * 0.3) — email in ≥30% of exhibitors = pollution
+  → Skip if < 5 results (avoid false positives on small sets)
+  → Remove polluted emails from each result
+  → Log removed emails to console (No Silent Data Loss)
+  → Clean results sent to postResults() + saveResultsLocally()
+```
+
+**Console output format:**
+```
+🧹 GLOBAL EMAIL POLLUTION DETECTED
+   Threshold: appears in >= 55/181 exhibitors (30%)
+   ❌ knauer@schall-messen.de — found in 181 exhibitors (removed)
+   ❌ info@schall-messen.de — found in 181 exhibitors (removed)
+   🧹 Removed 362 polluted email entries across 181 exhibitors
+```
+
+**Files:**
+- `liffy-local-miner/mine.js:293-339` — `deduplicateGlobalEmails()` function
+- `liffy-local-miner/mine.js:1508-1509` — call site (after allResults, before statistics)
+
+**Design decisions:**
+- Generic: works for any fair site, no domain blacklists needed
+- Post-processing only: does not modify extraction logic, existing sites unaffected
+- Threshold 30%: low enough to catch organizer emails (appear in ~100%), high enough to avoid false positives on shared exhibitor emails
+
+---
+
 ## File Mining Pipeline (Excel/CSV/PDF/Word)
 
 File mining uses `fileOrchestrator.js` (v2.0) — a multi-phase pipeline:

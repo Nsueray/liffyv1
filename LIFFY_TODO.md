@@ -39,6 +39,7 @@
 | A29 | AI Miner Generator v2 — Multi-step config (listing + detail AXTree) — expat.com 7 contact best case | P1 | ✅ DONE |
 | A30 | AI Miner Generator v2 — Test sonuçları: glmis ✅ 11, expat.com ✅ 7 (best), performans 24dk→2dk. Kalan sorun: Claude non-deterministic (anchor vs container). | P1 | PARKED |
 | A31 | AI Miner Generator v2 — Claude tutarlılık sorunu: aynı AXTree'ye TYPE 1/TYPE 2, anchor/container farklı dönüyor. Prompt veya post-processing iyileştirmesi gerekli. | P2 | TODO |
+| A32 | Local miner — global email pollution detection (frequency-based dedup, 30% threshold) | P1 | ✅ DONE |
 
 ## B. UI TASKS
 
