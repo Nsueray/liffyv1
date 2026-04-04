@@ -289,7 +289,8 @@ Inbound email → validate URL path secret → validate envelope domain (@reply.
 - If `INBOUND_WEBHOOK_SECRET` env var not set, ALL requests rejected (strict mode)
 
 **VERP generation** (campaignSend.js + worker.js):
-- Both send paths generate VERP reply-to: `c-${id.slice(0,8)}-r-${id.slice(0,8)}@reply.liffy.app`
+- Both send paths generate VERP reply-to: `{ email: "c-{8hex}-r-{8hex}@reply.liffy.app", name: sender.from_name }`
+- Object format with display name — recipient sees "Elif AY" instead of cryptic VERP address (commit: aa1ce0f)
 - Overrides `sender_identity.reply_to` — all campaign emails use VERP reply-to
 
 **VERP parser** (`parseVerpAddress()`):
@@ -305,7 +306,7 @@ WHERE LEFT(cr.campaign_id::text, 8) = $1 AND LEFT(cr.id::text, 8) = $2 LIMIT 2
 - If >1 match: logs collision, refuses to process (safety guard)
 
 **Reply forwarding** (`forwardReplyToOrganizer()`):
-- Wrapper email sent FROM `notify@liffy.app` (or `FORWARD_FROM_EMAIL` env var) TO organizer
+- Wrapper email sent FROM `"Reply: {sender_name}" <notify@liffy.app>` TO organizer (commit: aa1ce0f)
 - Forward target: `sender_identity.reply_to || sender_identity.from_email`
 - Reply-to set to original sender email — organizer can reply directly
 - Uses organizer's own SendGrid API key (multi-tenant safe)
@@ -325,10 +326,7 @@ WHERE LEFT(cr.campaign_id::text, 8) = $1 AND LEFT(cr.id::text, 8) = $2 LIMIT 2
 | `FORWARD_FROM_EMAIL` | No | FROM address for forwarded replies (default: `notify@liffy.app`) |
 | `FORWARD_FROM_NAME` | No | FROM name for forwarded replies (default: `Liffy Reply Notification`) |
 
-**Remaining:**
-- Reply count in campaign analytics UI
-
-**Commits:** e1e05f8 (Stage 1), 03e7a0d (VERP + forwarding + collision guard), 878a28a (URL path secret), bf88167 (multer multipart fix)
+**Commits:** e1e05f8 (Stage 1), 03e7a0d (VERP + forwarding + collision guard), 878a28a (URL path secret), bf88167 (multer multipart fix), aa1ce0f (VERP display name + forward FROM)
 
 ---
 

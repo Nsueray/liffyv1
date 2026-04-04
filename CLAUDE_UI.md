@@ -54,6 +54,7 @@
 - **Mining Jobs "Needs Manual" Banner** — Job detail + results pages show orange banner when `status=needs_manual`: "This site could not be mined from cloud servers." Detail page status label fixed: "Needs_manual" → "Needs Manual". (commit: cb6c0f7 in liffy-ui)
 - **/api/stats 401 Fix** — Sidebar stats polling returned 401 because `/api/stats` had no local API route proxy (relied on `next.config.ts` rewrite which doesn't forward auth headers). Added `app/api/stats/route.ts` proxy matching other endpoints' pattern. (commit: 4694792 in liffy-ui)
 - **Sidebar Stats Polling 401 Stop** — When `/api/stats` returns 401 (expired token), polling now stops instead of retrying every 30s and flooding the console. (commit: 919ac26 in liffy-ui)
+- **Campaign Reply UX** — VERP reply-to now includes sender display name (`{ email: "c-xxx@reply.liffy.app", name: "Elif AY" }`) so recipients see the sender name instead of cryptic VERP address. Forward email FROM changed from "Raffaella via Liffy" to "Reply: Raffaella" for clearer inbox appearance. (commit: aa1ce0f)
 
 ---
 
@@ -89,6 +90,7 @@ See [LIFFY_TODO.md](./LIFFY_TODO.md) for full task tracking.
 - ~~**Template editor HTML escaping**~~ — FIXED: pasted raw HTML was escaped by contentEditable (`<table>` → `&lt;table&gt;`). Added Visual/HTML mode toggle — HTML mode uses plain textarea. (commit: 499457a in liffy-ui)
 - ~~**Campaign analytics Sent=0**~~ — FIXED: worker.js was not recording `sent` events to `campaign_events`. Added `recordSentEvent()` to worker + hybrid sent count fallback in analytics endpoint. (commits: 0ad776a, 9c29d73)
 - ~~**PDF mining 0 results from UI jobs**~~ — FIXED: documentMiner returned `pdfContacts` but execution plan path in flowOrchestrator overwrote them by calling `documentTextNormalizer.normalize()`. All 3 execution plan normalizer paths now check for existing contacts before applying text normalizer. (commit: 82fb4ea)
+- ~~**/api/stats 401 Unauthorized**~~ — FIXED: `/api/stats` had no local API route proxy (relied on `next.config.ts` rewrite which doesn't forward auth headers). Added `app/api/stats/route.ts`. Sidebar polling also stops on 401 to prevent console spam. (commits: 4694792, 919ac26 in liffy-ui)
 
 ### Open
 - **AI Miner Generator Phase 0** — Lab mode only. Phase 1 (multi-page crawl, production integration) not yet started. See CLAUDE_FEATURES.md for details.

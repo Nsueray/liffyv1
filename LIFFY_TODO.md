@@ -107,6 +107,7 @@
 | G8 | Prospect conversion — reply detected → lead becomes prospect | P2 | ✅ DONE |
 | G9 | Reply forward template sadeleştirme — banner/footer kaldır, truncation kaldır, clean subject | P1 | ✅ DONE |
 | G10 | Replied status overwrite bug fix — open/click event'leri replied/unsubscribed status'u koruyor | P1 | ✅ DONE |
+| G11 | Reply UX — VERP display name (sender name in reply-to) + forward FROM format ("Reply: Name") | P1 | ✅ DONE |
 
 ### Context
 
@@ -114,9 +115,9 @@
 - ✅ Click tracking works (campaign_events, event_type='click')
 - ✅ Open tracking works (campaign_events, event_type='open')
 - ✅ Reply detection backend COMPLETE — all stages implemented (Stages 1-3)
-- ✅ VERP reply-to active in both campaignSend.js and worker.js (short format: 8 hex chars)
+- ✅ VERP reply-to active in both campaignSend.js and worker.js (short format: 8 hex chars, with sender display name)
 - ✅ Inbound webhook with URL path secret + envelope domain validation + multer multipart
-- ✅ Wrapper forward to organizer inbox (FROM notify@liffy.app, reply-to = original sender)
+- ✅ Wrapper forward to organizer inbox (FROM "Reply: {name}" notify@liffy.app, reply-to = original sender)
 - ✅ Collision guard on VERP prefix lookup (LIMIT 2 + >1 match = skip)
 - ✅ DNS + SendGrid config DONE — reply.liffy.app MX + Inbound Parse URL + env var configured
 - ✅ Unsubscribe tracking UI — /campaigns/unsubscribes page with stats, search, source filter, campaign attribution
