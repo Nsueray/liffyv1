@@ -423,7 +423,7 @@ if (shouldUseSuperMiner(job)) {
   // Block detection for unified engine: check actual DB results
   // smResult.blockDetected covers BLOCKED/FAILED miner statuses
   // Also check for 0 results in DB (covers empty pages, Cloudflare, etc.)
-  if (smResult?.blockDetected || smResult?.status === 'FAILED' || smResult?.flow1?.contactCount === 0) {
+  if (smResult?.blockDetected || smResult?.status === 'FAILED' || smResult?.flow1?.contactCount <= 2) {
     const countRes = await db.query(
       'SELECT COUNT(*) as count FROM mining_results WHERE job_id = $1',
       [job.id]
