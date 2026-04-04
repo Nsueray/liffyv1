@@ -133,6 +133,77 @@ allResults collected (all exhibitors mined)
 
 ---
 
+## Local Miner — ExpoPlatform Miner
+
+Specialized miner for ExpoPlatform-based trade fair sites (digital.agritechnica.com, etc.).
+
+**Two-phase architecture:**
+```
+Phase 1: HTTP POST /api/v1/search/exhibitors (no Playwright needed)
+  → limit=60 per page (server cap), paginate all pages
+  → Collect: slug, name, country, city, hall/stand from API response
+  → Response format: { code, data: { total, list: [...] } }
+
+Phase 2: Playwright detail pages /newfront/exhibitor/{slug}
+  → waitForSelector('a[href^="mailto:"]', 10s) → fallback 'COMPANY EMAIL' (5s)
+  → DOM extraction: mailto links, website (www.* text links), phone
+  → Hall/stand via [data-styleid="exhibitorHallBlock"] attribute
+  → 1.5s polite delay between pages
+```
+
+**Site detection:** URL contains `/newfront/marketplace/exhibitors` or `expoplatform`
+
+**Config:** `max_pages` (API page limit), `max_details` (detail page limit), `delay_ms` (default 1500)
+
+**Files:**
+- `liffy-local-miner/miners/expoPlatformMiner.js` — standalone module + CLI runner
+- `liffy-local-miner/mine.js:3` — require + `isExpoPlatformUrl()` routing in `runMiningTest()`
+
+**Test results:** digital.agritechnica.com — 2918 exhibitors, 49 API pages, 100% email coverage on 5-item sample.
+
+---
+
+## Local Miner — Batch Result Posting
+
+Large mining results (2000+ exhibitors) caused "Payload Too Large" errors when posting to API.
+
+**Solution:** `postResults()` now chunks results into 200-item batches with 1s delay between each.
+
+**Behavior:**
+- Results ≤ 200: single POST, no batch metadata (unchanged behavior)
+- Results > 200: split into 200-item chunks, each batch posted separately
+- Progress log: `📤 Batch 1/15: 200 results pushed`
+- Batch metadata added to `meta.batch` field (e.g. `"3/15"`)
+
+**File:** `liffy-local-miner/mine.js:194-240` — `postResults()` function
+
+---
+
+## Manual Mining Email — Organizer Pollution Detection
+
+Cloud miner sometimes finds 1-2 results on SPA sites (e.g. ExpoPlatform) — typically the organizer's footer email. System treated this as "successful" mining and didn't trigger manual mining notification.
+
+**Solution:** `looksLikeOrganizerPollution()` check added to worker.js.
+
+**Logic:**
+```
+resultCount <= 2
+  → Query all emails from mining_results for this job
+  → Extract email domains
+  → Compare with source URL domain
+  → If ALL email domains differ from source domain → organizer pollution
+  → Trigger manual mining email (same as 0-result case)
+```
+
+**Example:** source=digital.agritechnica.com, email=digital-plattform@dlg.org → dlg.org ≠ agritechnica.com → pollution → manual mining triggered
+
+**Files:**
+- `backend/worker.js:477-520` — `looksLikeOrganizerPollution()` helper
+- `backend/worker.js:432-437` — unified engine trigger (0 results + pollution check)
+- `backend/worker.js:449-454` — hard site trigger (0 results + pollution check)
+
+---
+
 ## File Mining Pipeline (Excel/CSV/PDF/Word)
 
 File mining uses `fileOrchestrator.js` (v2.0) — a multi-phase pipeline:

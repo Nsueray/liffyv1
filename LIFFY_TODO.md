@@ -89,6 +89,9 @@
 | F6 | playwrightTableMiner timeout fix — 30s→60s + networkidle→domcontentloaded | P1 | ✅ DONE |
 | F7 | nashel.ru/cn/info/sttexpo/ — 1152 contact, company isimleri doldu | P1 | ✅ DONE |
 | F8 | batimat.com — reedExpoMailtoMiner enrichment test et (emailless org'lar zenginleşmeli) | P1 | PENDING |
+| F9 | expoPlatformMiner — ExpoPlatform trade fair sites (POST API + Playwright detail pages). digital.agritechnica.com 2918 exhibitors test. | P1 | ✅ DONE |
+| F10 | Local miner batch posting — postResults() 200-item chunks (Payload Too Large fix) | P1 | ✅ DONE |
+| F11 | Manual mining email — organizer pollution detection (1-2 results, foreign domain email) | P1 | ✅ DONE |
 
 ## G. EMAIL TRACKING & PROSPECTS
 
