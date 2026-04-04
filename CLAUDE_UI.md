@@ -51,6 +51,9 @@
 - **Excel/CSV Export** — Server-side export for 3 pages using `exceljs` library + shared `exportHelper.js` utility. XLSX (styled headers, auto-filter) and CSV formats. (1) Mining results: `GET /api/mining/jobs/:id/results/export` — 13 columns. (2) Contacts: `GET /api/persons/export` — 21 columns with campaign engagement stats (campaigns_sent, opens, clicks, replies, bounces, last_campaign, is_prospect, latest_intent, lists). Supports same filters as contacts page. (3) List members: `GET /api/lists/:id/export` — 17 columns with campaign engagement flags (has_opened, has_clicked, has_replied, has_bounced). Frontend: "Export All (N)" buttons on mining results, contacts, and list detail pages. Replaces old client-side CSV export. (commits: 1e6f06d backend, 72d175f liffy-ui)
 - **documentMiner PDF Table Fix** — documentMiner returned `pdfContacts` (pre-extracted contacts from fileMiner) but execution plan path in flowOrchestrator overwrote them by calling `documentTextNormalizer.normalize()`. Fixed all 4 normalizer paths (inline adapter, paginated, enrichment, non-paginated) to check for existing contacts before applying text normalizer. (commit: 82fb4ea)
 - **Import Silent Crash Fix** — `processImportBatch()` crashed silently on undefined `name` field (prospects table NOT NULL constraint). Added null guards for `name`, `company`, `email` in import-all batch processing. (commit: related to import-all batch processing)
+- **Mining Jobs "Needs Manual" Banner** — Job detail + results pages show orange banner when `status=needs_manual`: "This site could not be mined from cloud servers." Detail page status label fixed: "Needs_manual" → "Needs Manual". (commit: cb6c0f7 in liffy-ui)
+- **/api/stats 401 Fix** — Sidebar stats polling returned 401 because `/api/stats` had no local API route proxy (relied on `next.config.ts` rewrite which doesn't forward auth headers). Added `app/api/stats/route.ts` proxy matching other endpoints' pattern. (commit: 4694792 in liffy-ui)
+- **Sidebar Stats Polling 401 Stop** — When `/api/stats` returns 401 (expired token), polling now stops instead of retrying every 30s and flooding the console. (commit: 919ac26 in liffy-ui)
 
 ---
 
@@ -89,7 +92,6 @@ See [LIFFY_TODO.md](./LIFFY_TODO.md) for full task tracking.
 
 ### Open
 - **AI Miner Generator Phase 0** — Lab mode only. Phase 1 (multi-page crawl, production integration) not yet started. See CLAUDE_FEATURES.md for details.
-- `/api/stats` 401 Unauthorized still repeating in console — sidebar polls every 30s, auth header was added but issue persists
 - ZeroBounce account not yet configured — settings UI untested against live API
 - Prospects page search is client-side only (backend `/api/intents` doesn't support text search param)
 - **Frontend import-all polling not yet implemented** — backend returns 202 + `import_status`/`import_progress`, but liffy-ui needs to poll `GET /api/mining/jobs/:id` and show progress bar
