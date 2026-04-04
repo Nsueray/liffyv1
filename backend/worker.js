@@ -432,6 +432,9 @@ if (shouldUseSuperMiner(job)) {
     if (resultCount === 0) {
       console.log(`🚫 Unified engine: 0 mining_results for job ${job.id} — triggering manual assist`);
       await triggerManualAssist(job);
+    } else if (resultCount <= 2 && await looksLikeOrganizerPollution(job.input, resultCount, job.id)) {
+      console.log(`🚫 Unified engine: ${resultCount} results but organizer pollution — triggering manual assist`);
+      await triggerManualAssist(job);
     }
   }
 } else {
@@ -448,6 +451,10 @@ if (shouldUseSuperMiner(job)) {
     const resultCount = parseInt(countRes.rows[0]?.count || 0);
     if (resultCount === 0) {
       console.log("🚫 HARD SITE returned 0 mining_results – treating as BLOCK, triggering MANUAL");
+      await triggerManualAssist(job);
+      return;
+    } else if (resultCount <= 2 && await looksLikeOrganizerPollution(job.input, resultCount, job.id)) {
+      console.log(`🚫 HARD SITE: ${resultCount} results but organizer pollution — triggering MANUAL`);
       await triggerManualAssist(job);
       return;
     }
@@ -471,6 +478,53 @@ if (shouldUseSuperMiner(job)) {
     }
   } finally {
     client.release();
+  }
+}
+
+/**
+ * Check if low-result mining looks like organizer email pollution.
+ * When a site returns 1-2 results and ALL emails share a domain that
+ * doesn't match the source URL's domain, it's likely the organizer's
+ * footer/header email — not real exhibitor data.
+ *
+ * @param {string} sourceUrl - The mining job input URL
+ * @param {number} resultCount - Number of mining_results in DB
+ * @param {string} jobId - Job ID to query emails
+ * @returns {boolean} true if results look like organizer pollution
+ */
+async function looksLikeOrganizerPollution(sourceUrl, resultCount, jobId) {
+  if (resultCount === 0 || resultCount > 2) return false;
+
+  let sourceDomain;
+  try {
+    sourceDomain = new URL(sourceUrl).hostname.replace(/^www\./, '').toLowerCase();
+  } catch { return false; }
+
+  try {
+    const emailRes = await db.query(
+      `SELECT DISTINCT unnest(emails) AS email
+       FROM mining_results WHERE job_id = $1`,
+      [jobId]
+    );
+    const emails = emailRes.rows.map(r => r.email).filter(Boolean);
+    if (emails.length === 0) return false;
+
+    // Check if ALL email domains differ from source domain
+    const allForeign = emails.every(email => {
+      const parts = email.split('@');
+      if (parts.length !== 2) return false;
+      const emailDomain = parts[1].toLowerCase().replace(/^www\./, '');
+      // Compare: agritechnica.com vs dlg.org → different → foreign
+      return !sourceDomain.includes(emailDomain) && !emailDomain.includes(sourceDomain);
+    });
+
+    if (allForeign) {
+      console.log(`🔍 Organizer pollution detected: ${resultCount} results, all emails from foreign domain (${emails.join(', ')}) vs source ${sourceDomain}`);
+    }
+    return allForeign;
+  } catch (err) {
+    console.warn('[OrgPollution] Check failed:', err.message);
+    return false;
   }
 }
 
