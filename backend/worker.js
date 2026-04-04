@@ -199,7 +199,8 @@ async function processSendingCampaigns() {
           );
 
           // VERP reply-to (short format — first 8 hex chars of each UUID for RFC 5321 compliance)
-          const verpReplyTo = `c-${campaign.id.slice(0,8)}-r-${r.id.slice(0,8)}@reply.liffy.app`;
+          // Object format { email, name } so recipient sees sender name instead of cryptic VERP address
+          const verpReplyTo = { email: `c-${campaign.id.slice(0,8)}-r-${r.id.slice(0,8)}@reply.liffy.app`, name: campaign.sender_name || 'Reply' };
 
           await sendEmail({
             to: r.email,

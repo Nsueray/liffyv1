@@ -170,7 +170,8 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
         const unsubHeaders = getListUnsubscribeHeaders(r.email, organizer_id, sender.from_email);
 
         // D. VERP reply-to (short format — first 8 hex chars of each UUID for RFC 5321 compliance)
-        const verpReplyTo = `c-${campaign_id.slice(0,8)}-r-${r.id.slice(0,8)}@reply.liffy.app`;
+        // Object format { email, name } so recipient sees sender name instead of cryptic VERP address
+        const verpReplyTo = { email: `c-${campaign_id.slice(0,8)}-r-${r.id.slice(0,8)}@reply.liffy.app`, name: sender.from_name || 'Reply' };
 
         // E. Gönderim (Mailer'a Dinamik Key Gönderiyoruz)
         const mailResp = await sendEmail({

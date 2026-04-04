@@ -542,10 +542,10 @@ async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyT
 
     const forwardSubject = `Re: ${subject || '(no subject)'}`;
 
-    // Display name: "Raffaella Presciani via Liffy" (prospect name in FROM)
+    // Display name: "Reply: Raffaella Presciani" — clear indicator this is a forwarded reply
     const displayName = senderName && senderName !== senderEmail
-      ? `${senderName} via Liffy`
-      : `${senderEmail} via Liffy`;
+      ? `Reply: ${senderName}`
+      : `Reply: ${senderEmail}`;
 
     const forwardHtml = buildReplyForwardHtml({
       senderEmail,
