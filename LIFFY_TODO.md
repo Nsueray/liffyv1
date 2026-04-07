@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-03-12*
+*Updated: 2026-04-07*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -24,7 +24,7 @@
 | A14 | PDF URL routing — .pdf URL'leri documentMiner'a yönlendir | P1 | ✅ DONE |
 | A15 | PDF mining — pdfplumber table extraction + columnar text parser + fileMiner.processFile integration | P1 | ✅ DONE |
 | A16 | Cloudflare partial block — stealth args, UA rotation, JS challenge wait & retry, enhanced checkBlock | P2 | ✅ DONE |
-| A17 | Stuck job cleanup on startup + periodic stale detection (2h timeout, email notification) | P1 | ✅ DONE |
+| A17 | Stuck job cleanup on startup + periodic stale detection (3h timeout, manual_required skip, email notification) | P1 | ✅ DONE |
 | A18 | Flow 2 OOM protection — contact count + enrichment rate rules (skip/limit Flow 2) | P1 | ✅ DONE |
 | A19 | Enrich Remaining button — POST /api/mining/jobs/:id/enrich + UI button | P1 | ✅ DONE |
 | A20 | NaN enrichment guard — shouldTriggerFlow2 undefined/NaN default to 100% (safe skip) | P1 | ✅ DONE |
@@ -40,6 +40,7 @@
 | A30 | AI Miner Generator v2 — Test sonuçları: glmis ✅ 11, expat.com ✅ 7 (best), performans 24dk→2dk. Kalan sorun: Claude non-deterministic (anchor vs container). | P1 | PARKED |
 | A31 | AI Miner Generator v2 — Claude tutarlılık sorunu: aynı AXTree'ye TYPE 1/TYPE 2, anchor/container farklı dönüyor. Prompt veya post-processing iyileştirmesi gerekli. | P2 | TODO |
 | A32 | Local miner — global email pollution detection (frequency-based dedup, 30% threshold) | P1 | ✅ DONE |
+| A33 | SuperMiner status='completed' bug fix — direct path missing final status update, jobs stuck in 'running' forever | P1 | ✅ DONE |
 
 ## B. UI TASKS
 
@@ -92,6 +93,7 @@
 | F9 | expoPlatformMiner — ExpoPlatform trade fair sites (POST API + Playwright detail pages). digital.agritechnica.com 2918 exhibitors test. | P1 | ✅ DONE |
 | F10 | Local miner batch posting — postResults() 200-item chunks (Payload Too Large fix) | P1 | ✅ DONE |
 | F11 | Manual mining email — organizer pollution detection (1-2 results, foreign domain email) | P1 | ✅ DONE |
+| F12 | labelValueMiner — `<b>` company name + `<br>` separated label:value directory listings (nigeriagalleria.com pattern). 30 entries/page, flat HTML, no table/card structure. | P2 | TODO |
 
 ## G. EMAIL TRACKING & PROSPECTS
 
@@ -150,12 +152,26 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | H4 | Mining Jobs Strategy kolonu — miner_used, mining_mode, flow2_status detaylı gösterim | P1 | ✅ DONE |
 | H5 | Excel/CSV Export buttons — mining results, contacts, list detail pages (commit: 72d175f liffy-ui) | P1 | ✅ DONE |
 
-## I. PHASE 6 — CONVERSATION LAYER (FUTURE)
+## I. EMAIL SCALABILITY (120K Campaign)
 
 | # | Task | Priority | Status |
 |---|------|----------|--------|
-| I1 | Message storage — reply body'leri DB'de persist et (messages/reply_bodies table) | P2 | FUTURE |
-| I2 | Thread view — campaign email + reply'ları kronolojik conversation timeline'da göster | P2 | FUTURE |
-| I3 | Reply composer — UI'dan prospect'e reply yazıp gönder (send-on-behalf via SendGrid) | P2 | FUTURE |
-| I4 | Inbox page — tüm reply'ları tek sayfada göster, conversation navigate | P2 | FUTURE |
-| I5 | Email threading headers — Message-ID, In-Reply-To, References (RFC 5322 threading) | P3 | FUTURE |
+| I1 | Batch size artır — EMAIL_BATCH_SIZE 5 → 50-100 (configurable from UI) | P1 | TODO |
+| I2 | 429 retry — SendGrid rate limit exponential backoff (1s, 2s, 4s, max 3 retry) | P1 | TODO |
+| I3 | Parallel sends — Promise.all with concurrency limit (5-10 concurrent API calls) | P1 | TODO |
+| I4 | Progress endpoint — GET /api/campaigns/:id/progress (sent/total/failed real-time) | P2 | TODO |
+| I5 | Campaign pause/resume — UI button to stop/continue sending | P2 | TODO |
+| I6 | Domain throttle — ISP-based rate limits (Gmail 500/hr, Outlook 500/hr) | P2 | FUTURE |
+| I7 | IP warm-up schedule — gradual daily volume increase (500 → 1K → 5K → 50K → 120K) | P2 | FUTURE |
+| I8 | Bounce rate monitor — auto-pause campaign at >5% bounce rate | P2 | FUTURE |
+| I9 | BullMQ migration — replace setInterval worker with Redis-backed job queue | P3 | FUTURE |
+
+## J. PHASE 6 — CONVERSATION LAYER (FUTURE)
+
+| # | Task | Priority | Status |
+|---|------|----------|--------|
+| J1 | Message storage — reply body'leri DB'de persist et (messages/reply_bodies table) | P2 | FUTURE |
+| J2 | Thread view — campaign email + reply'ları kronolojik conversation timeline'da göster | P2 | FUTURE |
+| J3 | Reply composer — UI'dan prospect'e reply yazıp gönder (send-on-behalf via SendGrid) | P2 | FUTURE |
+| J4 | Inbox page — tüm reply'ları tek sayfada göster, conversation navigate | P2 | FUTURE |
+| J5 | Email threading headers — Message-ID, In-Reply-To, References (RFC 5322 threading) | P3 | FUTURE |

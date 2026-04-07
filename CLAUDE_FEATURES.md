@@ -965,3 +965,71 @@ ReedExpo sites where emails are visible as `mailto:` links directly in HTML (no 
 **Matching strategy:** Two-pass — exact match first, then longest substring match. Prevents ambiguous matches (e.g., `公司网站` → website, not company).
 
 **Fallback:** If column-aware produces 0 results, falls back to existing heuristic (bold text, first line, card selectors).
+
+## SuperMiner Status Update Bug Fix (2026-04-07)
+
+**Bug:** Worker.js SuperMiner path never set `status='completed'` after `runMiningJob()` returned. Jobs stayed `running` forever until stale detection cleaned them.
+
+**Root cause:** Two code paths existed for running SuperMiner:
+1. **Direct path** (worker.js:407) — `shouldUseSuperMiner(job) = true` → `superMiner.runMiningJob()` → stats written → **no status update** ❌
+2. **Legacy path** (worker.js:455) — `processMiningJob()` → internally calls `superMinerEntry.runMiningJob()` → `updateJobStatus()` → `completed` ✅
+
+The legacy path worked because `miningService.js:updateJobStatus()` (line 692) handled status updates. The direct path was missing this entirely.
+
+**Fix:** Added `status='completed'` update after block detection check, with `manualTriggered` flag to avoid overwriting `needs_manual` set by `triggerManualAssist()`. SQL uses `WHERE status = 'running'` guard.
+
+**Files:** `backend/worker.js` lines 446-453
+
+## Stale Job Detection — Periodic Cleanup (2026-04-07)
+
+Worker heartbeat now includes periodic stale job detection (every 10 minutes), in addition to existing startup cleanup.
+
+**How it works:**
+1. Every 10 minutes, checks for jobs in `running` status older than 3 hours
+2. Skips jobs with `manual_required = true` (awaiting local miner push)
+3. Marks stale jobs as `failed` with timeout error
+4. Sends notification email to organizer admin with job details and site URL
+
+**Two cleanup layers:**
+| Layer | Trigger | Timeout | Scope |
+|-------|---------|---------|-------|
+| Startup cleanup | Worker restart | 1 hour | All running jobs |
+| Periodic cleanup | Every 10 min | 3 hours | Running jobs where `manual_required` is false |
+
+**Files:** `backend/worker.js` — `checkStaleJobs()` function, called in main worker loop
+
+## 120K Email Campaign — Feasibility Analysis (2026-04-07)
+
+Analysis of Liffy's email sending capacity for large campaigns (120K recipients). No code changes — analysis only.
+
+**Current architecture:**
+- Two send paths: `campaignSend.js` (API batch) and `worker.js` (background)
+- Batch size: 5 per cycle (hardcoded `EMAIL_BATCH_SIZE`)
+- Synchronous sends: 1 SendGrid API call per recipient, no parallelism
+- Worker cycle: 3s interval between batches
+- No queue system (BullMQ), no rate limiting, no 429 retry
+
+**Estimated performance for 120K:**
+- ~5 emails/second → **18-24 hours** to complete
+- Memory spike during resolve (~50-150MB for INSERT)
+- No 429 retry → emails lost on rate limit
+
+**SendGrid limits:** Free: 100/day, Essentials: 100K/day, Pro: 1.5M/month
+
+**Missing capabilities:**
+- BullMQ/Redis job queue
+- 429 exponential backoff retry
+- Parallel sends (Promise.all with concurrency)
+- Configurable batch size from UI
+- Domain-based throttle (Gmail 500/hr, Outlook 500/hr)
+- IP warm-up schedule
+- Bounce rate monitoring with auto-pause
+- Campaign pause/resume
+
+**Recommended minimum changes for 120K:**
+1. Batch size 5 → 50-100
+2. 429 retry with exponential backoff
+3. Parallel sends (5-10 concurrent)
+4. Progress endpoint for UI tracking
+
+Target: 120K in 2-4 hours (vs current 18-24 hours).
