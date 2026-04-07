@@ -425,6 +425,7 @@ if (shouldUseSuperMiner(job)) {
   // Block detection for unified engine: check actual DB results
   // smResult.blockDetected covers BLOCKED/FAILED miner statuses
   // Also check for 0 results in DB (covers empty pages, Cloudflare, etc.)
+  let manualTriggered = false;
   if (smResult?.blockDetected || smResult?.status === 'FAILED' || smResult?.flow1?.contactCount <= 2) {
     const countRes = await db.query(
       'SELECT COUNT(*) as count FROM mining_results WHERE job_id = $1',
@@ -434,10 +435,21 @@ if (shouldUseSuperMiner(job)) {
     if (resultCount === 0) {
       console.log(`🚫 Unified engine: 0 mining_results for job ${job.id} — triggering manual assist`);
       await triggerManualAssist(job);
+      manualTriggered = true;
     } else if (resultCount <= 2 && await looksLikeOrganizerPollution(job.input, resultCount, job.id)) {
       console.log(`🚫 Unified engine: ${resultCount} results but organizer pollution — triggering manual assist`);
       await triggerManualAssist(job);
+      manualTriggered = true;
     }
+  }
+
+  // Set status='completed' if not already handled by triggerManualAssist
+  if (!manualTriggered) {
+    await db.query(
+      `UPDATE mining_jobs SET status = 'completed', completed_at = NOW() WHERE id = $1 AND status = 'running'`,
+      [job.id]
+    );
+    console.log(`✅ SuperMiner job ${job.id} completed`);
   }
 } else {
   legacyResult = await processMiningJob(job);
