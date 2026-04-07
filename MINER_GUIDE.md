@@ -400,6 +400,7 @@ triggerCanonicalAggregation():
 | `reedExpoMiner` | Playwright + GraphQL | Generic ReedExpo platform exhibitor directories (auto-detect eventEditionId + x-clientid). batimat.com, arabhealth.com, wtm.com, etc. | ACTIVE |
 | `reedExpoMailtoMiner` | Playwright | ReedExpo sites with mailto: emails in HTML (no GraphQL). Also used as enrichment step after reedExpoMiner for emailless orgs. | ACTIVE |
 | `expoPlatformMiner` | HTTP + Playwright | ExpoPlatform trade fair sites (digital.agritechnica.com). Phase 1: POST API pagination (limit=60). Phase 2: Playwright detail page DOM extraction. Local miner only. | ACTIVE |
+| `labelValueMiner` | Playwright | Flat HTML directory listings with bold label:value pattern (`<b>Address:</b>`, `<b>Phone:</b>`, `<b>Email:</b>`). Multi-language labels. Detection: bold label pattern ≥3 times, ≥2 unique types. | ACTIVE |
 | `httpBasicMiner` | HTTP | Basic HTTP fetch + regex (alias for playwrightTableMiner) | ACTIVE (alias) |
 | `fullMiner` | Composite | Runs playwrightTableMiner only (aiMiner removed from free mode) | ACTIVE |
 | `playwrightMiner` | Playwright | General Playwright crawl (alias for fullMiner) | ACTIVE (alias) |

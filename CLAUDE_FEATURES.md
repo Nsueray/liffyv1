@@ -1033,3 +1033,92 @@ Analysis of Liffy's email sending capacity for large campaigns (120K recipients)
 4. Progress endpoint for UI tracking
 
 Target: 120K in 2-4 hours (vs current 18-24 hours).
+
+## labelValueMiner — Flat HTML Directory Parser (2026-04-07)
+
+New miner for sites with bold company names and `<b>Label:</b> value` patterns separated by `<br>` tags. Generic, multi-language.
+
+**Target pattern:**
+```html
+<b>CompanyName</b><br>
+Optional subtitle<br>
+<b>Address:</b> 2, Olokobi Lane, Lagos.<br>
+<b>Phone:</b> +234 08022350641<br>
+<b>Email:</b> <a href="mailto:info@company.com">info@company.com</a><br>
+<b>Website:</b> <a href="http://company.com">company.com</a><br>
+<br><br>
+```
+
+**How it works:**
+1. Finds smallest DOM container with ≥2 "Address:" labels
+2. Iterates all `<b>`/`<strong>` elements
+3. Classifies each bold: label (Address/Phone/Email/Website) vs company name
+4. Between two company name bolds → one entry with extracted label:value pairs
+5. Email: searches immediate siblings for `mailto:` link or email regex in text
+6. Website: searches siblings for `<a href="http...">` or URL in text
+
+**Detection:** pageAnalyzer checks for `<b>Label:</b>` pattern ≥3 times with ≥2 unique label types.
+
+**Label languages:** English, French, Spanish, Turkish, Italian, Portuguese, German, Malay
+
+**Test result (nigeriagalleria.com):** 30/30 entries extracted, 3/3 emails correct, 0 false positives.
+
+**Files:**
+- `backend/services/urlMiners/labelValueMiner.js` — miner code
+- `backend/services/superMiner/services/flowOrchestrator.js` — loadMiners + inputType mapping
+- `backend/services/superMiner/services/pageAnalyzer.js` — LABEL_VALUE page type + detection
+- `backend/services/superMiner/services/smartRouter.js` — priority 2, fallback chain
+- `backend/services/superMiner/services/executionPlanBuilder.js` — label_value plan
+
+## SuperMiner Finalization Hang Fix (2026-04-07)
+
+**Bug:** After Flow 2 completed, job stayed `running` forever. Third occurrence of the same pattern.
+
+**Root cause:** `resultAggregator.aggregateV1()` published `AGGREGATION_DONE` event with `deepCrawlAttempted: false` (hardcoded). The `orchestratorListener` received this event asynchronously and triggered Flow 2 **again** — after `executeJob()` had already run Flow 2 synchronously and cleared Redis. The second Flow 2 failed silently (`FLOW1_NOT_FOUND` from empty Redis), leaving the job permanently running.
+
+**Race condition chain:**
+1. `executeJob()` → Flow 1 → `aggregateV1()` publishes event (`deepCrawlAttempted: false`)
+2. `executeJob()` → Flow 2 synchronously → writes DB → clears Redis
+3. `orchestratorListener` receives event → `deepCrawlAttempted: false` → triggers Flow 2 again
+4. Second Flow 2 → Redis empty → `FLOW1_NOT_FOUND` → silent return → no status update
+
+**Fix:** Three-layer protection:
+1. **Root cause:** `deepCrawlAttempted: true` in aggregateV1 event — listener skips Flow 2
+2. **Safety net:** 2-hour `Promise.race` timeout in worker.js — if SuperMiner hangs, outer catch sets `status='failed'`
+3. **Last resort:** `checkStaleJobs()` periodic 3-hour cleanup
+
+**Files:**
+- `backend/services/superMiner/services/resultAggregator.js` line 153 — `deepCrawlAttempted: true`
+- `backend/worker.js` lines 407-412 — Promise.race timeout
+
+## Organizer Email Pollution Detection (2026-04-07)
+
+`looksLikeOrganizerPollution()` function in worker.js detects when mining results contain only organizer/footer emails instead of real exhibitor data.
+
+**How it works:**
+1. Only runs when result count is 1-2 (triggered by `contactCount <= 2` condition)
+2. Queries distinct emails from `mining_results` for the job
+3. Compares email domains with source URL domain
+4. If ALL emails are from foreign domains → pollution detected → `triggerManualAssist()`
+
+**Example:** Mining `expo-site.com` returns 1 result with `info@expo-organizer.com` → foreign domain → pollution → needs_manual status + email notification.
+
+**Files:** `backend/worker.js` — `looksLikeOrganizerPollution()` function
+
+## Campaign Reply UX Improvements (2026-04-07)
+
+1. **VERP display name:** Reply-to changed from plain string to object with sender display name
+   - Before: `"c-xxx-r-xxx@reply.liffy.app"`
+   - After: `{ email: "c-xxx-r-xxx@reply.liffy.app", name: "Elif AY" }`
+   - Both `campaignSend.js` and `worker.js` updated
+
+2. **Forward FROM format:** Changed from "Name via Liffy" to "Reply: Name"
+   - `webhooks.js` inbound forward: `displayName = "Reply: ${senderName}"`
+
+## /api/stats 401 Fix (2026-04-07)
+
+**Bug:** Sidebar stats polling returned 401 even for logged-in users.
+
+**Root cause:** Next.js `rewrite` in `next.config.ts` doesn't forward `Authorization` headers. Other endpoints worked because they all had explicit `app/api/.../route.ts` proxy files.
+
+**Fix:** Created `liffy-ui/app/api/stats/route.ts` — local API route proxy that forwards auth headers to backend. Also added `stopped` flag in sidebar.tsx to stop polling on 401.

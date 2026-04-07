@@ -41,6 +41,9 @@
 | A31 | AI Miner Generator v2 — Claude tutarlılık sorunu: aynı AXTree'ye TYPE 1/TYPE 2, anchor/container farklı dönüyor. Prompt veya post-processing iyileştirmesi gerekli. | P2 | TODO |
 | A32 | Local miner — global email pollution detection (frequency-based dedup, 30% threshold) | P1 | ✅ DONE |
 | A33 | SuperMiner status='completed' bug fix — direct path missing final status update, jobs stuck in 'running' forever | P1 | ✅ DONE |
+| A34 | SuperMiner finalization hang fix — deepCrawlAttempted=true, duplicate Flow 2 prevention, 2h Promise.race timeout | P1 | ✅ DONE |
+| A35 | contactPageMiner DNS fail optimization — ERR_NAME_NOT_RESOLVED'da 15 path denemesi yerine hemen skip | P2 | TODO |
+| A36 | labelValueMiner profile-only contact investigation — 30 contact bulundu ama sadece 2 kaydedildi, emailsiz card'lar DB'ye yazılmıyor mu? | P2 | TODO |
 
 ## B. UI TASKS
 
@@ -93,7 +96,7 @@
 | F9 | expoPlatformMiner — ExpoPlatform trade fair sites (POST API + Playwright detail pages). digital.agritechnica.com 2918 exhibitors test. | P1 | ✅ DONE |
 | F10 | Local miner batch posting — postResults() 200-item chunks (Payload Too Large fix) | P1 | ✅ DONE |
 | F11 | Manual mining email — organizer pollution detection (1-2 results, foreign domain email) | P1 | ✅ DONE |
-| F12 | labelValueMiner — `<b>` company name + `<br>` separated label:value directory listings (nigeriagalleria.com pattern). 30 entries/page, flat HTML, no table/card structure. | P2 | TODO |
+| F12 | labelValueMiner — `<b>` company name + `<br>` separated label:value directory listings (nigeriagalleria.com pattern). 30 entries/page, flat HTML, no table/card structure. | P1 | ✅ DONE |
 
 ## G. EMAIL TRACKING & PROSPECTS
 
@@ -151,6 +154,7 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | H3 | Campaign scheduling — gün ve saat seçerek otomatik gönderim | P2 | ✅ DONE |
 | H4 | Mining Jobs Strategy kolonu — miner_used, mining_mode, flow2_status detaylı gösterim | P1 | ✅ DONE |
 | H5 | Excel/CSV Export buttons — mining results, contacts, list detail pages (commit: 72d175f liffy-ui) | P1 | ✅ DONE |
+| H6 | Real-time UI refresh — WebSocket/SSE for mining job status updates (polling yerine push) | P3 | FUTURE |
 
 ## I. EMAIL SCALABILITY (120K Campaign)
 
