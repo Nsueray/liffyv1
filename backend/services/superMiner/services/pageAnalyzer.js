@@ -34,6 +34,7 @@ const PAGE_TYPES = {
     MCE_EXPOCOMFORT: 'mce_expocomfort',    // MCE Expocomfort infinite scroll exhibitor directory
     REED_EXPO_MAILTO: 'reed_expo_mailto',  // ReedExpo platform with mailto: emails in HTML (no GUID)
     REED_EXPO: 'reed_expo',                // Generic ReedExpo platform exhibitor directories
+    LABEL_VALUE: 'label_value',            // Flat HTML label:value directory listings (bold company + Address/Phone/Email labels)
     UNKNOWN: 'unknown'
 };
 
@@ -1052,6 +1053,25 @@ PageAnalyzer.prototype.analyzeHtml = function(html, url) {
         // Content detection failed, continue to other checks
     }
 
+    // Label-value directory detection — flat HTML with bold labels (Address:, Phone:, Email:)
+    // Condition: ≥3 occurrences of bold label pattern like <b>Address:</b> or <b>Phone:</b>
+    try {
+        const boldLabelPattern = /<b>\s*(Address|Adresse|Dirección|Adres|Phone|Tel|Telephone|Telefon|Email|E-mail|Website|Web)\s*:?\s*<\/b>/gi;
+        const labelMatches = html.match(boldLabelPattern) || [];
+        if (labelMatches.length >= 3) {
+            // Count unique label types to avoid false positives (e.g., single entry repeated)
+            const uniqueLabels = new Set(labelMatches.map(m => m.replace(/<\/?b>/gi, '').replace(/:\s*$/, '').trim().toLowerCase()));
+            if (uniqueLabels.size >= 2) {
+                result.pageType = PAGE_TYPES.LABEL_VALUE;
+                result.isLabelValue = true;
+                console.log(`[PageAnalyzer] Label-value directory detected: ${labelMatches.length} labels, ${uniqueLabels.size} unique types`);
+                return result;
+            }
+        }
+    } catch (e) {
+        // Label-value detection failed, continue
+    }
+
     // SPA catalog detection — generic rules first, hostname as fallback
     // (reuse $ from content-based detection above)
     const spaDetection = this.detectSpaCatalog($, html, url);
@@ -1094,6 +1114,14 @@ PageAnalyzer.prototype.getRecommendation = function(analysis) {
             miner: 'memberTableMiner',
             useCache: false,
             reason: 'HTML table member list detected, using memberTableMiner',
+            ownPagination: false
+        };
+    }
+    if (analysis.pageType === PAGE_TYPES.LABEL_VALUE) {
+        return {
+            miner: 'labelValueMiner',
+            useCache: false,
+            reason: 'Label-value directory detected, using labelValueMiner',
             ownPagination: false
         };
     }

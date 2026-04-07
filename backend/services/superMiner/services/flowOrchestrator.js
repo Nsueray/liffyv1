@@ -683,6 +683,55 @@ class FlowOrchestrator {
                 console.log('[FlowOrchestrator] contactPageMiner not available:', err.message);
             }
 
+            // labelValueMiner: try/catch load (flat HTML label:value directory listings)
+            // Targets: bold company name + <br> separated label:value entries (nigeriagalleria pattern)
+            // This miner manages its OWN browser lifecycle (ownBrowser: true)
+            try {
+                const { runLabelValueMiner } = require('../../urlMiners/labelValueMiner');
+                const { chromium } = require('playwright');
+
+                this.miners.labelValueMiner = {
+                    name: 'labelValueMiner',
+                    mine: async (job) => {
+                        console.log(`[labelValueMiner] Starting for: ${job.input}`);
+                        let browser = null;
+                        try {
+                            browser = await chromium.launch(getLaunchOptions());
+                            const context = await browser.newContext(getContextOptions());
+                            const page = await context.newPage();
+                            const rawCards = await runLabelValueMiner(page, job.input, job.config || {});
+                            await browser.close();
+                            browser = null;
+
+                            const contacts = rawCards.map(card => ({
+                                company_name: card.company_name,
+                                email: card.email || null,
+                                phone: card.phone,
+                                website: card.website,
+                                country: card.country,
+                                city: card.city || null,
+                                address: card.address,
+                                contact_name: card.contact_name || null,
+                                job_title: card.job_title || null
+                            }));
+                            const emails = rawCards
+                                .map(c => c.email)
+                                .filter(e => e && typeof e === 'string' && e.includes('@') && e.length > 5);
+
+                            console.log(`[labelValueMiner] Result: ${contacts.length} contacts, ${emails.length} emails`);
+
+                            return this.normalizeResult({ contacts, emails }, 'labelValueMiner');
+                        } catch (err) {
+                            if (browser) await browser.close().catch(() => {});
+                            throw err;
+                        }
+                    }
+                };
+                console.log('[FlowOrchestrator] labelValueMiner loaded ✅');
+            } catch (err) {
+                console.log('[FlowOrchestrator] labelValueMiner not available:', err.message);
+            }
+
             // Aliases
             this.miners.playwrightMiner = this.miners.fullMiner;
             this.miners.playwrightDetailMiner = this.miners.fullMiner;
