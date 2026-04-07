@@ -150,7 +150,7 @@ class ResultAggregator {
                 emailBasedCount,
                 profileOnlyCount,
                 websiteUrls: websiteUrls.slice(0, 50), // Limit for payload size
-                deepCrawlAttempted: false
+                deepCrawlAttempted: true  // executeJob() handles Flow 2 synchronously — listener must skip
             });
             console.log(`[Aggregator V1] Event published OK`);
         } else {

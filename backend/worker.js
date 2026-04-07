@@ -404,7 +404,12 @@ async function processNextJob() {
       let legacyResult = null;
 
 if (shouldUseSuperMiner(job)) {
-  const smResult = await superMiner.runMiningJob(job, db);
+  // Timeout guard: SuperMiner must complete within 2 hours or we abort
+  const SM_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+  const smResult = await Promise.race([
+    superMiner.runMiningJob(job, db),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('SuperMiner timeout — job exceeded 2 hour limit')), SM_TIMEOUT_MS))
+  ]);
 
   // Save strategy metadata (miner_used, mining_mode, flow2_status) to stats JSONB
   if (smResult?.minerUsed || smResult?.flow2Status) {
