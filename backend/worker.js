@@ -639,10 +639,11 @@ async function checkStaleJobs() {
     const staleRes = await db.query(`
       UPDATE mining_jobs
       SET status = 'failed',
-          error = 'Job timed out — stuck in running state for over 2 hours',
+          error = 'Job timed out — stuck in running state for over 3 hours',
           completed_at = NOW()
       WHERE status = 'running'
-        AND started_at < NOW() - INTERVAL '2 hours'
+        AND started_at < NOW() - INTERVAL '3 hours'
+        AND (manual_required IS NULL OR manual_required = false)
       RETURNING id, name, input, organizer_id, started_at
     `);
 
@@ -678,7 +679,7 @@ async function checkStaleJobs() {
           fromEmail: 'noreply@liffy.app',
           fromName: 'Liffy Mining',
           subject: `⚠️ Stale Job Cleaned — ${siteDomain} (stuck ${hoursStuck}h)`,
-          text: `A mining job was stuck in "running" state for ${hoursStuck}+ hours and has been automatically marked as failed.\n\nJob: ${job.name || 'unnamed'}\nSite: ${job.input || 'N/A'}\nJob ID: ${job.id}\nStarted: ${job.started_at}\n\nYou can re-mine this site from the Mining Jobs page.`
+          text: `A mining job was stuck in "running" state for ${hoursStuck}+ hours and has been automatically marked as failed.\n\nJob: ${job.name || 'unnamed'}\nSite: ${job.input || 'N/A'}\nJob ID: ${job.id}\nStarted: ${job.started_at}\n\nYou can retry this job from the Mining Jobs page:\n${job.input || 'N/A'}`
         });
 
         console.log(`[StaleCheck] Notification sent to ${recipientEmail} for stale job ${job.id.slice(0,8)}`);
