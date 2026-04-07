@@ -1408,6 +1408,8 @@ class FlowOrchestrator {
                     inputType = 'reed_expo_mailto';
                 } else if (analysis.pageType === PAGE_TYPES.REED_EXPO) {
                     inputType = 'reed_expo';
+                } else if (analysis.pageType === PAGE_TYPES.LABEL_VALUE) {
+                    inputType = 'label_value';
                 } else if (analysis.pageType === PAGE_TYPES.DOCUMENT_VIEWER) {
                     inputType = 'document';
                 } else if (analysis.pageType === PAGE_TYPES.EXHIBITOR_TABLE || analysis.pageType === 'website') {

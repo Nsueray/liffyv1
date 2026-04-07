@@ -89,6 +89,16 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
     return plan;
   }
 
+  // Label-value directory — flat HTML with bold company names and label:value pairs.
+  // Does NOT handle its own pagination (ownPagination: false).
+  if (resolvedInputType === 'label_value') {
+    addStep('labelValueMiner', 'legacy', 'Label-value directory extraction');
+    if (resolvedMiningMode === 'ai') {
+      addStep('aiMiner', 'legacy', 'AI enrichment for label-value directory');
+    }
+    return plan;
+  }
+
   // SPA catalog sites — spaNetworkMiner handles its own data fetching via network interception.
   // No pagination wrapper needed (ownPagination: true).
   if (resolvedInputType === 'spa_catalog') {
