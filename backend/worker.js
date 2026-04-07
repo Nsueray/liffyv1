@@ -371,6 +371,7 @@ async function startWorker() {
 
   while (true) {
     await processNextJob();
+    await checkStaleJobs();
     await sleep(POLL_INTERVAL_MS);
   }
 }
@@ -622,4 +623,71 @@ Site: ${inputUrl}
 }
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+// ============================================================
+// STALE JOB DETECTION (periodic)
+// ============================================================
+const STALE_CHECK_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+let lastStaleCheck = 0;
+
+async function checkStaleJobs() {
+  const now = Date.now();
+  if (now - lastStaleCheck < STALE_CHECK_INTERVAL_MS) return;
+  lastStaleCheck = now;
+
+  try {
+    const staleRes = await db.query(`
+      UPDATE mining_jobs
+      SET status = 'failed',
+          error = 'Job timed out — stuck in running state for over 2 hours',
+          completed_at = NOW()
+      WHERE status = 'running'
+        AND started_at < NOW() - INTERVAL '2 hours'
+      RETURNING id, name, input, organizer_id, started_at
+    `);
+
+    if (staleRes.rows.length === 0) return;
+
+    console.log(`[StaleCheck] Cleaned ${staleRes.rows.length} stale jobs:`,
+      staleRes.rows.map(r => `${r.name || 'unnamed'} (${r.id.slice(0,8)})`).join(', '));
+
+    // Send notification email for each stale job
+    for (const job of staleRes.rows) {
+      try {
+        let siteDomain = 'unknown';
+        try { siteDomain = new URL(job.input).hostname; } catch { /* ignore */ }
+
+        const hoursStuck = Math.round((Date.now() - new Date(job.started_at).getTime()) / 3600000);
+
+        let recipientEmail = 'suer@elan-expo.com';
+        try {
+          const orgResult = await db.query(
+            `SELECT u.email FROM users u
+             JOIN organizers o ON o.id = u.organizer_id
+             WHERE o.id = $1 AND u.role = 'admin'
+             LIMIT 1`,
+            [job.organizer_id]
+          );
+          if (orgResult.rows.length > 0 && orgResult.rows[0].email) {
+            recipientEmail = orgResult.rows[0].email;
+          }
+        } catch { /* use fallback */ }
+
+        await sendEmail({
+          to: recipientEmail,
+          fromEmail: 'noreply@liffy.app',
+          fromName: 'Liffy Mining',
+          subject: `⚠️ Stale Job Cleaned — ${siteDomain} (stuck ${hoursStuck}h)`,
+          text: `A mining job was stuck in "running" state for ${hoursStuck}+ hours and has been automatically marked as failed.\n\nJob: ${job.name || 'unnamed'}\nSite: ${job.input || 'N/A'}\nJob ID: ${job.id}\nStarted: ${job.started_at}\n\nYou can re-mine this site from the Mining Jobs page.`
+        });
+
+        console.log(`[StaleCheck] Notification sent to ${recipientEmail} for stale job ${job.id.slice(0,8)}`);
+      } catch (emailErr) {
+        console.warn(`[StaleCheck] Email notification failed for ${job.id.slice(0,8)}:`, emailErr.message);
+      }
+    }
+  } catch (err) {
+    console.error('[StaleCheck] Failed:', err.message);
+  }
+}
 startWorker();

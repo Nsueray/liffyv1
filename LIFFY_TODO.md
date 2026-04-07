@@ -24,7 +24,7 @@
 | A14 | PDF URL routing — .pdf URL'leri documentMiner'a yönlendir | P1 | ✅ DONE |
 | A15 | PDF mining — pdfplumber table extraction + columnar text parser + fileMiner.processFile integration | P1 | ✅ DONE |
 | A16 | Cloudflare partial block — stealth args, UA rotation, JS challenge wait & retry, enhanced checkBlock | P2 | ✅ DONE |
-| A17 | Stuck job cleanup on startup | P1 | ✅ DONE |
+| A17 | Stuck job cleanup on startup + periodic stale detection (2h timeout, email notification) | P1 | ✅ DONE |
 | A18 | Flow 2 OOM protection — contact count + enrichment rate rules (skip/limit Flow 2) | P1 | ✅ DONE |
 | A19 | Enrich Remaining button — POST /api/mining/jobs/:id/enrich + UI button | P1 | ✅ DONE |
 | A20 | NaN enrichment guard — shouldTriggerFlow2 undefined/NaN default to 100% (safe skip) | P1 | ✅ DONE |
