@@ -134,10 +134,11 @@ async function runContactPageMiner(page, url, config = {}) {
   }
 
   const results = [];
+  let domainDead = false;
 
   /**
    * Try to extract emails from a given URL path
-   * Returns true if emails were found (signals to stop)
+   * Returns true if emails were found or domain is dead (signals to stop)
    */
   async function tryPage(targetUrl, sourcePath) {
     // Check total timeout
@@ -172,8 +173,15 @@ async function runContactPageMiner(page, url, config = {}) {
         return true; // found emails, stop
       }
     } catch (err) {
-      // Navigation failure — skip this path
-      console.log(`[contactPageMiner] Failed to load ${sourcePath}: ${err.message}`);
+      const msg = err.message || '';
+      // DNS-level or connection-level failure — domain is unreachable, skip all remaining paths
+      if (msg.includes('ERR_NAME_NOT_RESOLVED') || msg.includes('ERR_CONNECTION_REFUSED') || msg.includes('ERR_ADDRESS_UNREACHABLE')) {
+        console.log(`[contactPageMiner] Domain unreachable (${msg.split(':').pop().trim()}), skipping remaining paths`);
+        domainDead = true;
+        return true; // stop iteration
+      }
+      // Other errors (timeout, 403, 500) — skip this path, continue trying others
+      console.log(`[contactPageMiner] Failed to load ${sourcePath}: ${msg}`);
     }
 
     return false; // no emails found, continue
@@ -181,6 +189,7 @@ async function runContactPageMiner(page, url, config = {}) {
 
   // Step 1: Try homepage
   const homepageFound = await tryPage(url, '/');
+  if (domainDead) return results;
   if (homepageFound && results.length > 0) {
     console.log(`[contactPageMiner] Done: ${results.length} email(s) from homepage`);
     return results;
@@ -191,6 +200,7 @@ async function runContactPageMiner(page, url, config = {}) {
     const parsed = new URL(url);
     if (parsed.pathname !== '/' && parsed.pathname !== '') {
       const rootFound = await tryPage(baseUrl + '/', '/');
+      if (domainDead) return results;
       if (rootFound && results.length > 0) {
         console.log(`[contactPageMiner] Done: ${results.length} email(s) from root`);
         return results;
