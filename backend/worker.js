@@ -87,7 +87,11 @@ const HEARTBEAT_INTERVAL_MS = 30000;
 const CAMPAIGN_SCHEDULER_INTERVAL_MS = 10000;
 const CAMPAIGN_SENDER_INTERVAL_MS = 3000;
 const VERIFICATION_PROCESSOR_INTERVAL_MS = 15000;
-const EMAIL_BATCH_SIZE = 5;
+const EMAIL_BATCH_SIZE = parseInt(process.env.EMAIL_BATCH_SIZE, 10) || 50;
+const EMAIL_CONCURRENCY = parseInt(process.env.EMAIL_CONCURRENCY, 10) || 10;
+const EMAIL_CHUNK_PAUSE_MS = 500;
+const EMAIL_RETRY_MAX = 3;
+const EMAIL_RETRY_BASE_MS = 2000;
 
 /* =========================================================
    HEARTBEAT
@@ -107,6 +111,27 @@ async function startCampaignScheduler() {
       console.error("❌ Campaign scheduler error:", err.message);
     }
     await sleep(CAMPAIGN_SCHEDULER_INTERVAL_MS);
+  }
+}
+
+/* =========================================================
+   SENDGRID 429 RETRY WRAPPER
+   ========================================================= */
+async function sendWithRetry(emailOpts) {
+  for (let attempt = 0; attempt <= EMAIL_RETRY_MAX; attempt++) {
+    try {
+      await sendEmail(emailOpts);
+      return;
+    } catch (err) {
+      const status = err.code || err.statusCode || (err.response && err.response.statusCode);
+      if (status === 429 && attempt < EMAIL_RETRY_MAX) {
+        const delayMs = EMAIL_RETRY_BASE_MS * Math.pow(2, attempt); // 2s, 4s, 8s
+        console.log(`[EmailSend] 429 rate limit for ${emailOpts.to}, retry ${attempt + 1}/${EMAIL_RETRY_MAX} in ${delayMs / 1000}s`);
+        await sleep(delayMs);
+        continue;
+      }
+      throw err;
+    }
   }
 }
 
@@ -163,72 +188,74 @@ async function processSendingCampaigns() {
         FOR UPDATE SKIP LOCKED
       `, [campaign.id, EMAIL_BATCH_SIZE]);
 
-      console.log(`[Campaign ${campaign.id}] Processing ${recipients.rows.length} recipients`);
+      console.log(`[Campaign ${campaign.id}] Processing ${recipients.rows.length} recipients (concurrency=${EMAIL_CONCURRENCY})`);
 
-      for (const r of recipients.rows) {
-        try {
-          // ============================================================
-          // GENERATE UNSUBSCRIBE URL
-          // ============================================================
-          const unsubscribeUrl = getUnsubscribeUrl(r.email, campaign.organizer_id);
-          
-          // ============================================================
-          // PROCESS TEMPLATE WITH UNSUBSCRIBE URL
-          // ============================================================
-          const processedSubject = processTemplate(campaign.subject, r);
-          let processedHtml = processTemplate(campaign.body_html, r, { unsubscribe_url: unsubscribeUrl });
-          processedHtml = convertPlainTextToHtml(processedHtml);
+      // Process recipients in concurrent chunks
+      const chunks = [];
+      for (let i = 0; i < recipients.rows.length; i += EMAIL_CONCURRENCY) {
+        chunks.push(recipients.rows.slice(i, i + EMAIL_CONCURRENCY));
+      }
 
-          // Process HTML with compliance (unsubscribe + footer + address)
-          const complianceResult = processEmailCompliance({
-            html: processedHtml,
-            text: processTemplate(campaign.body_text || "", r, { unsubscribe_url: unsubscribeUrl }),
-            recipientEmail: r.email,
-            organizerId: campaign.organizer_id,
-            physicalAddress: campaign.physical_address,
-            lang: 'en'
-          });
-          
-          // ============================================================
-          // GENERATE LIST-UNSUBSCRIBE HEADERS
-          // ============================================================
-          const listUnsubHeaders = getListUnsubscribeHeaders(
-            r.email, 
-            campaign.organizer_id, 
-            campaign.sender_email
-          );
+      for (let ci = 0; ci < chunks.length; ci++) {
+        const chunk = chunks[ci];
 
-          // VERP reply-to (short format — first 8 hex chars of each UUID for RFC 5321 compliance)
-          // Object format { email, name } so recipient sees sender name instead of cryptic VERP address
-          const verpReplyTo = { email: `c-${campaign.id.slice(0,8)}-r-${r.id.slice(0,8)}@reply.liffy.app`, name: campaign.sender_name || 'Reply' };
+        await Promise.all(chunk.map(async (r) => {
+          try {
+            const unsubscribeUrl = getUnsubscribeUrl(r.email, campaign.organizer_id);
+            const processedSubject = processTemplate(campaign.subject, r);
+            let processedHtml = processTemplate(campaign.body_html, r, { unsubscribe_url: unsubscribeUrl });
+            processedHtml = convertPlainTextToHtml(processedHtml);
 
-          await sendEmail({
-            to: r.email,
-            subject: processedSubject,
-            html: complianceResult.html,
-            text: complianceResult.text,
-            fromEmail: campaign.sender_email,
-            fromName: campaign.sender_name,
-            replyTo: verpReplyTo,
-            sendgridApiKey: campaign.sendgrid_api_key,
-            headers: listUnsubHeaders
-          });
-          
-          await client.query(
-            `UPDATE campaign_recipients SET status='sent', sent_at=NOW() WHERE id=$1`,
-            [r.id]
-          );
+            const complianceResult = processEmailCompliance({
+              html: processedHtml,
+              text: processTemplate(campaign.body_text || "", r, { unsubscribe_url: unsubscribeUrl }),
+              recipientEmail: r.email,
+              organizerId: campaign.organizer_id,
+              physicalAddress: campaign.physical_address,
+              lang: 'en'
+            });
 
-          // Record canonical 'sent' event to campaign_events
-          await recordSentEvent(client, campaign.organizer_id, campaign.id, r);
+            const listUnsubHeaders = getListUnsubscribeHeaders(
+              r.email,
+              campaign.organizer_id,
+              campaign.sender_email
+            );
 
-          console.log(`✅ Email sent to ${r.email} (with unsubscribe)`);
-        } catch (e) {
-          await client.query(
-            `UPDATE campaign_recipients SET status='failed', last_error=$2 WHERE id=$1`,
-            [r.id, e.message]
-          );
-          console.error(`❌ Email failed for ${r.email}: ${e.message}`);
+            const verpReplyTo = { email: `c-${campaign.id.slice(0,8)}-r-${r.id.slice(0,8)}@reply.liffy.app`, name: campaign.sender_name || 'Reply' };
+
+            // Send with 429 exponential backoff retry
+            await sendWithRetry({
+              to: r.email,
+              subject: processedSubject,
+              html: complianceResult.html,
+              text: complianceResult.text,
+              fromEmail: campaign.sender_email,
+              fromName: campaign.sender_name,
+              replyTo: verpReplyTo,
+              sendgridApiKey: campaign.sendgrid_api_key,
+              headers: listUnsubHeaders
+            });
+
+            await client.query(
+              `UPDATE campaign_recipients SET status='sent', sent_at=NOW() WHERE id=$1`,
+              [r.id]
+            );
+
+            await recordSentEvent(client, campaign.organizer_id, campaign.id, r);
+
+            console.log(`✅ Email sent to ${r.email}`);
+          } catch (e) {
+            await client.query(
+              `UPDATE campaign_recipients SET status='failed', last_error=$2 WHERE id=$1`,
+              [r.id, e.message]
+            );
+            console.error(`❌ Email failed for ${r.email}: ${e.message}`);
+          }
+        }));
+
+        // Pause between chunks to avoid burst-triggering rate limits
+        if (ci < chunks.length - 1) {
+          await sleep(EMAIL_CHUNK_PAUSE_MS);
         }
       }
 

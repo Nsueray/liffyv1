@@ -160,9 +160,9 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 
 | # | Task | Priority | Status |
 |---|------|----------|--------|
-| I1 | Batch size artır — EMAIL_BATCH_SIZE 5 → 50-100 (configurable from UI) | P1 | TODO |
-| I2 | 429 retry — SendGrid rate limit exponential backoff (1s, 2s, 4s, max 3 retry) | P1 | TODO |
-| I3 | Parallel sends — Promise.all with concurrency limit (5-10 concurrent API calls) | P1 | TODO |
+| I1 | Batch size artır — EMAIL_BATCH_SIZE 5 → 50 (env configurable) | P1 | ✅ DONE |
+| I2 | 429 retry — SendGrid rate limit exponential backoff (2s, 4s, 8s, max 3 retry) | P1 | ✅ DONE |
+| I3 | Parallel sends — Promise.all with concurrency 10 (50 batch = 5 chunk × 10 concurrent, 500ms pause) | P1 | ✅ DONE |
 | I4 | Progress endpoint — GET /api/campaigns/:id/progress (sent/total/failed real-time) | P2 | TODO |
 | I5 | Campaign pause/resume — UI button to stop/continue sending | P2 | TODO |
 | I6 | Domain throttle — ISP-based rate limits (Gmail 500/hr, Outlook 500/hr) | P2 | FUTURE |
