@@ -1122,3 +1122,39 @@ Optional subtitle<br>
 **Root cause:** Next.js `rewrite` in `next.config.ts` doesn't forward `Authorization` headers. Other endpoints worked because they all had explicit `app/api/.../route.ts` proxy files.
 
 **Fix:** Created `liffy-ui/app/api/stats/route.ts` — local API route proxy that forwards auth headers to backend. Also added `stopped` flag in sidebar.tsx to stop polling on 401.
+
+## contactPageMiner DNS Fail Early Exit (2026-04-08)
+
+**Problem:** When a domain was dead (DNS failure), contactPageMiner still tried all 15+ contact paths (/contact, /about, /iletisim, etc.), each timing out individually. Wasted ~150s per dead domain.
+
+**Fix:** Added `domainDead` flag. On first DNS-level error (ERR_NAME_NOT_RESOLVED, ERR_CONNECTION_REFUSED, ERR_ADDRESS_UNREACHABLE), flag is set and all remaining paths are skipped immediately.
+
+**Detection errors that trigger early exit:**
+- `ERR_NAME_NOT_RESOLVED` — domain doesn't exist
+- `ERR_CONNECTION_REFUSED` — server refuses connection
+- `ERR_ADDRESS_UNREACHABLE` — IP unreachable
+
+**Files:** `backend/services/urlMiners/contactPageMiner.js`
+
+## Email Send Optimization — 120K Campaign Scalability (2026-04-08)
+
+**Problem:** Email sending was sequential (for loop), batch size 5, no rate limit retry. 120K emails would take ~20 hours and any 429 response would lose that email.
+
+**3 fixes in worker.js:**
+
+1. **Batch size:** `EMAIL_BATCH_SIZE` 5 → 50 (env configurable via `process.env.EMAIL_BATCH_SIZE`)
+2. **429 retry:** `sendWithRetry()` wrapper with exponential backoff (2s → 4s → 8s, max 3 retries). Only retries on HTTP 429, all other errors fail immediately.
+3. **Parallel sends:** Sequential `for` loop → `Promise.all` with concurrency 10. Batch of 50 = 5 chunks × 10 concurrent. 500ms pause between chunks.
+
+**Constants (all env-configurable):**
+| Constant | Default | Env Var |
+|----------|---------|---------|
+| `EMAIL_BATCH_SIZE` | 50 | `EMAIL_BATCH_SIZE` |
+| `EMAIL_CONCURRENCY` | 10 | `EMAIL_CONCURRENCY` |
+| `EMAIL_CHUNK_PAUSE_MS` | 500 | — |
+| `EMAIL_RETRY_MAX` | 3 | — |
+| `EMAIL_RETRY_BASE_MS` | 2000 | — |
+
+**Expected throughput:** ~1.7 email/s → ~50 email/s. 120K campaign: ~20 hours → ~40 minutes.
+
+**Files:** `backend/worker.js` — `sendWithRetry()`, `processSendingCampaigns()`

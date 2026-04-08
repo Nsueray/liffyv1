@@ -55,6 +55,7 @@
 - **/api/stats 401 Fix** — Sidebar stats polling returned 401 because `/api/stats` had no local API route proxy (relied on `next.config.ts` rewrite which doesn't forward auth headers). Added `app/api/stats/route.ts` proxy matching other endpoints' pattern. (commit: 4694792 in liffy-ui)
 - **Sidebar Stats Polling 401 Stop** — When `/api/stats` returns 401 (expired token), polling now stops instead of retrying every 30s and flooding the console. (commit: 919ac26 in liffy-ui)
 - **Campaign Reply UX** — VERP reply-to now includes sender display name (`{ email: "c-xxx@reply.liffy.app", name: "Elif AY" }`) so recipients see the sender name instead of cryptic VERP address. Forward email FROM changed from "Raffaella via Liffy" to "Reply: Raffaella" for clearer inbox appearance. (commit: aa1ce0f)
+- **Import-All Polling + Progress Bar** — Frontend now polls `GET /api/mining/jobs/:id/import-status` every 2s while import is processing. Green animated progress bar shows imported/total count with persons/affiliations breakdown. Success banner on completion, error banner on failure. Initial status check on page mount recovers in-progress imports after page reload. (commit: e208e7c in liffy-ui)
 
 ---
 
@@ -96,7 +97,6 @@ See [LIFFY_TODO.md](./LIFFY_TODO.md) for full task tracking.
 - **AI Miner Generator Phase 0** — Lab mode only. Phase 1 (multi-page crawl, production integration) not yet started. See CLAUDE_FEATURES.md for details.
 - ZeroBounce account not yet configured — settings UI untested against live API
 - Prospects page search is client-side only (backend `/api/intents` doesn't support text search param)
-- **Frontend import-all polling not yet implemented** — backend returns 202 + `import_status`/`import_progress`, but liffy-ui needs to poll `GET /api/mining/jobs/:id` and show progress bar
 - **Name field shows company name for some records** (minor) — Excel imports where name column was empty picked up company name as first_name. Legacy data, not recurring.
 - **"Web Search" appearing as name/company in a few records** (minor) — stale data from early mining runs, not recurring.
 - **Mining console page hidden** — page exists at `/mining/jobs/[id]/console/page.tsx` but all navigation links removed. Requires: log writing in mining services, `/logs` endpoint, job control endpoints (pause/resume/cancel). Future feature.
@@ -112,5 +112,5 @@ See [LIFFY_TODO.md](./LIFFY_TODO.md) for full task tracking.
 5. ~~**Lists index counts shadow route fix**~~ — ✅ DONE: removed 4 legacy routes from prospects.js
 6. ~~**Console page hide**~~ — ✅ DONE: removed navigation links, kept page for future
 7. ~~**Template placeholder fallback**~~ — ✅ DONE: display_name + pipe syntax
-8. **Frontend import-all polling** — show progress bar for background import-all
+8. ~~**Frontend import-all polling**~~ — ✅ DONE: progress bar + polling + completion/failure banners (commit: e208e7c)
 9. **Mining console page** (future) — implement log writing + /logs endpoint + job control

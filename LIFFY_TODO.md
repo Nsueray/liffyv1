@@ -42,7 +42,7 @@
 | A32 | Local miner — global email pollution detection (frequency-based dedup, 30% threshold) | P1 | ✅ DONE |
 | A33 | SuperMiner status='completed' bug fix — direct path missing final status update, jobs stuck in 'running' forever | P1 | ✅ DONE |
 | A34 | SuperMiner finalization hang fix — deepCrawlAttempted=true, duplicate Flow 2 prevention, 2h Promise.race timeout | P1 | ✅ DONE |
-| A35 | contactPageMiner DNS fail optimization — ERR_NAME_NOT_RESOLVED'da 15 path denemesi yerine hemen skip | P2 | TODO |
+| A35 | contactPageMiner DNS fail optimization — ERR_NAME_NOT_RESOLVED'da domainDead flag ile hemen skip | P2 | ✅ DONE |
 | A36 | labelValueMiner profile-only contact investigation — 30 contact bulundu ama sadece 2 kaydedildi, emailsiz card'lar DB'ye yazılmıyor mu? | P2 | TODO |
 
 ## B. UI TASKS
