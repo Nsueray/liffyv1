@@ -32,6 +32,7 @@ const unsubscribesRouter = require('./routes/unsubscribes');
 const adminAIMinerRouter = require('./routes/adminAIMiner');
 const sourceDiscoveryRouter = require('./routes/sourceDiscovery');
 const contactCrmRouter = require('./routes/contactCrm');
+const pipelineRouter = require('./routes/pipeline');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -75,6 +76,9 @@ app.use('/api/zoho', zohoRouter);
 // Contact CRM routes must come BEFORE /api/persons router so that
 // /api/persons/:id/notes|activities|tasks are matched by contactCrm first.
 app.use(contactCrmRouter);
+// Pipeline router hosts both /api/pipeline/* and PATCH /api/persons/:id/stage.
+// Mount before /api/persons router so the stage endpoint is matched first.
+app.use(pipelineRouter);
 app.use('/api/persons', personsRouter);
 app.use('/api/intents', intentsRouter);
 app.use('/api/unsubscribes', unsubscribesRouter);

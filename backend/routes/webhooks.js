@@ -730,24 +730,78 @@ router.post(
     // Best-effort contact_activities hook — resolve person_id via email + organizer
     try {
       const personRes = await db.query(
-        `SELECT id FROM persons
+        `SELECT id, pipeline_stage_id FROM persons
           WHERE organizer_id = $1 AND LOWER(email) = LOWER($2)
           LIMIT 1`,
         [recipient.organizer_id, recipient.email]
       );
       if (personRes.rows.length > 0) {
+        const person = personRes.rows[0];
         await db.query(
           `INSERT INTO contact_activities
              (organizer_id, person_id, activity_type, description, meta, occurred_at)
            VALUES ($1, $2, 'email_replied', $3, $4, $5)`,
           [
             recipient.organizer_id,
-            personRes.rows[0].id,
+            person.id,
             (subject || '').substring(0, 200),
             JSON.stringify({ campaign_id: recipient.campaign_id, from, subject }),
             replyTime,
           ]
         );
+
+        // Auto-stage: if person is unassigned, New, or Contacted → move to Interested
+        try {
+          let currentStageName = null;
+          if (person.pipeline_stage_id) {
+            const curRes = await db.query(
+              `SELECT name FROM pipeline_stages
+                WHERE id = $1 AND organizer_id = $2 LIMIT 1`,
+              [person.pipeline_stage_id, recipient.organizer_id]
+            );
+            currentStageName = curRes.rows[0] ? curRes.rows[0].name : null;
+          }
+
+          const shouldAutoMove =
+            !person.pipeline_stage_id ||
+            currentStageName === 'New' ||
+            currentStageName === 'Contacted';
+
+          if (shouldAutoMove) {
+            const intRes = await db.query(
+              `SELECT id FROM pipeline_stages
+                WHERE organizer_id = $1 AND name = 'Interested' LIMIT 1`,
+              [recipient.organizer_id]
+            );
+            if (intRes.rows.length > 0) {
+              const interestedId = intRes.rows[0].id;
+              await db.query(
+                `UPDATE persons
+                    SET pipeline_stage_id = $1, pipeline_entered_at = NOW()
+                  WHERE id = $2 AND organizer_id = $3`,
+                [interestedId, person.id, recipient.organizer_id]
+              );
+              await db.query(
+                `INSERT INTO contact_activities
+                   (organizer_id, person_id, activity_type, description, meta)
+                 VALUES ($1, $2, 'status_change', 'Auto-moved to Interested (reply received)', $3)`,
+                [
+                  recipient.organizer_id,
+                  person.id,
+                  JSON.stringify({
+                    from_stage: currentStageName,
+                    to_stage: 'Interested',
+                    auto: true,
+                    reason: 'reply_received',
+                  }),
+                ]
+              );
+              console.log(`  ➡️ Auto-staged ${recipient.email} to Interested`);
+            }
+          }
+        } catch (stageErr) {
+          console.warn('  ⚠️ Auto-stage failed:', stageErr.message);
+        }
       }
     } catch (activityErr) {
       console.warn('  ⚠️ contact_activities insert failed:', activityErr.message);
