@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const db = require('../db');
+const { isPrivileged, userScopeFilter, getUserContext } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -27,10 +28,33 @@ function authRequired(req, res, next) {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Helper: load a campaign and enforce per-user ownership for non-privileged users
+// -----------------------------------------------------------------------------
+async function loadOwnedCampaign(req, campaignId) {
+  const organizerId = req.auth.organizer_id;
+  const campRes = await db.query(
+    `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
+    [campaignId, organizerId]
+  );
+  if (campRes.rows.length === 0) {
+    return { error: { status: 404, message: 'Campaign not found' } };
+  }
+  const campaign = campRes.rows[0];
+  if (!isPrivileged(req)) {
+    const { userId } = getUserContext(req);
+    if (campaign.created_by_user_id && campaign.created_by_user_id !== userId) {
+      return { error: { status: 403, message: 'Forbidden' } };
+    }
+  }
+  return { campaign };
+}
+
 // POST /api/campaigns
 router.post('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
+    const userId = req.auth.user_id;
     const { name, template_id, list_id, sender_id } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
@@ -71,10 +95,10 @@ router.post('/', authRequired, async (req, res) => {
     }
 
     const result = await db.query(
-      `INSERT INTO campaigns (organizer_id, template_id, list_id, sender_id, name, status)
-       VALUES ($1, $2, $3, $4, $5, 'draft')
+      `INSERT INTO campaigns (organizer_id, template_id, list_id, sender_id, name, status, created_by_user_id)
+       VALUES ($1, $2, $3, $4, $5, 'draft', $6)
        RETURNING *`,
-      [organizerId, template_id, list_id || null, sender_id || null, name.trim()]
+      [organizerId, template_id, list_id || null, sender_id || null, name.trim(), userId]
     );
 
     res.status(201).json(result.rows[0]);
@@ -88,10 +112,11 @@ router.post('/', authRequired, async (req, res) => {
 router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
+    const scope = userScopeFilter(req, 2, 'c.created_by_user_id');
 
     const result = await db.query(
-      `SELECT c.*, 
-              t.subject as template_subject, 
+      `SELECT c.*,
+              t.subject as template_subject,
               t.name as template_name,
               l.name as list_name,
               s.from_email as sender_email,
@@ -100,9 +125,9 @@ router.get('/', authRequired, async (req, res) => {
        LEFT JOIN email_templates t ON c.template_id = t.id
        LEFT JOIN lists l ON c.list_id = l.id
        LEFT JOIN sender_identities s ON c.sender_id = s.id
-       WHERE c.organizer_id = $1
+       WHERE c.organizer_id = $1${scope.clause}
        ORDER BY c.created_at DESC`,
-      [organizerId]
+      [organizerId, ...scope.params]
     );
 
     res.json(result.rows);
@@ -116,6 +141,11 @@ router.get('/:id', authRequired, async (req, res) => {
   try {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
+
+    const owned = await loadOwnedCampaign(req, campaignId);
+    if (owned.error) {
+      return res.status(owned.error.status).json({ error: owned.error.message });
+    }
 
     const result = await db.query(
       `SELECT c.*,
@@ -150,16 +180,11 @@ router.delete('/:id', authRequired, async (req, res) => {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
 
-    const campRes = await db.query(
-      `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
-      [campaignId, organizerId]
-    );
-
-    if (campRes.rows.length === 0) {
-      return res.status(404).json({ error: "Campaign not found" });
+    const owned = await loadOwnedCampaign(req, campaignId);
+    if (owned.error) {
+      return res.status(owned.error.status).json({ error: owned.error.message });
     }
-
-    const campaign = campRes.rows[0];
+    const campaign = owned.campaign;
 
     if (campaign.status === 'sending') {
       return res.status(400).json({ 
@@ -191,16 +216,11 @@ router.patch('/:id', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
     const { list_id, sender_id, include_risky, verification_mode } = req.body;
 
-    const campRes = await db.query(
-      `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
-      [campaignId, organizerId]
-    );
-
-    if (campRes.rows.length === 0) {
-      return res.status(404).json({ error: "Campaign not found" });
+    const owned = await loadOwnedCampaign(req, campaignId);
+    if (owned.error) {
+      return res.status(owned.error.status).json({ error: owned.error.message });
     }
-
-    const campaign = campRes.rows[0];
+    const campaign = owned.campaign;
 
     if (campaign.status !== 'draft') {
       return res.status(400).json({
@@ -298,6 +318,15 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
     }
 
     const campaign = campRes.rows[0];
+
+    // Ownership check for non-privileged users
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      if (campaign.created_by_user_id && campaign.created_by_user_id !== userId) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+    }
 
     if (campaign.status !== 'draft') {
       await client.query('ROLLBACK');
@@ -577,16 +606,11 @@ router.post('/:id/start', authRequired, async (req, res) => {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
 
-    const campRes = await db.query(
-      `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
-      [campaignId, organizerId]
-    );
-
-    if (campRes.rows.length === 0) {
-      return res.status(404).json({ error: "Campaign not found" });
+    const owned = await loadOwnedCampaign(req, campaignId);
+    if (owned.error) {
+      return res.status(owned.error.status).json({ error: owned.error.message });
     }
-
-    const campaign = campRes.rows[0];
+    const campaign = owned.campaign;
 
     // Allow start from 'ready' or 'scheduled' status
     if (campaign.status !== 'ready' && campaign.status !== 'scheduled') {
@@ -601,10 +625,62 @@ router.post('/:id/start', authRequired, async (req, res) => {
       [campaignId]
     );
 
-    if (parseInt(recipientCount.rows[0].count) === 0) {
+    const pendingCount = parseInt(recipientCount.rows[0].count) || 0;
+    if (pendingCount === 0) {
       return res.status(400).json({
         error: "Cannot start campaign: no recipients found. Please resolve the campaign first."
       });
+    }
+
+    // -------------------------------------------------------------------------
+    // Daily email limit enforcement (per user who starts the campaign)
+    // -------------------------------------------------------------------------
+    // The limit belongs to the user pressing "Start". We count today's sent
+    // events across every campaign they own, in this organizer.
+    const { userId } = getUserContext(req);
+    const limitRes = await db.query(
+      `SELECT daily_email_limit FROM users WHERE id = $1`,
+      [userId]
+    );
+    const dailyLimit = limitRes.rows.length
+      ? parseInt(limitRes.rows[0].daily_email_limit, 10) || 0
+      : 0;
+
+    if (dailyLimit > 0) {
+      const sentRes = await db.query(
+        `SELECT COUNT(*)::int AS sent_today
+           FROM campaign_events ce
+           JOIN campaigns c ON c.id = ce.campaign_id
+          WHERE ce.organizer_id = $1
+            AND c.created_by_user_id = $2
+            AND ce.event_type = 'sent'
+            AND ce.occurred_at >= CURRENT_DATE`,
+        [organizerId, userId]
+      );
+      const sentToday = parseInt(sentRes.rows[0].sent_today, 10) || 0;
+      const remaining = Math.max(0, dailyLimit - sentToday);
+
+      if (sentToday >= dailyLimit) {
+        return res.status(429).json({
+          error: 'Daily email limit reached',
+          limit: dailyLimit,
+          sent_today: sentToday,
+          remaining: 0,
+        });
+      }
+
+      // Block starting if the pending batch would exceed the daily allowance.
+      // Worker-level throttling is out of scope here — this endpoint just
+      // guards against bulk-blasting over the limit in a single action.
+      if (pendingCount > remaining) {
+        return res.status(429).json({
+          error: 'Campaign would exceed your daily email limit',
+          limit: dailyLimit,
+          sent_today: sentToday,
+          remaining,
+          attempted: pendingCount,
+        });
+      }
     }
 
     const updateRes = await db.query(
@@ -636,16 +712,11 @@ router.post('/:id/pause', authRequired, async (req, res) => {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
 
-    const campRes = await db.query(
-      `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
-      [campaignId, organizerId]
-    );
-
-    if (campRes.rows.length === 0) {
-      return res.status(404).json({ error: "Campaign not found" });
+    const owned = await loadOwnedCampaign(req, campaignId);
+    if (owned.error) {
+      return res.status(owned.error.status).json({ error: owned.error.message });
     }
-
-    const campaign = campRes.rows[0];
+    const campaign = owned.campaign;
 
     if (campaign.status !== 'sending') {
       return res.status(400).json({
@@ -682,16 +753,11 @@ router.post('/:id/resume', authRequired, async (req, res) => {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
 
-    const campRes = await db.query(
-      `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
-      [campaignId, organizerId]
-    );
-
-    if (campRes.rows.length === 0) {
-      return res.status(404).json({ error: "Campaign not found" });
+    const owned = await loadOwnedCampaign(req, campaignId);
+    if (owned.error) {
+      return res.status(owned.error.status).json({ error: owned.error.message });
     }
-
-    const campaign = campRes.rows[0];
+    const campaign = owned.campaign;
 
     if (campaign.status !== 'paused') {
       return res.status(400).json({
@@ -742,16 +808,11 @@ router.post('/:id/schedule', authRequired, async (req, res) => {
       return res.status(400).json({ error: "scheduled_at must be in the future" });
     }
 
-    const campRes = await db.query(
-      `SELECT * FROM campaigns WHERE id = $1 AND organizer_id = $2`,
-      [campaignId, organizerId]
-    );
-
-    if (campRes.rows.length === 0) {
-      return res.status(404).json({ error: "Campaign not found" });
+    const owned = await loadOwnedCampaign(req, campaignId);
+    if (owned.error) {
+      return res.status(owned.error.status).json({ error: owned.error.message });
     }
-
-    const campaign = campRes.rows[0];
+    const campaign = owned.campaign;
 
     if (campaign.status !== 'ready') {
       return res.status(400).json({
@@ -792,10 +853,15 @@ router.get('/:id/stats', authRequired, async (req, res) => {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
 
+    const owned = await loadOwnedCampaign(req, campaignId);
+    if (owned.error) {
+      return res.status(owned.error.status).json({ error: owned.error.message });
+    }
+
     // Verify campaign exists and belongs to organizer
     const campRes = await db.query(
       `SELECT id, name, status, recipient_count, started_at, completed_at
-       FROM campaigns 
+       FROM campaigns
        WHERE id = $1 AND organizer_id = $2`,
       [campaignId, organizerId]
     );
@@ -847,6 +913,11 @@ router.get('/:id/analytics', authRequired, async (req, res) => {
   try {
     const campaignId = req.params.id;
     const organizerId = req.auth.organizer_id;
+
+    const owned = await loadOwnedCampaign(req, campaignId);
+    if (owned.error) {
+      return res.status(owned.error.status).json({ error: owned.error.message });
+    }
 
     // Verify campaign exists and belongs to organizer
     const campRes = await db.query(
@@ -1075,14 +1146,9 @@ router.get('/:id/recipients', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
     const { status, limit = 100, offset = 0 } = req.query;
 
-    // Verify campaign exists and belongs to organizer
-    const campRes = await db.query(
-      `SELECT id FROM campaigns WHERE id = $1 AND organizer_id = $2`,
-      [campaignId, organizerId]
-    );
-
-    if (campRes.rows.length === 0) {
-      return res.status(404).json({ error: "Campaign not found" });
+    const owned = await loadOwnedCampaign(req, campaignId);
+    if (owned.error) {
+      return res.status(owned.error.status).json({ error: owned.error.message });
     }
 
     // Build query with optional status filter

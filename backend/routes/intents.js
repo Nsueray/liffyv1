@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
+const { isPrivileged, getUserContext } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -23,6 +24,9 @@ const VALID_INTENT_TYPES = [
 ];
 
 // GET /api/intents — List all intent signals (paginated, filterable)
+//
+// Non-privileged users only see intents whose originating campaign they own.
+// Manual intents (campaign_id IS NULL) created by them also count as theirs.
 router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -60,10 +64,21 @@ router.get('/', authRequired, async (req, res) => {
       idx++;
     }
 
+    // User scoping: non-privileged users only see their own intents.
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      where.push(`(c.created_by_user_id = $${idx} OR pi.created_by_user_id = $${idx})`);
+      params.push(userId);
+      idx++;
+    }
+
     const whereClause = where.join(' AND ');
 
     const countRes = await db.query(
-      `SELECT COUNT(*) FROM prospect_intents pi WHERE ${whereClause}`,
+      `SELECT COUNT(*)
+         FROM prospect_intents pi
+         LEFT JOIN campaigns c ON c.id = pi.campaign_id
+        WHERE ${whereClause}`,
       params
     );
     const total = parseInt(countRes.rows[0].count, 10);
@@ -109,24 +124,34 @@ router.get('/stats', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
 
+    const params = [organizerId];
+    let userFilter = '';
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      userFilter = ' AND (c.created_by_user_id = $2 OR pi.created_by_user_id = $2)';
+      params.push(userId);
+    }
+
     const statsRes = await db.query(
       `SELECT
-         intent_type,
+         pi.intent_type,
          COUNT(*) AS count,
-         COUNT(DISTINCT person_id) AS unique_persons,
-         MAX(occurred_at) AS last_at
-       FROM prospect_intents
-       WHERE organizer_id = $1
-       GROUP BY intent_type
+         COUNT(DISTINCT pi.person_id) AS unique_persons,
+         MAX(pi.occurred_at) AS last_at
+       FROM prospect_intents pi
+       LEFT JOIN campaigns c ON c.id = pi.campaign_id
+       WHERE pi.organizer_id = $1${userFilter}
+       GROUP BY pi.intent_type
        ORDER BY count DESC`,
-      [organizerId]
+      params
     );
 
     const totalPersonsRes = await db.query(
-      `SELECT COUNT(DISTINCT person_id) AS total
-       FROM prospect_intents
-       WHERE organizer_id = $1`,
-      [organizerId]
+      `SELECT COUNT(DISTINCT pi.person_id) AS total
+       FROM prospect_intents pi
+       LEFT JOIN campaigns c ON c.id = pi.campaign_id
+       WHERE pi.organizer_id = $1${userFilter}`,
+      params
     );
 
     res.json({

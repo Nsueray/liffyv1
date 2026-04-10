@@ -4,6 +4,7 @@ const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
+const { isPrivileged, userScopeFilter, getUserContext } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
 
@@ -60,6 +61,29 @@ function validateJobId(req, res, next) {
 }
 
 /**
+ * Load a mining job and enforce per-user ownership for non-privileged users.
+ * Returns { job } on success or { error: { status, message } } on failure.
+ */
+async function loadOwnedJob(req, jobId, selectCols = 'id, organizer_id, created_by_user_id, status, name, type, input, strategy, site_profile, config, file_data') {
+  const organizerId = req.auth.organizer_id;
+  const r = await db.query(
+    `SELECT ${selectCols} FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+    [jobId, organizerId]
+  );
+  if (r.rows.length === 0) {
+    return { error: { status: 404, message: 'Job not found' } };
+  }
+  const job = r.rows[0];
+  if (!isPrivileged(req)) {
+    const { userId } = getUserContext(req);
+    if (job.created_by_user_id && job.created_by_user_id !== userId) {
+      return { error: { status: 403, message: 'Forbidden' } };
+    }
+  }
+  return { job };
+}
+
+/**
  * Helper: Convert Buffer to PostgreSQL bytea hex format
  * Bu fonksiyon binary veriyi güvenli bir şekilde PostgreSQL'e kaydeder
  */
@@ -76,7 +100,8 @@ function bufferToByteaHex(buffer) {
 router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req, res) => {
   try {
     const organizer_id = req.auth.organizer_id;
-    
+    const user_id = req.auth.user_id;
+
     // Body'den verileri al
     let { type, input, name, strategy, site_profile, config } = req.body;
     let fileBuffer = null;
@@ -130,8 +155,8 @@ router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req,
       // Dosya varsa - hex string olarak kaydet
       result = await db.query(
         `INSERT INTO mining_jobs
-         (organizer_id, type, input, name, strategy, site_profile, config, status, file_data)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', decode($8, 'hex'))
+         (organizer_id, type, input, name, strategy, site_profile, config, status, file_data, created_by_user_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', decode($8, 'hex'), $9)
          RETURNING id, organizer_id, type, input, name, strategy, site_profile, config, status, created_at`,
         [
           organizer_id,
@@ -141,15 +166,16 @@ router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req,
           strategy || 'auto',
           site_profile || null,
           config || {},
-          fileHex.slice(2) // Remove '\x' prefix, decode() expects pure hex
+          fileHex.slice(2), // Remove '\x' prefix, decode() expects pure hex
+          user_id
         ]
       );
     } else {
       // Dosya yoksa (URL job)
       result = await db.query(
         `INSERT INTO mining_jobs
-         (organizer_id, type, input, name, strategy, site_profile, config, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')
+         (organizer_id, type, input, name, strategy, site_profile, config, status, created_by_user_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
          RETURNING id, organizer_id, type, input, name, strategy, site_profile, config, status, created_at`,
         [
           organizer_id,
@@ -158,7 +184,8 @@ router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req,
           name || `Mining Job ${new Date().toISOString()}`,
           strategy || 'auto',
           site_profile || null,
-          config || {}
+          config || {},
+          user_id
         ]
       );
     }
@@ -194,19 +221,27 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
 
     if (search) {
       where.push(`(
-        name ILIKE $${idx} OR 
-        input ILIKE $${idx} OR 
+        name ILIKE $${idx} OR
+        input ILIKE $${idx} OR
         CAST(id AS TEXT) ILIKE $${idx}
       )`);
       params.push(`%${search}%`);
       idx++;
     }
 
+    // User isolation: non-privileged users only see their own jobs
+    const scope = userScopeFilter(req, idx, 'created_by_user_id');
+    if (scope.clause) {
+      where.push(scope.clause.replace(/^ AND /, ''));
+      params.push(...scope.params);
+      idx = scope.nextIdx;
+    }
+
     // ÖNEMLİ: file_data sütununu seçmiyoruz - performans için
     const jobsRes = await db.query(
       `SELECT id, organizer_id, type, input, name, strategy, site_profile, config, status,
               progress, total_found, total_emails_raw, stats, error, created_at, completed_at,
-              manual_required, manual_reason, import_status, import_progress
+              manual_required, manual_reason, import_status, import_progress, created_by_user_id
        FROM mining_jobs
        WHERE ${where.join(' AND ')}
        ORDER BY created_at DESC
@@ -214,6 +249,8 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
       [...params, limit, offset]
     );
 
+    // Stats follow the same scope so non-privileged users see their own totals
+    const statsScope = userScopeFilter(req, 2, 'created_by_user_id');
     const statsRes = await db.query(
       `SELECT
         COUNT(*)::int AS total,
@@ -223,8 +260,8 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
         COALESCE(SUM(total_emails_raw), 0)::int AS total_emails
        FROM mining_jobs
-       WHERE organizer_id = $1`,
-      [organizer_id]
+       WHERE organizer_id = $1${statsScope.clause}`,
+      [organizer_id, ...statsScope.params]
     );
 
     return res.json({
@@ -252,6 +289,7 @@ router.get('/api/mining/jobs/:id', authRequired, validateJobId, async (req, res)
       `SELECT id, organizer_id, type, input, name, strategy, site_profile, config, status,
               progress, total_found, total_emails_raw, stats, error, created_at, completed_at,
               manual_required, manual_reason, import_status, import_progress,
+              created_by_user_id,
               CASE WHEN file_data IS NOT NULL THEN true ELSE false END as has_file
        FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [job_id, organizer_id]
@@ -261,7 +299,17 @@ router.get('/api/mining/jobs/:id', authRequired, validateJobId, async (req, res)
       return res.status(404).json({ error: 'Job not found' });
     }
 
-    return res.json({ job: result.rows[0] });
+    const job = result.rows[0];
+
+    // Ownership check for non-privileged users
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      if (job.created_by_user_id && job.created_by_user_id !== userId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+    }
+
+    return res.json({ job });
   } catch (err) {
     console.error('GET /mining/jobs/:id error:', err);
     return res.status(500).json({ error: 'Failed to fetch job' });
@@ -276,12 +324,17 @@ router.patch('/api/mining/jobs/:id', authRequired, validateJobId, async (req, re
   const job_id = req.params.id;
 
   try {
+    const owned = await loadOwnedJob(req, job_id, 'id, created_by_user_id');
+    if (owned.error) {
+      return res.status(owned.error.status).json({ error: owned.error.message });
+    }
+
     const updates = req.body || {};
     const keys = Object.keys(updates);
-    
-    // file_data güncellemesine izin verme
-    const allowedKeys = keys.filter(k => k !== 'file_data');
-    
+
+    // file_data ve created_by_user_id güncellemesine izin verme
+    const allowedKeys = keys.filter(k => k !== 'file_data' && k !== 'created_by_user_id');
+
     if (!allowedKeys.length) {
       return res.status(400).json({ error: 'No valid fields to update' });
     }
@@ -312,13 +365,14 @@ router.patch('/api/mining/jobs/:id', authRequired, validateJobId, async (req, re
  */
 router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (req, res) => {
   const organizer_id = req.auth.organizer_id;
+  const user_id = req.auth.user_id;
   const job_id = req.params.id;
 
   try {
-    // Orijinal job'u al (file_data dahil)
+    // Orijinal job'u al (file_data dahil) + ownership check
     const jobRes = await db.query(
-      `SELECT type, input, name, strategy, site_profile, config, file_data 
-       FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      `SELECT type, input, name, strategy, site_profile, config, file_data, created_by_user_id
+         FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [job_id, organizer_id]
     );
 
@@ -328,11 +382,18 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
 
     const j = jobRes.rows[0];
 
-    // Yeni job oluştur
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      if (j.created_by_user_id && j.created_by_user_id !== userId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+    }
+
+    // Yeni job oluştur — retry'ı başlatan kullanıcıya ait olur
     const newJob = await db.query(
       `INSERT INTO mining_jobs
-       (organizer_id, type, input, name, strategy, site_profile, config, status, file_data)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
+       (organizer_id, type, input, name, strategy, site_profile, config, status, file_data, created_by_user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9)
        RETURNING id, organizer_id, type, input, name, status`,
       [
         organizer_id,
@@ -342,7 +403,8 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
         j.strategy,
         j.site_profile,
         j.config,
-        j.file_data // file_data olduğu gibi kopyalanıyor
+        j.file_data, // file_data olduğu gibi kopyalanıyor
+        user_id
       ]
     );
 
@@ -365,9 +427,9 @@ router.post('/api/mining/jobs/:id/enrich', authRequired, validateJobId, async (r
   const job_id = req.params.id;
 
   try {
-    // Verify job ownership
+    // Verify job ownership (org + user)
     const jobRes = await db.query(
-      `SELECT id, name, status FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      `SELECT id, name, status, created_by_user_id FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [job_id, organizer_id]
     );
 
@@ -376,6 +438,13 @@ router.post('/api/mining/jobs/:id/enrich', authRequired, validateJobId, async (r
     }
 
     const job = jobRes.rows[0];
+
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      if (job.created_by_user_id && job.created_by_user_id !== userId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+    }
 
     if (job.status === 'enriching') {
       return res.status(409).json({ error: 'Enrichment already in progress' });
@@ -554,14 +623,22 @@ router.get('/api/mining/jobs/:id/enrich-stats', authRequired, validateJobId, asy
   const job_id = req.params.id;
 
   try {
-    // Verify job ownership
+    // Verify job ownership (org + user)
     const jobRes = await db.query(
-      `SELECT id, status FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      `SELECT id, status, created_by_user_id FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [job_id, organizer_id]
     );
 
     if (!jobRes.rows.length) {
       return res.status(404).json({ error: 'Job not found' });
+    }
+
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      const ownerId = jobRes.rows[0].created_by_user_id;
+      if (ownerId && ownerId !== userId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
     }
 
     const countRes = await db.query(
@@ -596,12 +673,20 @@ router.delete('/api/mining/jobs/:id', authRequired, validateJobId, async (req, r
 
   try {
     const checkRes = await db.query(
-      `SELECT id FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      `SELECT id, created_by_user_id FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [job_id, organizer_id]
     );
 
     if (checkRes.rowCount === 0) {
       return res.status(404).json({ error: 'Job not found' });
+    }
+
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      const ownerId = checkRes.rows[0].created_by_user_id;
+      if (ownerId && ownerId !== userId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
     }
 
     // mining_results'lar CASCADE ile silinecek
@@ -629,7 +714,7 @@ router.get('/api/mining/jobs/:id/file', authRequired, validateJobId, async (req,
 
   try {
     const result = await db.query(
-      `SELECT input, file_data FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      `SELECT input, file_data, created_by_user_id FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [job_id, organizer_id]
     );
 
@@ -638,6 +723,13 @@ router.get('/api/mining/jobs/:id/file', authRequired, validateJobId, async (req,
     }
 
     const job = result.rows[0];
+
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      if (job.created_by_user_id && job.created_by_user_id !== userId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+    }
     
     if (!job.file_data) {
       return res.status(404).json({ error: 'No file data available' });

@@ -14,6 +14,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { authRequired } = require('../middleware/auth');
+const { isPrivileged, getUserContext } = require('../middleware/userScope');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (v) => typeof v === 'string' && UUID_REGEX.test(v);
@@ -302,6 +303,11 @@ router.get('/api/pipeline/board', authRequired, async (req, res) => {
 // PATCH /api/persons/:id/stage  body: { stage_id }
 // NOTE: this is a /api/persons path, so in server.js we mount this router at
 // root level (no /api/pipeline prefix) BEFORE the /api/persons router.
+//
+// Ownership:
+//   - If the person has no pipeline_assigned_user_id, the first user to
+//     change the stage becomes the assignee.
+//   - After that, only owner/admin or the assigned user may change the stage.
 router.patch('/api/persons/:id/stage', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
@@ -317,7 +323,7 @@ router.patch('/api/persons/:id/stage', authRequired, async (req, res) => {
 
     // Load current person (for from_stage + ownership check)
     const personRes = await db.query(
-      `SELECT id, pipeline_stage_id FROM persons
+      `SELECT id, pipeline_stage_id, pipeline_assigned_user_id FROM persons
         WHERE id = $1 AND organizer_id = $2 LIMIT 1`,
       [id, organizerId]
     );
@@ -325,6 +331,14 @@ router.patch('/api/persons/:id/stage', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'Person not found' });
     }
     const fromStageId = personRes.rows[0].pipeline_stage_id;
+    const currentAssignee = personRes.rows[0].pipeline_assigned_user_id;
+
+    // Ownership enforcement for non-privileged users
+    if (!isPrivileged(req)) {
+      if (currentAssignee && currentAssignee !== userId) {
+        return res.status(403).json({ error: 'This contact is assigned to another user' });
+      }
+    }
 
     let toStage = null;
     if (stage_id) {
@@ -332,14 +346,19 @@ router.patch('/api/persons/:id/stage', authRequired, async (req, res) => {
       if (!toStage) return res.status(404).json({ error: 'Stage not found' });
     }
 
+    // Auto-assign: on first stage change, current user becomes the assignee.
+    // Owner/admin leaves an existing assignee untouched; only fills NULLs.
+    const nextAssignee = currentAssignee || userId;
+
     // Update person
     const updRes = await db.query(
       `UPDATE persons
           SET pipeline_stage_id = $1,
-              pipeline_entered_at = CASE WHEN $1 IS NULL THEN NULL ELSE NOW() END
+              pipeline_entered_at = CASE WHEN $1 IS NULL THEN NULL ELSE NOW() END,
+              pipeline_assigned_user_id = CASE WHEN $1 IS NULL THEN NULL ELSE $4 END
         WHERE id = $2 AND organizer_id = $3
-        RETURNING id, pipeline_stage_id, pipeline_entered_at`,
-      [stage_id || null, id, organizerId]
+        RETURNING id, pipeline_stage_id, pipeline_entered_at, pipeline_assigned_user_id`,
+      [stage_id || null, id, organizerId, nextAssignee]
     );
 
     // Resolve from_stage name for activity meta (best-effort)

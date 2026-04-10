@@ -33,6 +33,7 @@ const adminAIMinerRouter = require('./routes/adminAIMiner');
 const sourceDiscoveryRouter = require('./routes/sourceDiscovery');
 const contactCrmRouter = require('./routes/contactCrm');
 const pipelineRouter = require('./routes/pipeline');
+const userManagementRouter = require('./routes/userManagement');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -84,6 +85,7 @@ app.use('/api/intents', intentsRouter);
 app.use('/api/unsubscribes', unsubscribesRouter);
 app.use('/api/admin/ai-miner', adminAIMinerRouter);
 app.use('/api/source-discovery', sourceDiscoveryRouter);
+app.use('/api/users', userManagementRouter);
 app.use(webhooksRouter);
 app.use(statsRouter);
 

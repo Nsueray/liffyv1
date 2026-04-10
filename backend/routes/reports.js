@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
+const { isPrivileged, getUserContext } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -39,7 +40,7 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
     const campaign_id = req.params.id;
     const organizer_id = req.auth.organizer_id;
 
-    // 1) Campaign + template info
+    // 1) Campaign + template info (with owner for isolation check)
     const campRes = await db.query(
       `SELECT
          c.id,
@@ -48,6 +49,7 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
          c.created_at,
          c.scheduled_at,
          c.template_id,
+         c.created_by_user_id,
          t.subject,
          t.name AS template_name
        FROM campaigns c
@@ -61,6 +63,14 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
     }
 
     const campaign = campRes.rows[0];
+
+    // Non-privileged users only see reports for their own campaigns
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      if (campaign.created_by_user_id && campaign.created_by_user_id !== userId) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+    }
 
     // 2) Recipient stats
     const recRes = await db.query(
@@ -253,9 +263,48 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
   try {
     const organizer_id = req.auth.organizer_id;
 
+    // Non-privileged users see only their own campaigns' data. We pre-load
+    // the list of campaign IDs they own and then scope every follow-up query.
+    let campaignIds = null; // null = unrestricted (owner/admin)
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      const idsRes = await db.query(
+        `SELECT id FROM campaigns WHERE organizer_id = $1 AND created_by_user_id = $2`,
+        [organizer_id, userId]
+      );
+      campaignIds = idsRes.rows.map(r => r.id);
+      // If user has no campaigns, return empty report early
+      if (campaignIds.length === 0) {
+        return res.json({
+          success: true,
+          data_source: 'campaign_events',
+          campaigns: { total: 0, draft: 0, scheduled: 0, sending: 0, completed: 0, failed: 0 },
+          recipients: { total: 0, pending: 0, sent: 0, failed: 0 },
+          events: { total: 0 },
+          timeline: [],
+          domains: [],
+          bounce_reasons: [],
+        });
+      }
+    }
+
+    // Helper: build scoped WHERE clause for tables that carry campaign_id
+    // Returns { clause, params } where clause starts with "organizer_id = $1"
+    // and continues with optional "AND campaign_id = ANY($2)".
+    const scopedWhere = () => {
+      if (campaignIds === null) {
+        return { clause: 'organizer_id = $1', params: [organizer_id] };
+      }
+      return {
+        clause: 'organizer_id = $1 AND campaign_id = ANY($2::uuid[])',
+        params: [organizer_id, campaignIds],
+      };
+    };
+
     // 1) Campaign stats
-    const campRes = await db.query(
-      `SELECT
+    let campStatsQuery, campStatsParams;
+    if (campaignIds === null) {
+      campStatsQuery = `SELECT
          COUNT(*) AS total,
          SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) AS draft,
          SUM(CASE WHEN status = 'scheduled' THEN 1 ELSE 0 END) AS scheduled,
@@ -263,12 +312,25 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
          SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
        FROM campaigns
-       WHERE organizer_id = $1`,
-      [organizer_id]
-    );
+       WHERE organizer_id = $1`;
+      campStatsParams = [organizer_id];
+    } else {
+      campStatsQuery = `SELECT
+         COUNT(*) AS total,
+         SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) AS draft,
+         SUM(CASE WHEN status = 'scheduled' THEN 1 ELSE 0 END) AS scheduled,
+         SUM(CASE WHEN status = 'sending' THEN 1 ELSE 0 END) AS sending,
+         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+       FROM campaigns
+       WHERE organizer_id = $1 AND id = ANY($2::uuid[])`;
+      campStatsParams = [organizer_id, campaignIds];
+    }
+    const campRes = await db.query(campStatsQuery, campStatsParams);
     const campStats = campRes.rows[0];
 
     // 2) Recipient stats (all campaigns)
+    const recScope = scopedWhere();
     const recRes = await db.query(
       `SELECT
          COUNT(*) AS total,
@@ -276,18 +338,19 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
          SUM(CASE WHEN status = 'sent' THEN 1 ELSE 0 END) AS sent,
          SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
        FROM campaign_recipients
-       WHERE organizer_id = $1`,
-      [organizer_id]
+       WHERE ${recScope.clause}`,
+      recScope.params
     );
     const recStats = recRes.rows[0];
 
     // 3) Event stats — campaign_events with campaign_recipients fallback
+    const evScope = scopedWhere();
     const eventRes = await db.query(
       `SELECT event_type, COUNT(*) AS count
        FROM campaign_events
-       WHERE organizer_id = $1
+       WHERE ${evScope.clause}
        GROUP BY event_type`,
-      [organizer_id]
+      evScope.params
     );
 
     const events = {};
@@ -302,6 +365,7 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
     } else {
       // Fallback: derive from campaign_recipients timestamps
       dataSource = 'campaign_recipients';
+      const fbScope = scopedWhere();
       const fbRes = await db.query(
         `SELECT
            COUNT(*) FILTER (WHERE status IN ('sent','delivered','opened','clicked','bounced')) AS sent,
@@ -310,8 +374,8 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
            COUNT(*) FILTER (WHERE clicked_at IS NOT NULL) AS clicked,
            COUNT(*) FILTER (WHERE bounced_at IS NOT NULL) AS bounced
          FROM campaign_recipients
-         WHERE organizer_id = $1`,
-        [organizer_id]
+         WHERE ${fbScope.clause}`,
+        fbScope.params
       );
       const fb = fbRes.rows[0];
       events.sent = parseInt(fb.sent) || 0;
@@ -326,31 +390,33 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
     // 4) Timeline
     let timeline;
     if (dataSource === 'campaign_events') {
+      const tlScope = scopedWhere();
       const timelineRes = await db.query(
         `SELECT DATE(occurred_at) AS day, event_type, COUNT(*) AS count
          FROM campaign_events
-         WHERE organizer_id = $1
+         WHERE ${tlScope.clause}
          GROUP BY DATE(occurred_at), event_type
          ORDER BY day ASC`,
-        [organizer_id]
+        tlScope.params
       );
       timeline = pivotTimeline(timelineRes.rows, 'day');
     } else {
+      const tlScope = scopedWhere();
       const timelineRes = await db.query(
         `SELECT day, event_type, COUNT(*) AS count FROM (
-           SELECT DATE(sent_at) AS day, 'sent' AS event_type FROM campaign_recipients WHERE organizer_id = $1 AND sent_at IS NOT NULL
+           SELECT DATE(sent_at) AS day, 'sent' AS event_type FROM campaign_recipients WHERE ${tlScope.clause} AND sent_at IS NOT NULL
            UNION ALL
-           SELECT DATE(delivered_at), 'delivered' FROM campaign_recipients WHERE organizer_id = $1 AND delivered_at IS NOT NULL
+           SELECT DATE(delivered_at), 'delivered' FROM campaign_recipients WHERE ${tlScope.clause} AND delivered_at IS NOT NULL
            UNION ALL
-           SELECT DATE(opened_at), 'open' FROM campaign_recipients WHERE organizer_id = $1 AND opened_at IS NOT NULL
+           SELECT DATE(opened_at), 'open' FROM campaign_recipients WHERE ${tlScope.clause} AND opened_at IS NOT NULL
            UNION ALL
-           SELECT DATE(clicked_at), 'click' FROM campaign_recipients WHERE organizer_id = $1 AND clicked_at IS NOT NULL
+           SELECT DATE(clicked_at), 'click' FROM campaign_recipients WHERE ${tlScope.clause} AND clicked_at IS NOT NULL
            UNION ALL
-           SELECT DATE(bounced_at), 'bounce' FROM campaign_recipients WHERE organizer_id = $1 AND bounced_at IS NOT NULL
+           SELECT DATE(bounced_at), 'bounce' FROM campaign_recipients WHERE ${tlScope.clause} AND bounced_at IS NOT NULL
          ) sub
          GROUP BY day, event_type
          ORDER BY day ASC`,
-        [organizer_id]
+        tlScope.params
       );
       timeline = pivotTimeline(timelineRes.rows, 'day');
     }
@@ -358,6 +424,7 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
     // 5) Domain breakdown
     let domains;
     if (dataSource === 'campaign_events') {
+      const dScope = scopedWhere();
       const domainRes = await db.query(
         `SELECT
            LOWER(split_part(email, '@', 2)) AS domain,
@@ -366,14 +433,15 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
            COUNT(*) FILTER (WHERE event_type = 'bounce') AS bounced,
            COUNT(*) FILTER (WHERE event_type = 'open') AS opened
          FROM campaign_events
-         WHERE organizer_id = $1
+         WHERE ${dScope.clause}
          GROUP BY domain
          ORDER BY total DESC
          LIMIT 50`,
-        [organizer_id]
+        dScope.params
       );
       domains = mapDomains(domainRes.rows);
     } else {
+      const dScope = scopedWhere();
       const domainRes = await db.query(
         `SELECT
            LOWER(split_part(email, '@', 2)) AS domain,
@@ -382,11 +450,11 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
            COUNT(*) FILTER (WHERE bounced_at IS NOT NULL) AS bounced,
            COUNT(*) FILTER (WHERE opened_at IS NOT NULL) AS opened
          FROM campaign_recipients
-         WHERE organizer_id = $1
+         WHERE ${dScope.clause}
          GROUP BY domain
          ORDER BY total DESC
          LIMIT 50`,
-        [organizer_id]
+        dScope.params
       );
       domains = mapDomains(domainRes.rows);
     }
@@ -394,25 +462,27 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
     // 6) Bounce reasons
     let bounce_reasons;
     if (dataSource === 'campaign_events') {
+      const bScope = scopedWhere();
       const bounceRes = await db.query(
         `SELECT COALESCE(reason, 'unknown') AS reason, COUNT(*) AS count
          FROM campaign_events
-         WHERE organizer_id = $1 AND event_type = 'bounce'
+         WHERE ${bScope.clause} AND event_type = 'bounce'
          GROUP BY reason
          ORDER BY count DESC
          LIMIT 20`,
-        [organizer_id]
+        bScope.params
       );
       bounce_reasons = bounceRes.rows.map(r => ({ reason: r.reason, count: parseInt(r.count || 0, 10) }));
     } else {
+      const bScope = scopedWhere();
       const bounceRes = await db.query(
         `SELECT COALESCE(last_error, 'unknown') AS reason, COUNT(*) AS count
          FROM campaign_recipients
-         WHERE organizer_id = $1 AND bounced_at IS NOT NULL
+         WHERE ${bScope.clause} AND bounced_at IS NOT NULL
          GROUP BY last_error
          ORDER BY count DESC
          LIMIT 20`,
-        [organizer_id]
+        bScope.params
       );
       bounce_reasons = bounceRes.rows.map(r => ({ reason: r.reason, count: parseInt(r.count || 0, 10) }));
     }

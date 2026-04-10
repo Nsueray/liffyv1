@@ -11,6 +11,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { authRequired } = require('../middleware/auth');
+const { isPrivileged, userScopeFilter, getUserContext } = require('../middleware/userScope');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (v) => typeof v === 'string' && UUID_REGEX.test(v);
@@ -56,6 +57,7 @@ async function writeActivity({ organizerId, personId, userId, activityType, desc
 // =============================================================================
 
 // GET /api/persons/:personId/notes — list notes (newest first)
+// Non-privileged users see only their own notes.
 router.get('/api/persons/:personId/notes', authRequired, async (req, res) => {
   try {
     const { personId } = req.params;
@@ -65,14 +67,16 @@ router.get('/api/persons/:personId/notes', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'Person not found' });
     }
 
+    const scope = userScopeFilter(req, 3, 'n.user_id');
+
     const r = await db.query(
       `SELECT n.id, n.content, n.created_at,
               n.user_id, u.email AS user_email
          FROM contact_notes n
          LEFT JOIN users u ON n.user_id = u.id
-        WHERE n.person_id = $1 AND n.organizer_id = $2
+        WHERE n.person_id = $1 AND n.organizer_id = $2${scope.clause}
         ORDER BY n.created_at DESC`,
-      [personId, organizerId]
+      [personId, organizerId, ...scope.params]
     );
 
     res.json({ notes: r.rows });
@@ -123,6 +127,7 @@ router.post('/api/persons/:personId/notes', authRequired, async (req, res) => {
 });
 
 // DELETE /api/persons/:personId/notes/:noteId
+// Non-privileged users can only delete their own notes.
 router.delete('/api/persons/:personId/notes/:noteId', authRequired, async (req, res) => {
   try {
     const { personId, noteId } = req.params;
@@ -133,11 +138,19 @@ router.delete('/api/persons/:personId/notes/:noteId', authRequired, async (req, 
       return res.status(404).json({ error: 'Person not found' });
     }
 
+    const params = [noteId, personId, organizerId];
+    let userFilter = '';
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      userFilter = ' AND user_id = $4';
+      params.push(userId);
+    }
+
     const r = await db.query(
       `DELETE FROM contact_notes
-        WHERE id = $1 AND person_id = $2 AND organizer_id = $3
+        WHERE id = $1 AND person_id = $2 AND organizer_id = $3${userFilter}
         RETURNING id`,
-      [noteId, personId, organizerId]
+      params
     );
     if (r.rowCount === 0) return res.status(404).json({ error: 'Note not found' });
 
@@ -161,16 +174,26 @@ router.get('/api/persons/:personId/activities', authRequired, async (req, res) =
       return res.status(404).json({ error: 'Person not found' });
     }
 
+    // Non-privileged users only see activities they recorded. System-generated
+    // activities (user_id IS NULL) stay visible to everyone.
+    const filterParams = [personId, organizerId];
+    let userFilter = '';
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      userFilter = ' AND (a.user_id = $3 OR a.user_id IS NULL)';
+      filterParams.push(userId);
+    }
+
     const r = await db.query(
       `SELECT a.id, a.activity_type, a.description, a.meta,
               a.occurred_at, a.created_at,
               a.user_id, u.email AS user_email
          FROM contact_activities a
          LEFT JOIN users u ON a.user_id = u.id
-        WHERE a.person_id = $1 AND a.organizer_id = $2
+        WHERE a.person_id = $1 AND a.organizer_id = $2${userFilter}
         ORDER BY a.occurred_at DESC
         LIMIT 200`,
-      [personId, organizerId]
+      filterParams
     );
 
     res.json({ activities: r.rows });
@@ -185,6 +208,7 @@ router.get('/api/persons/:personId/activities', authRequired, async (req, res) =
 // =============================================================================
 
 // GET /api/persons/:personId/tasks
+// Non-privileged users only see tasks assigned to them or created by them.
 router.get('/api/persons/:personId/tasks', authRequired, async (req, res) => {
   try {
     const { personId } = req.params;
@@ -194,6 +218,14 @@ router.get('/api/persons/:personId/tasks', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'Person not found' });
     }
 
+    const params = [personId, organizerId];
+    let userFilter = '';
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      userFilter = ' AND (t.assigned_to = $3 OR t.created_by = $3)';
+      params.push(userId);
+    }
+
     const r = await db.query(
       `SELECT t.*,
               ua.email AS assigned_to_email,
@@ -201,12 +233,12 @@ router.get('/api/persons/:personId/tasks', authRequired, async (req, res) => {
          FROM contact_tasks t
          LEFT JOIN users ua ON t.assigned_to = ua.id
          LEFT JOIN users uc ON t.created_by = uc.id
-        WHERE t.person_id = $1 AND t.organizer_id = $2
+        WHERE t.person_id = $1 AND t.organizer_id = $2${userFilter}
         ORDER BY
           CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END,
           t.due_date NULLS LAST,
           t.created_at DESC`,
-      [personId, organizerId]
+      params
     );
 
     res.json({ tasks: r.rows });
@@ -283,6 +315,21 @@ router.patch('/api/tasks/:taskId', authRequired, async (req, res) => {
 
     if (!isUuid(taskId)) return res.status(400).json({ error: 'Invalid taskId' });
 
+    // Ownership check — non-privileged users can only patch tasks
+    // assigned to them or created by them.
+    if (!isPrivileged(req)) {
+      const ownRes = await db.query(
+        `SELECT 1 FROM contact_tasks
+          WHERE id = $1 AND organizer_id = $2
+            AND (assigned_to = $3 OR created_by = $3)
+          LIMIT 1`,
+        [taskId, organizerId, userId]
+      );
+      if (ownRes.rowCount === 0) {
+        return res.status(404).json({ error: 'Task not found' });
+      }
+    }
+
     const allowed = ['title', 'description', 'due_date', 'status', 'priority', 'assigned_to'];
     const sets = [];
     const vals = [];
@@ -336,6 +383,7 @@ router.patch('/api/tasks/:taskId', authRequired, async (req, res) => {
 });
 
 // DELETE /api/tasks/:taskId
+// Non-privileged users can only delete tasks they created.
 router.delete('/api/tasks/:taskId', authRequired, async (req, res) => {
   try {
     const { taskId } = req.params;
@@ -343,9 +391,17 @@ router.delete('/api/tasks/:taskId', authRequired, async (req, res) => {
 
     if (!isUuid(taskId)) return res.status(400).json({ error: 'Invalid taskId' });
 
+    const params = [taskId, organizerId];
+    let userFilter = '';
+    if (!isPrivileged(req)) {
+      const { userId } = getUserContext(req);
+      userFilter = ' AND created_by = $3';
+      params.push(userId);
+    }
+
     const r = await db.query(
-      `DELETE FROM contact_tasks WHERE id = $1 AND organizer_id = $2 RETURNING id`,
-      [taskId, organizerId]
+      `DELETE FROM contact_tasks WHERE id = $1 AND organizer_id = $2${userFilter} RETURNING id`,
+      params
     );
     if (r.rowCount === 0) return res.status(404).json({ error: 'Task not found' });
 
