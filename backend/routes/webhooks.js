@@ -727,6 +727,32 @@ router.post(
 
     console.log(`  📝 Reply recorded for ${recipient.email} (campaign: ${recipient.campaign_id})`);
 
+    // Best-effort contact_activities hook — resolve person_id via email + organizer
+    try {
+      const personRes = await db.query(
+        `SELECT id FROM persons
+          WHERE organizer_id = $1 AND LOWER(email) = LOWER($2)
+          LIMIT 1`,
+        [recipient.organizer_id, recipient.email]
+      );
+      if (personRes.rows.length > 0) {
+        await db.query(
+          `INSERT INTO contact_activities
+             (organizer_id, person_id, activity_type, description, meta, occurred_at)
+           VALUES ($1, $2, 'email_replied', $3, $4, $5)`,
+          [
+            recipient.organizer_id,
+            personRes.rows[0].id,
+            (subject || '').substring(0, 200),
+            JSON.stringify({ campaign_id: recipient.campaign_id, from, subject }),
+            replyTime,
+          ]
+        );
+      }
+    } catch (activityErr) {
+      console.warn('  ⚠️ contact_activities insert failed:', activityErr.message);
+    }
+
     // 6. Forward reply to organizer's inbox (best-effort, never blocks response)
     await forwardReplyToOrganizer({
       campaignId: recipient.campaign_id,

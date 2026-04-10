@@ -31,6 +31,7 @@ const intentsRouter = require('./routes/intents');
 const unsubscribesRouter = require('./routes/unsubscribes');
 const adminAIMinerRouter = require('./routes/adminAIMiner');
 const sourceDiscoveryRouter = require('./routes/sourceDiscovery');
+const contactCrmRouter = require('./routes/contactCrm');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -71,6 +72,9 @@ app.use('/api/settings', settingsRouter);
 app.use('/api/campaigns', campaignsRouter);
 app.use('/api/verification', verificationRouter);
 app.use('/api/zoho', zohoRouter);
+// Contact CRM routes must come BEFORE /api/persons router so that
+// /api/persons/:id/notes|activities|tasks are matched by contactCrm first.
+app.use(contactCrmRouter);
 app.use('/api/persons', personsRouter);
 app.use('/api/intents', intentsRouter);
 app.use('/api/unsubscribes', unsubscribesRouter);

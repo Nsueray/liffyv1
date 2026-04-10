@@ -4,8 +4,8 @@ const db = require('../db');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 
-// TODO: Move JWT secret into .env in production
-const JWT_SECRET = "liffy_secret_key_change_me";
+// Shared JWT secret — read from env, with legacy fallback for local dev
+const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
 /**
  * REGISTER
@@ -89,7 +89,8 @@ router.post('/api/auth/register', async (req, res) => {
       {
         user_id: user.id,
         organizer_id: organizer.id,
-        role: user.role
+        role: user.role,
+        email: user.email
       },
       JWT_SECRET,
       { expiresIn: "7d" }
@@ -151,7 +152,8 @@ router.post('/api/auth/login', async (req, res) => {
       {
         user_id: user.id,
         organizer_id: user.organizer_id,
-        role: user.role
+        role: user.role,
+        email: user.email
       },
       JWT_SECRET,
       { expiresIn: "7d" }

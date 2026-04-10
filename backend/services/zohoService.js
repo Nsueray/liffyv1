@@ -364,6 +364,30 @@ async function sendBatch(urls, accessToken, module, action, batch, organizerId, 
         console.error('[Zoho] Push log insert error:', logErr.message);
       }
 
+      // Best-effort contact_activities — only on success
+      if (isSuccess) {
+        try {
+          await db.query(
+            `INSERT INTO contact_activities
+               (organizer_id, person_id, user_id, activity_type, description, meta)
+             VALUES ($1, $2, $3, 'zoho_pushed', $4, $5)`,
+            [
+              organizerId,
+              entry.person.id,
+              userId || null,
+              `Pushed to Zoho ${module}`,
+              JSON.stringify({
+                zoho_module: module,
+                zoho_record_id: zohoRecordId,
+                action: effectiveAction === 'insert' ? 'create' : (effectiveAction === 'update' ? 'update' : action),
+              }),
+            ]
+          );
+        } catch (actErr) {
+          console.warn('[Zoho] contact_activities insert failed:', actErr.message);
+        }
+      }
+
       results.push({
         person_id: entry.person.id,
         email: entry.person.email,
