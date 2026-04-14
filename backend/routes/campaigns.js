@@ -379,14 +379,14 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
 
     // --- Phase 3: Canonical resolve (persons + affiliations preferred, prospects fallback) ---
     // Verification status: prefer persons.verification_status (canonical), fallback to prospects
+    // Verification filter — used in outer SELECT from CTE, so reference CTE column name directly
     let verificationFilter;
     if (verificationMode === 'verified_only') {
-      // Only send to valid or catchall emails
-      verificationFilter = `COALESCE(pn.verification_status, p.verification_status, 'unknown') IN ('valid', 'catchall')`;
+      verificationFilter = `verification_status IN ('valid', 'catchall')`;
     } else if (campaign.include_risky) {
-      verificationFilter = `COALESCE(pn.verification_status, p.verification_status, 'unknown') != 'invalid'`;
+      verificationFilter = `verification_status != 'invalid'`;
     } else {
-      verificationFilter = `COALESCE(pn.verification_status, p.verification_status, 'unknown') NOT IN ('invalid', 'risky')`;
+      verificationFilter = `verification_status NOT IN ('invalid', 'risky')`;
     }
 
     // Phase 4: canonical path (person_id) with fallback for list_members without person_id
