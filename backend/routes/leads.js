@@ -27,6 +27,9 @@ function authRequired(req, res, next) {
   }
 }
 
+// TODO [Phase 4]: Migrate leads endpoint from prospects table to persons table.
+// Once person_id backfill is 100% and dual-write removal is confirmed,
+// replace prospects queries with persons + affiliations queries.
 // GET /api/leads - List all leads (from prospects table)
 router.get('/', authRequired, async (req, res) => {
   try {

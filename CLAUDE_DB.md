@@ -38,7 +38,7 @@ Engagement is stored as events, not scores.
 
 ---
 
-## Database — Current State (25 tables, 27 migrations)
+## Database — Current State (25 tables, 29 migrations)
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -183,6 +183,8 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 | 030 | `030_contact_crm.sql` | `contact_notes`, `contact_activities`, `contact_tasks` |
 | 031 | `031_pipeline_stages.sql` | `pipeline_stages`, ALTER `persons` (+pipeline_stage_id, +pipeline_entered_at) |
 | 032 | `032_user_isolation.sql` | ALTER `campaigns` (+created_by_user_id), ALTER `mining_jobs` (+created_by_user_id), ALTER `persons` (+pipeline_assigned_user_id), ALTER `users` (+daily_email_limit, +first_name, +last_name) |
+| 033 | `033_add_visibility_columns.sql` | ALTER `lists` (+visibility), ALTER `email_templates` (+visibility, +created_by_user_id), ALTER `sender_identities` (+visibility) |
+| 034 | `034_phase4_person_id_columns.sql` | Re-backfill person_id in `campaign_recipients` + `list_members`, partial indexes for NULL tracking |
 
 ---
 
@@ -190,10 +192,10 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 
 Legacy removal must be **incremental and reversible**.
 
-1. Stop writing to `prospects` table (remove dual-write in import paths)
-2. Migrate `list_members` to reference `persons` instead of `prospects`
-3. Remove dual-write in CSV upload, import-all, leads/import
+1. ~~Stop writing to `prospects` table~~ — dual-write still active, TODO comments added
+2. ~~Migrate `list_members` to reference `persons`~~ — person_id column exists, backfill script ready
+3. Remove dual-write in CSV upload, import-all, leads/import (see TODO [Phase 4] comments)
 4. Drop `prospects` table (only after full migration verification)
-5. Remove legacy resolve fallback in campaign resolve
+5. ~~Campaign resolve uses canonical path~~ — fallback for NULL person_id added
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) section E for task tracking.

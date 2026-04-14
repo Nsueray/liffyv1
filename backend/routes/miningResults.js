@@ -509,6 +509,9 @@ async function processImportBatch(client, batchRows, organizerId, jobId, tagsArr
     try {
       const trimmedEmail = mr._primaryEmail;
 
+      // TODO [Phase 4]: Remove prospects table dual-write once person_id backfill is 100%.
+      // Aggregation already writes to persons + affiliations (canonical).
+      // This prospects upsert is the legacy path — keep until Phase 4 removal confirmed.
       // Legacy: prospects table check/upsert
       const existingProspect = await client.query(
         'SELECT id, tags FROM prospects WHERE organizer_id = $1 AND LOWER(email) = $2',

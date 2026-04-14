@@ -386,49 +386,95 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
       verificationFilter = `COALESCE(pn.verification_status, p.verification_status, 'unknown') NOT IN ('invalid', 'risky')`;
     }
 
+    // Phase 4: canonical path (person_id) with fallback for list_members without person_id
+    // Path A: lm.person_id IS NOT NULL → use persons directly
+    // Path B: lm.person_id IS NULL → fallback via prospect email → persons match
     const prospectsQuery = `
-      SELECT DISTINCT ON (pn.id)
-        lm.prospect_id AS prospect_id,
-        pn.email,
-        COALESCE(CONCAT_WS(' ', pn.first_name, pn.last_name), p.name) AS name,
-        COALESCE(aff.company_name, p.company) AS company,
-        COALESCE(aff.country_code, p.country) AS country,
-        COALESCE(aff.position, p.sector) AS sector,
-        p.meta,
-        COALESCE(pn.verification_status, p.verification_status, 'unknown') AS verification_status,
-        pn.id AS person_id,
-        pn.first_name,
-        pn.last_name,
-        aff.company_name AS affiliation_company,
-        aff.position AS affiliation_position,
-        aff.city AS affiliation_city,
-        aff.website AS affiliation_website,
-        aff.phone AS affiliation_phone
-      FROM list_members lm
-      INNER JOIN persons pn ON pn.id = lm.person_id
-      LEFT JOIN prospects p ON p.id = lm.prospect_id
-      LEFT JOIN LATERAL (
-        SELECT company_name, position, country_code, city, website, phone
-        FROM affiliations
-        WHERE person_id = pn.id AND organizer_id = $2
-        ORDER BY created_at DESC LIMIT 1
-      ) aff ON true
-      WHERE lm.list_id = $1
-        AND lm.organizer_id = $2
-        AND pn.email IS NOT NULL
-        AND TRIM(pn.email) != ''
+      WITH resolved AS (
+        -- Path A: canonical (person_id set)
+        SELECT
+          lm.prospect_id,
+          pn.email,
+          COALESCE(CONCAT_WS(' ', pn.first_name, pn.last_name), p.name) AS name,
+          COALESCE(aff.company_name, p.company) AS company,
+          COALESCE(aff.country_code, p.country) AS country,
+          COALESCE(aff.position, p.sector) AS sector,
+          p.meta,
+          COALESCE(pn.verification_status, p.verification_status, 'unknown') AS verification_status,
+          pn.id AS person_id,
+          pn.first_name,
+          pn.last_name,
+          aff.company_name AS affiliation_company,
+          aff.position AS affiliation_position,
+          aff.city AS affiliation_city,
+          aff.website AS affiliation_website,
+          aff.phone AS affiliation_phone
+        FROM list_members lm
+        INNER JOIN persons pn ON pn.id = lm.person_id
+        LEFT JOIN prospects p ON p.id = lm.prospect_id
+        LEFT JOIN LATERAL (
+          SELECT company_name, position, country_code, city, website, phone
+          FROM affiliations
+          WHERE person_id = pn.id AND organizer_id = $2
+          ORDER BY created_at DESC LIMIT 1
+        ) aff ON true
+        WHERE lm.list_id = $1
+          AND lm.organizer_id = $2
+          AND lm.person_id IS NOT NULL
+
+        UNION ALL
+
+        -- Path B: fallback (person_id NULL, match via prospect email)
+        SELECT
+          lm.prospect_id,
+          COALESCE(pn.email, p.email) AS email,
+          COALESCE(CONCAT_WS(' ', pn.first_name, pn.last_name), p.name) AS name,
+          COALESCE(aff.company_name, p.company) AS company,
+          COALESCE(aff.country_code, p.country) AS country,
+          COALESCE(aff.position, p.sector) AS sector,
+          p.meta,
+          COALESCE(pn.verification_status, p.verification_status, 'unknown') AS verification_status,
+          pn.id AS person_id,
+          pn.first_name,
+          pn.last_name,
+          aff.company_name AS affiliation_company,
+          aff.position AS affiliation_position,
+          aff.city AS affiliation_city,
+          aff.website AS affiliation_website,
+          aff.phone AS affiliation_phone
+        FROM list_members lm
+        INNER JOIN prospects p ON p.id = lm.prospect_id
+        LEFT JOIN persons pn ON LOWER(pn.email) = LOWER(p.email) AND pn.organizer_id = $2
+        LEFT JOIN LATERAL (
+          SELECT company_name, position, country_code, city, website, phone
+          FROM affiliations
+          WHERE person_id = pn.id AND organizer_id = $2
+          ORDER BY created_at DESC LIMIT 1
+        ) aff ON pn.id IS NOT NULL
+        WHERE lm.list_id = $1
+          AND lm.organizer_id = $2
+          AND lm.person_id IS NULL
+      )
+      SELECT DISTINCT ON (COALESCE(person_id, prospect_id))
+        prospect_id, email, name, company, country, sector, meta,
+        verification_status, person_id, first_name, last_name,
+        affiliation_company, affiliation_position, affiliation_city,
+        affiliation_website, affiliation_phone
+      FROM resolved
+      WHERE email IS NOT NULL
+        AND TRIM(email) != ''
         AND ${verificationFilter}
         AND NOT EXISTS (
           SELECT 1 FROM unsubscribes u
           WHERE u.organizer_id = $2
-            AND LOWER(u.email) = LOWER(pn.email)
+            AND LOWER(u.email) = LOWER(email)
         )
         AND NOT EXISTS (
           SELECT 1 FROM campaign_recipients cr
           WHERE cr.campaign_id = $3
-            AND cr.prospect_id = lm.prospect_id
+            AND cr.prospect_id = resolved.prospect_id
         )
-      ORDER BY pn.id, pn.created_at ASC
+      ORDER BY COALESCE(person_id, prospect_id)
     `;
 
     const prospectsRes = await client.query(prospectsQuery, [

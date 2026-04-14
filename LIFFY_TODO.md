@@ -83,10 +83,15 @@
 
 | # | Task | Priority | Status |
 |---|------|----------|--------|
-| E1 | prospects table dual-write removal | P2 | DEFER — cascading dependency, ayrı oturum gerekli |
+| E1 | prospects table dual-write removal | P2 | TODO — TODO [Phase 4] comments added in leads.js, miningResults.js, lists.js |
 | E2 | list_members.person_id (migration 029) — queries migrated | P2 | ✅ DONE |
 | E3 | campaign_recipients.person_id (migration 028) | P2 | ✅ DONE |
 | E4 | email_logs table archive/drop | P3 | ✅ DONE |
+| E5 | Migration 034 — re-backfill person_id + NULL tracking indexes | P2 | ✅ DONE (not applied) |
+| E6 | Backfill script — backend/scripts/backfill_person_ids.js (idempotent, --dry-run) | P2 | ✅ DONE |
+| E7 | Campaign resolve canonical path with fallback — UNION (person_id path + prospect email fallback) | P2 | ✅ DONE |
+| E8 | Visibility columns — migration 033, lists.js enforcement | P2 | ✅ DONE (not applied) |
+| E9 | Dashboard stat fix — COUNT(DISTINCT email) for rates | P1 | ✅ DONE |
 
 ## F. NEW MINERS
 

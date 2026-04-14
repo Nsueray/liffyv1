@@ -32,6 +32,24 @@ function authRequired(req, res, next) {
   }
 }
 
+/**
+ * Build visibility WHERE clause for lists.
+ * Owner/admin see all lists; regular users see shared + their own private/team lists.
+ * Returns { clause, params } — caller must append params and adjust param indices.
+ */
+function visibilityFilter(auth, startParamIndex, tableAlias = '') {
+  const prefix = tableAlias ? `${tableAlias}.` : '';
+  if (auth.role === 'owner' || auth.role === 'admin') {
+    return { clause: '', params: [], nextIndex: startParamIndex };
+  }
+  // Regular user: shared OR created by them
+  return {
+    clause: `AND (${prefix}visibility = 'shared' OR ${prefix}created_by_user_id = $${startParamIndex})`,
+    params: [auth.user_id],
+    nextIndex: startParamIndex + 1
+  };
+}
+
 function isValidDateString(str) {
   if (!str || typeof str !== 'string') return false;
   const regex = /^\d{4}-\d{2}-\d{2}$/;
@@ -235,6 +253,7 @@ async function processCSVRowsInBackground(validRows, organizerId, listId, tags) 
               prospectId = insertResult.rows[0].id;
             }
 
+            // TODO [Phase 4]: Include person_id in this INSERT once dual-write removal is confirmed.
             // Legacy: list_members
             if (prospectId) {
               await client.query(
@@ -624,13 +643,14 @@ router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
 
-    // Query 1: list metadata
+    // Query 1: list metadata (with visibility filter)
+    const vis = visibilityFilter(req.auth, 2);
     const listsResult = await db.query(
-      `SELECT id, name, created_at, import_status, import_progress
+      `SELECT id, name, created_at, import_status, import_progress, visibility, created_by_user_id
        FROM lists
-       WHERE organizer_id = $1
+       WHERE organizer_id = $1 ${vis.clause}
        ORDER BY created_at DESC`,
-      [organizerId]
+      [organizerId, ...vis.params]
     );
 
     // Query 2: member counts per list (separate to avoid 4-table JOIN+GROUP BY issues)
@@ -814,13 +834,14 @@ router.post('/preview', authRequired, async (req, res) => {
 router.post('/create-with-filters', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    const { name, ...filters } = req.body || {};
+    const { name, visibility: visParam, ...filters } = req.body || {};
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'List name is required' });
     }
 
     const trimmedName = name.trim();
+    const vis = ['private', 'team', 'shared'].includes(visParam) ? visParam : 'shared';
 
     if (trimmedName.length > 255) {
       return res.status(400).json({ error: 'List name is too long (max 255 characters)' });
@@ -836,8 +857,8 @@ router.post('/create-with-filters', authRequired, async (req, res) => {
     }
 
     const listResult = await db.query(
-      'INSERT INTO lists (organizer_id, name) VALUES ($1, $2) RETURNING id, name, created_at',
-      [organizerId, trimmedName]
+      'INSERT INTO lists (organizer_id, name, created_by_user_id, visibility) VALUES ($1, $2, $3, $4) RETURNING id, name, created_at, visibility',
+      [organizerId, trimmedName, req.auth.user_id, vis]
     );
 
     const newList = listResult.rows[0];
@@ -906,13 +927,14 @@ router.post('/create-with-filters', authRequired, async (req, res) => {
 router.post('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    const { name } = req.body;
+    const { name, visibility } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'List name is required' });
     }
 
     const trimmedName = name.trim();
+    const vis = ['private', 'team', 'shared'].includes(visibility) ? visibility : 'shared';
 
     const existing = await db.query(
       'SELECT id FROM lists WHERE organizer_id = $1 AND LOWER(name) = LOWER($2)',
@@ -924,8 +946,8 @@ router.post('/', authRequired, async (req, res) => {
     }
 
     const result = await db.query(
-      'INSERT INTO lists (organizer_id, name) VALUES ($1, $2) RETURNING id, name, created_at',
-      [organizerId, trimmedName]
+      'INSERT INTO lists (organizer_id, name, created_by_user_id, visibility) VALUES ($1, $2, $3, $4) RETURNING id, name, created_at, visibility',
+      [organizerId, trimmedName, req.auth.user_id, vis]
     );
 
     const newList = result.rows[0];
@@ -1060,9 +1082,11 @@ router.get('/:id', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
     const listId = req.params.id;
 
+    const vis = visibilityFilter(req.auth, 3);
     const listResult = await db.query(
-      'SELECT id, name, created_at, import_status, import_progress FROM lists WHERE id = $1 AND organizer_id = $2',
-      [listId, organizerId]
+      `SELECT id, name, created_at, import_status, import_progress, visibility, created_by_user_id
+       FROM lists WHERE id = $1 AND organizer_id = $2 ${vis.clause}`,
+      [listId, organizerId, ...vis.params]
     );
 
     if (listResult.rows.length === 0) {
@@ -1132,9 +1156,10 @@ router.delete('/:id', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
     const listId = req.params.id;
 
+    const vis = visibilityFilter(req.auth, 3);
     const listCheck = await db.query(
-      'SELECT id FROM lists WHERE id = $1 AND organizer_id = $2',
-      [listId, organizerId]
+      `SELECT id FROM lists WHERE id = $1 AND organizer_id = $2 ${vis.clause}`,
+      [listId, organizerId, ...vis.params]
     );
 
     if (listCheck.rows.length === 0) {
@@ -1338,13 +1363,14 @@ router.post('/:id/import-bulk', authRequired, async (req, res) => {
 router.post('/create-empty', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    const { name } = req.body;
+    const { name, visibility: visParam } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'List name is required' });
     }
 
     const trimmedName = name.trim();
+    const vis = ['private', 'team', 'shared'].includes(visParam) ? visParam : 'shared';
 
     const existing = await db.query(
       'SELECT id FROM lists WHERE organizer_id = $1 AND LOWER(name) = LOWER($2)',
@@ -1356,8 +1382,8 @@ router.post('/create-empty', authRequired, async (req, res) => {
     }
 
     const result = await db.query(
-      `INSERT INTO lists (organizer_id, name, type) VALUES ($1, $2, 'manual') RETURNING id, name, created_at`,
-      [organizerId, trimmedName]
+      `INSERT INTO lists (organizer_id, name, type, created_by_user_id, visibility) VALUES ($1, $2, 'manual', $3, $4) RETURNING id, name, created_at, visibility`,
+      [organizerId, trimmedName, req.auth.user_id, vis]
     );
 
     res.status(201).json({

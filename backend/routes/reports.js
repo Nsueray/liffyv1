@@ -88,7 +88,7 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
 
     // 3) Event stats — campaign_events with campaign_recipients fallback
     const eventRes = await db.query(
-      `SELECT event_type, COUNT(*) AS count
+      `SELECT event_type, COUNT(*) AS count, COUNT(DISTINCT email) AS unique_count
        FROM campaign_events
        WHERE campaign_id = $1 AND organizer_id = $2
        GROUP BY event_type`,
@@ -104,6 +104,14 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
         events[row.event_type] = parseInt(row.count, 10);
         totalEvents += parseInt(row.count, 10);
       }
+      // Unique counts for rate calculations (opens/clicks fire multiple times per recipient)
+      const uniqueMap = {};
+      for (const row of eventRes.rows) {
+        uniqueMap[row.event_type] = parseInt(row.unique_count, 10);
+      }
+      events.unique_open = uniqueMap.open || 0;
+      events.unique_click = uniqueMap.click || 0;
+      events.unique_bounce = uniqueMap.bounce || 0;
     } else {
       // Fallback: derive events from campaign_recipients
       dataSource = 'campaign_recipients';
@@ -346,7 +354,7 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
     // 3) Event stats — campaign_events with campaign_recipients fallback
     const evScope = scopedWhere();
     const eventRes = await db.query(
-      `SELECT event_type, COUNT(*) AS count
+      `SELECT event_type, COUNT(*) AS count, COUNT(DISTINCT email) AS unique_count
        FROM campaign_events
        WHERE ${evScope.clause}
        GROUP BY event_type`,
@@ -362,6 +370,14 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
         events[row.event_type] = parseInt(row.count, 10);
         totalEvents += parseInt(row.count, 10);
       }
+      // Unique counts for rate calculations (opens/clicks fire multiple times per recipient)
+      const uniqueMap = {};
+      for (const row of eventRes.rows) {
+        uniqueMap[row.event_type] = parseInt(row.unique_count, 10);
+      }
+      events.unique_open = uniqueMap.open || 0;
+      events.unique_click = uniqueMap.click || 0;
+      events.unique_bounce = uniqueMap.bounce || 0;
     } else {
       // Fallback: derive from campaign_recipients timestamps
       dataSource = 'campaign_recipients';
