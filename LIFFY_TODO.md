@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-07*
+*Updated: 2026-04-14*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -53,6 +53,13 @@
 | B2 | Frontend import-all polling — progress bar | P2 | ✅ DONE |
 | B3 | Mining console page — log writing + /logs endpoint | P3 | FUTURE |
 | B4 | Excel/CSV Export — mining results, contacts, list members (exceljs + exportHelper.js) (commits: 1e6f06d, 72d175f) | P1 | ✅ DONE |
+| B5 | JWT Auth System — login/logout, middleware, auth guard, role persist | P1 | ✅ DONE |
+| B6 | Contact CRM — notes/activities/tasks tabs on person detail | P1 | ✅ DONE |
+| B7 | Sales Pipeline — Kanban board, 7 stages, auto-stage on reply | P1 | ✅ DONE |
+| B8 | Tasks page — my assigned tasks with filters | P1 | ✅ DONE |
+| B9 | User Data Isolation — owner/admin see all, user sees own | P1 | ✅ DONE |
+| B10 | Daily Email Limit — per-user, 429 enforcement | P1 | ✅ DONE |
+| B11 | Owner Admin Panel — user CRUD, password reset, usage stats | P1 | ✅ DONE |
 
 ## C. KNOWN ISSUES
 

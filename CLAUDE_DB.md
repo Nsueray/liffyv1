@@ -38,7 +38,7 @@ Engagement is stored as events, not scores.
 
 ---
 
-## Database — Current State (21 tables, 24 migrations)
+## Database — Current State (25 tables, 27 migrations)
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -64,6 +64,10 @@ Engagement is stored as events, not scores.
 | `verification_queue` | ACTIVE | 019 | Email verification queue. Processed by worker via ZeroBounce API. |
 | `zoho_push_log` | ACTIVE | 020 | Zoho CRM push audit trail. Tracks create/update per person+module. |
 | `generated_miners` | ACTIVE | 024 | AI Miner Generator — stores AI-generated extraction per domain. v1: `miner_code` = JavaScript. v2 (geçiş): `miner_code` = JSON config (AXTree selector). Approval workflow + quality tracking. |
+| `contact_notes` | ACTIVE | 030 | Per-person notes created by users. |
+| `contact_activities` | ACTIVE | 030 | Auto-logged activity timeline per person (calls, emails, status changes). |
+| `contact_tasks` | ACTIVE | 030 | Follow-up tasks with due dates, priority, assignment. |
+| `pipeline_stages` | ACTIVE | 031 | Configurable sales pipeline stages (name, sort_order, color, is_won, is_lost). |
 
 ### Legacy Tables (Exist but transitional)
 | Table | Status | Notes |
@@ -87,7 +91,7 @@ Phase 4 — Remove legacy tables (5 steps). Full plan in `MIGRATION_PLAN.md`.
 
 **Current phase: Late Phase 3 (approaching Phase 4)**
 
-All migrations (001–024) applied in production. 21 tables active.
+All migrations (001–032) applied in production. 25 tables active.
 `AGGREGATION_PERSIST=true` set on Render — mining pipeline writes to `persons` + `affiliations`.
 All import paths (CSV upload, import-all, leads/import) dual-write to both legacy and canonical tables.
 Campaign resolve prefers canonical data with legacy fallback.
@@ -149,7 +153,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 
 ---
 
-## Migrations (24 files)
+## Migrations (27 files)
 
 | # | File | Tables |
 |---|------|--------|
@@ -176,6 +180,9 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 | 022 | `add_import_progress_columns.sql` | ALTER `mining_jobs`, ALTER `lists` (import_status, import_progress) |
 | 023 | `add_campaign_verification_mode.sql` | ALTER `campaigns` (verification_mode) |
 | 024 | `create_generated_miners.sql` | `generated_miners` (AI Miner Generator) |
+| 030 | `030_contact_crm.sql` | `contact_notes`, `contact_activities`, `contact_tasks` |
+| 031 | `031_pipeline_stages.sql` | `pipeline_stages`, ALTER `persons` (+pipeline_stage_id, +pipeline_entered_at) |
+| 032 | `032_user_isolation.sql` | ALTER `campaigns` (+created_by_user_id), ALTER `mining_jobs` (+created_by_user_id), ALTER `persons` (+pipeline_assigned_user_id), ALTER `users` (+daily_email_limit, +first_name, +last_name) |
 
 ---
 

@@ -1,6 +1,6 @@
 # Liffy DB Schema Guide
 
-> 21 tables, 24 migrations, PostgreSQL 17 (Render hosted)
+> 25 tables, 27 migrations, PostgreSQL 17 (Render hosted)
 > All PKs: UUID via `gen_random_uuid()`. All tables include `organizer_id` for multi-tenant isolation.
 
 ---
@@ -30,13 +30,18 @@
 | 19 | [zoho_push_log](#19-zoho_push_log) | ACTIVE | CRM Integration | 020 |
 | 20 | [email_logs](#20-email_logs) | DEPRECATED | Legacy Logging | 003 |
 | 21 | [generated_miners](#21-generated_miners) | ACTIVE | AI Mining | 024 |
+| 22 | [contact_notes](#22-contact_notes) | ACTIVE | CRM | 030 |
+| 23 | [contact_activities](#23-contact_activities) | ACTIVE | CRM | 030 |
+| 24 | [contact_tasks](#24-contact_tasks) | ACTIVE | CRM | 030 |
+| 25 | [pipeline_stages](#25-pipeline_stages) | ACTIVE | Sales Pipeline | 031 |
 
 ---
 
 ## Entity Relationship Summary
 
 ```
-organizers ──┬── users
+organizers ──┬── users ──┬── contact_tasks (assigned_to, created_by)
+             │           └── contact_activities (user_id)
              ├── sender_identities
              ├── email_templates
              ├── campaigns ──┬── campaign_recipients
@@ -48,7 +53,11 @@ organizers ──┬── users
              ├── persons ──┬── affiliations
              │             ├── prospect_intents
              │             ├── campaign_events (via person_id)
-             │             └── zoho_push_log
+             │             ├── zoho_push_log
+             │             ├── contact_notes
+             │             ├── contact_activities
+             │             └── contact_tasks
+             ├── pipeline_stages ── persons (via pipeline_stage_id)
              ├── prospects ── list_members ── lists
              ├── unsubscribes
              └── verification_queue
@@ -100,12 +109,15 @@ Multi-tenant root table. Every other table references `organizer_id`.
 | `password_hash` | TEXT | NOT NULL | bcrypt hash |
 | `role` | VARCHAR(20) | NOT NULL, DEFAULT 'user' | owner, admin, user |
 | `is_active` | BOOLEAN | DEFAULT TRUE | |
+| `daily_email_limit` | INTEGER | NOT NULL, DEFAULT 500 | Per-user daily send cap (migration 032) |
+| `first_name` | TEXT | | (migration 032) |
+| `last_name` | TEXT | | (migration 032) |
 | `created_at` | TIMESTAMP | DEFAULT NOW() | |
 
 **Indexes:** `idx_users_organizer_id`
-**Read by:** Auth middleware (login)
-**Written by:** Registration
-**UI pages:** Login (implicit)
+**Read by:** Auth middleware (login), user management, daily email limit check
+**Written by:** Registration, POST/PATCH /api/users, reset-password
+**UI pages:** Login (implicit), Admin panel
 
 ---
 
@@ -165,9 +177,10 @@ Multi-tenant root table. Every other table references `organizer_id`.
 | `include_risky` | BOOLEAN | DEFAULT FALSE | Include risky verification status (migration 010) |
 | `recipient_count` | INTEGER | | Set at resolve time (migration 010) |
 | `verification_mode` | VARCHAR(20) | DEFAULT 'exclude_invalid' | exclude_invalid or verified_only (migration 023) |
+| `created_by_user_id` | UUID | FK → users, ON DELETE SET NULL | User who created (migration 032, data isolation) |
 | `created_at` | TIMESTAMP | DEFAULT NOW() | |
 
-**Indexes:** `idx_campaigns_organizer_id`, `idx_campaigns_template_id`, `idx_campaigns_list_id`, `idx_campaigns_sender_id`
+**Indexes:** `idx_campaigns_organizer_id`, `idx_campaigns_template_id`, `idx_campaigns_list_id`, `idx_campaigns_sender_id`, `idx_campaigns_created_by_user`
 **Read by:** GET /api/campaigns, analytics, reports, send, resolve
 **Written by:** POST/PATCH/DELETE /api/campaigns, resolve, start, pause, resume, schedule
 **UI pages:** Campaigns, Campaign Detail, Dashboard (recent), Reports
@@ -249,11 +262,12 @@ Immutable append-only event log. Canonical engagement data.
 | `error` | TEXT | | |
 | `import_status` | VARCHAR(20) | DEFAULT NULL | NULL, processing, completed, failed (migration 022) |
 | `import_progress` | JSONB | DEFAULT NULL | {imported, skipped, duplicates, total, ...} (migration 022) |
+| `created_by_user_id` | UUID | FK → users, ON DELETE SET NULL | User who created (migration 032, data isolation) |
 | `created_at` | TIMESTAMP | DEFAULT NOW() | |
 | `started_at` | TIMESTAMP | | |
 | `completed_at` | TIMESTAMP | | |
 
-**Indexes:** `idx_mining_jobs_organizer_id`, `idx_mining_jobs_status`, `idx_mining_jobs_type`
+**Indexes:** `idx_mining_jobs_organizer_id`, `idx_mining_jobs_status`, `idx_mining_jobs_type`, `idx_mining_jobs_created_by_user`
 **Read by:** GET /api/mining/jobs, import-all, import-preview, lists/mining-jobs, dashboard
 **Written by:** Mining engine (create/update), import-all (import_status/progress)
 **UI pages:** Mining Jobs, Dashboard (recent jobs), Lists (mining job select)
@@ -323,10 +337,13 @@ Canonical identity layer. One row per real individual per organizer.
 | `last_name` | VARCHAR(255) | | Parsed by normalizer |
 | `verification_status` | VARCHAR(20) | DEFAULT 'unknown' | unknown, valid, invalid, catchall, risky (migration 019) |
 | `verified_at` | TIMESTAMPTZ | | (migration 019) |
+| `pipeline_stage_id` | UUID | FK → pipeline_stages, ON DELETE SET NULL | Current pipeline stage (migration 031) |
+| `pipeline_entered_at` | TIMESTAMPTZ | | When entered current stage (migration 031) |
+| `pipeline_assigned_user_id` | UUID | FK → users, ON DELETE SET NULL | Pipeline ownership (migration 032) |
 | `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
 | `updated_at` | TIMESTAMPTZ | DEFAULT NOW() | |
 
-**Indexes:** `idx_persons_organizer_email` (UNIQUE on organizer_id + LOWER(email)), `idx_persons_organizer_id`, `idx_persons_email_lower`
+**Indexes:** `idx_persons_organizer_email` (UNIQUE on organizer_id + LOWER(email)), `idx_persons_organizer_id`, `idx_persons_email_lower`, `idx_persons_pipeline_assigned_user` (partial WHERE pipeline_stage_id IS NOT NULL)
 **Read by:** GET /api/persons (list, stats, detail, affiliations), campaign resolve, verification, zoho push, webhooks, reports
 **Written by:** Aggregation trigger, import-all, CSV upload, leads import, verification (status update)
 **UI pages:** Contacts (list + detail), Dashboard (stats), Lists detail (name COALESCE), Campaign resolve
@@ -675,6 +692,109 @@ verify-list → verification_queue INSERT (pending)
 | 022 | `add_import_progress_columns.sql` | ALTER mining_jobs (+import_status, import_progress), ALTER lists (+import_status, import_progress) |
 | 023 | `add_campaign_verification_mode.sql` | ALTER campaigns (+verification_mode) |
 | 024 | `create_generated_miners.sql` | generated_miners (AI Miner Generator) |
+| 030 | `030_contact_crm.sql` | contact_notes, contact_activities, contact_tasks |
+| 031 | `031_pipeline_stages.sql` | pipeline_stages, ALTER persons (+pipeline_stage_id, +pipeline_entered_at) |
+| 032 | `032_user_isolation.sql` | ALTER campaigns (+created_by_user_id), ALTER mining_jobs (+created_by_user_id), ALTER persons (+pipeline_assigned_user_id), ALTER users (+daily_email_limit, +first_name, +last_name) |
+
+---
+
+### 22. contact_notes
+
+Per-person notes created by users.
+
+| Column | Type | Constraints | Notes |
+|--------|------|-------------|-------|
+| `id` | UUID | PK | |
+| `organizer_id` | UUID | FK → organizers, NOT NULL | |
+| `person_id` | UUID | FK → persons, ON DELETE CASCADE, NOT NULL | |
+| `user_id` | UUID | FK → users, ON DELETE SET NULL | Creator |
+| `content` | TEXT | NOT NULL | Note text |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+**Indexes:** `idx_contact_notes_person` (person_id, created_at DESC)
+**Read by:** GET /api/persons/:id/notes
+**Written by:** POST /api/persons/:id/notes, DELETE /api/persons/:id/notes/:noteId
+**UI pages:** Contact Detail (Notes tab)
+
+---
+
+### 23. contact_activities
+
+Auto-logged activity timeline per person.
+
+| Column | Type | Constraints | Notes |
+|--------|------|-------------|-------|
+| `id` | UUID | PK | |
+| `organizer_id` | UUID | FK → organizers, NOT NULL | |
+| `person_id` | UUID | FK → persons, ON DELETE CASCADE, NOT NULL | |
+| `user_id` | UUID | FK → users, ON DELETE SET NULL | NULL = system |
+| `activity_type` | VARCHAR(30) | NOT NULL | note, email, call, meeting, status_change, zoho_push, task, other |
+| `description` | TEXT | | Human-readable description |
+| `meta` | JSONB | | Extra data (from_stage, to_stage, etc.) |
+| `occurred_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+**Indexes:** `idx_contact_activities_person` (person_id, occurred_at DESC)
+**Read by:** GET /api/persons/:id/activities
+**Written by:** Auto-logged on note create, task create/complete, stage change, reply webhook, Zoho push
+**UI pages:** Contact Detail (Activities tab), Pipeline (last_activity)
+
+---
+
+### 24. contact_tasks
+
+Follow-up tasks with due dates, priority, and assignment.
+
+| Column | Type | Constraints | Notes |
+|--------|------|-------------|-------|
+| `id` | UUID | PK | |
+| `organizer_id` | UUID | FK → organizers, NOT NULL | |
+| `person_id` | UUID | FK → persons, ON DELETE CASCADE, NOT NULL | |
+| `assigned_to` | UUID | FK → users, ON DELETE SET NULL | Assigned user |
+| `created_by` | UUID | FK → users, ON DELETE SET NULL | Creator |
+| `title` | VARCHAR(255) | NOT NULL | Task title |
+| `description` | TEXT | | |
+| `due_date` | DATE | | |
+| `priority` | VARCHAR(10) | DEFAULT 'medium' | low, medium, high |
+| `status` | VARCHAR(20) | DEFAULT 'pending' | pending, completed |
+| `completed_at` | TIMESTAMPTZ | | |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+**Indexes:** `idx_contact_tasks_person` (person_id), `idx_contact_tasks_assigned` (assigned_to, status, due_date)
+**Read by:** GET /api/persons/:id/tasks, GET /api/tasks/mine, GET /api/tasks/summary
+**Written by:** POST /api/persons/:id/tasks, PATCH /api/persons/:id/tasks/:taskId
+**UI pages:** Contact Detail (Tasks tab), Tasks page, Dashboard (overdue count), Admin (user stats)
+
+---
+
+### 25. pipeline_stages
+
+Configurable sales pipeline stages per organizer.
+
+| Column | Type | Constraints | Notes |
+|--------|------|-------------|-------|
+| `id` | UUID | PK | |
+| `organizer_id` | UUID | FK → organizers, NOT NULL | |
+| `name` | VARCHAR(100) | NOT NULL | Stage name |
+| `sort_order` | INTEGER | NOT NULL, DEFAULT 0 | Display order |
+| `color` | VARCHAR(20) | DEFAULT '#6B7280' | Hex color for UI |
+| `is_won` | BOOLEAN | DEFAULT FALSE | Won deal stage |
+| `is_lost` | BOOLEAN | DEFAULT FALSE | Lost deal stage |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+**Read by:** GET /api/pipeline/stages, GET /api/pipeline/board, PATCH /api/persons/:id/stage
+**Written by:** POST/PATCH/DELETE /api/pipeline/stages, seed_admin.js (default 7 stages)
+**UI pages:** Pipeline (Kanban board), Contact Detail (stage display)
+
+---
+
+## UI Page → API → Table Map (updated)
+
+| UI Page | Route | Primary API Endpoints | Primary Tables |
+|---------|-------|----------------------|----------------|
+| **Pipeline** | `/pipeline` | pipeline/stages, pipeline/board, persons/:id/stage | pipeline_stages, persons, affiliations, contact_activities |
+| **Tasks** | `/tasks` | tasks/mine, tasks/summary | contact_tasks, persons |
+| **Admin** | `/admin` | users, users/:id/stats, users/:id/reset-password | users, campaigns, mining_jobs, campaign_events, contact_tasks |
 
 ---
 

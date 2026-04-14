@@ -1158,3 +1158,199 @@ Optional subtitle<br>
 **Expected throughput:** ~1.7 email/s → ~50 email/s. 120K campaign: ~20 hours → ~40 minutes.
 
 **Files:** `backend/worker.js` — `sendWithRetry()`, `processSendingCampaigns()`
+
+---
+
+## JWT Authentication System
+
+**Status:** LIVE.
+
+**Flow:**
+```
+POST /api/auth/login (email, password) → bcrypt verify → JWT sign (7 day expiry)
+  → { token, user: { id, email, role, organizer_id }, organizer: { id, name } }
+```
+
+**Endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/auth/login` | POST | Email + password login, returns JWT + user info |
+| `/api/auth/me` | GET | Returns current user from JWT |
+
+**Middleware:**
+- `backend/middleware/auth.js` — shared `authRequired` middleware. Sets both `req.user` and `req.auth` (dual shape for compatibility with legacy routes).
+- JWT payload: `{ user_id, email, role, organizer_id }`
+- Token stored in `localStorage.liffy_token` (frontend)
+
+**Files:**
+- `backend/middleware/auth.js` — shared auth middleware
+- `backend/routes/auth.js` — login/me endpoints
+- `backend/scripts/seed_admin.js` — idempotent admin user seeder
+
+---
+
+## Contact CRM (Notes, Activities, Tasks)
+
+**Status:** LIVE.
+
+Per-person CRM features: notes, auto-logged activity timeline, and follow-up tasks.
+
+**Endpoints** (all under `/api/persons/:id/`):
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/persons/:id/notes` | GET | List notes (newest first) |
+| `/api/persons/:id/notes` | POST | Create note (auto-logs activity) |
+| `/api/persons/:id/notes/:noteId` | DELETE | Delete own note |
+| `/api/persons/:id/activities` | GET | Activity timeline (newest first) |
+| `/api/persons/:id/tasks` | GET | List tasks |
+| `/api/persons/:id/tasks` | POST | Create task (auto-logs activity) |
+| `/api/persons/:id/tasks/:taskId` | PATCH | Update task (status, title, etc.) |
+| `/api/persons/:id/tasks/:taskId` | DELETE | Delete own task |
+| `/api/tasks/mine` | GET | All tasks assigned to current user (filterable) |
+| `/api/tasks/summary` | GET | Pending/overdue/completed counts for sidebar badge |
+
+**Activity auto-logging triggers:**
+- Note created → activity_type='note'
+- Task created → activity_type='task'
+- Task completed → activity_type='task' (description: "Completed: ...")
+- Pipeline stage changed → activity_type='status_change' (meta: from/to stage)
+- Reply received (webhook) → activity_type='email' (auto via webhooks.js)
+- Zoho push → activity_type='zoho_push' (auto via zohoService.js)
+
+**User isolation:**
+- Notes: non-privileged users see only their own notes
+- Activities: non-privileged users see own + system-generated (user_id IS NULL)
+- Tasks: non-privileged users see tasks assigned to them or created by them
+
+**Files:**
+- `backend/routes/contactCrm.js` — all CRM endpoints
+- `backend/migrations/030_contact_crm.sql` — tables
+
+---
+
+## Sales Pipeline
+
+**Status:** LIVE. 7 default stages seeded by `seed_admin.js`.
+
+Configurable Kanban pipeline with per-person stage tracking and auto-assignment.
+
+**Endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/pipeline/stages` | GET | List organizer's stages (sorted) |
+| `/api/pipeline/stages` | POST | Create stage (owner/admin only) |
+| `/api/pipeline/stages/:id` | PATCH | Update stage |
+| `/api/pipeline/stages/:id` | DELETE | Delete stage (persons auto-cleared via ON DELETE SET NULL) |
+| `/api/pipeline/board` | GET | Full Kanban board — stages with people (latest affiliation, last activity) |
+| `/api/persons/:id/stage` | PATCH | Move person to a stage (auto-assign, ownership check) |
+
+**Default stages** (seeded): New Lead → Contacted → Interested → Meeting Scheduled → Proposal Sent → Won → Lost
+
+**Auto-stage on reply:** When a reply webhook is received, if the person has no pipeline stage or is in an early stage (sort_order < "Interested"), they are auto-moved to "Interested" stage.
+
+**Pipeline ownership:**
+- `pipeline_assigned_user_id` on persons — set on first stage change
+- Non-privileged users cannot move contacts assigned to another user (403)
+- Owner/admin can move anyone; only fills NULL assignees (doesn't override existing)
+
+**Files:**
+- `backend/routes/pipeline.js` — stages CRUD + board + stage assignment
+- `backend/migrations/031_pipeline_stages.sql` — pipeline_stages table + persons columns
+- `liffy-ui/app/pipeline/page.tsx` — Kanban board UI
+
+---
+
+## User Management (Owner/Admin Panel)
+
+**Status:** LIVE.
+
+Owner/admin-only endpoints for managing team members.
+
+**Endpoints:**
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/users` | GET | List users in organizer (sorted by role) |
+| `/api/users` | POST | Create user (email, password, role, names, daily limit) |
+| `/api/users/:id` | PATCH | Update user (role, names, limit, is_active) |
+| `/api/users/:id/reset-password` | POST | Set new password for user |
+| `/api/users/:id/stats` | GET | Per-user activity stats (campaigns, mining, tasks, email usage) |
+
+**Access control:**
+- All endpoints require owner or admin role (403 otherwise)
+- Only owner can create/modify another owner
+- Cannot demote the last active owner (400)
+- Only owner can reset an owner's password
+
+**Files:**
+- `backend/routes/userManagement.js` — all user management endpoints
+- `liffy-ui/app/admin/page.tsx` — admin panel UI
+
+---
+
+## User Data Isolation
+
+**Status:** LIVE (migration 032).
+
+Role-based data visibility: owner/admin see everything within their organizer; regular users only see rows they created or are assigned to.
+
+**Middleware:** `backend/middleware/userScope.js`
+
+| Function | Description |
+|----------|-------------|
+| `getUserContext(req)` | Returns `{ userId, organizerId, role }` from `req.user` or `req.auth` |
+| `isPrivileged(req)` | Returns true if owner or admin |
+| `userScopeFilter(req, paramIdx, column)` | Returns SQL clause + params for user filtering |
+| `canAccessRow(req, ownerUserId)` | Check if user can access a specific row |
+
+**Isolation rules by resource:**
+
+| Resource | Isolation | Column |
+|----------|-----------|--------|
+| Campaigns | User-scoped | `created_by_user_id` |
+| Mining Jobs | User-scoped | `created_by_user_id` |
+| Contact Notes | User-scoped | `user_id` |
+| Contact Tasks | User-scoped | `assigned_to` OR `created_by` |
+| Contact Activities | User-scoped + system visible | `user_id` (NULL = visible to all) |
+| Pipeline | SHARED view, ownership on stage change | `pipeline_assigned_user_id` |
+| Contacts/Lists/Templates | SHARED | — |
+| Prospects/Intents | Campaign ownership JOIN | `campaigns.created_by_user_id` |
+| Reports | Campaign ownership scoped | Pre-loaded `campaignIds` array |
+
+---
+
+## Daily Email Limit
+
+**Status:** LIVE.
+
+Per-user daily email send cap enforced on campaign start.
+
+**How it works:**
+- `users.daily_email_limit` column (default 500, owner: 100000)
+- Checked at `POST /api/campaigns/:id/start`
+- Counts today's sent emails via `campaign_events` (event_type='sent', occurred_at >= CURRENT_DATE)
+- Returns 429 if limit reached or campaign would exceed limit
+
+**429 response format:**
+```json
+{
+  "error": "Daily email limit reached",
+  "limit": 500,
+  "sent_today": 500,
+  "remaining": 0
+}
+```
+
+Or if campaign would exceed:
+```json
+{
+  "error": "Campaign would exceed your daily email limit",
+  "limit": 500,
+  "sent_today": 300,
+  "remaining": 200,
+  "attempted": 350
+}
+```
