@@ -38,7 +38,7 @@ Engagement is stored as events, not scores.
 
 ---
 
-## Database — Current State (25 tables, 29 migrations)
+## Database — Current State (27 tables, 30 migrations)
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -185,6 +185,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 | 032 | `032_user_isolation.sql` | ALTER `campaigns` (+created_by_user_id), ALTER `mining_jobs` (+created_by_user_id), ALTER `persons` (+pipeline_assigned_user_id), ALTER `users` (+daily_email_limit, +first_name, +last_name) |
 | 033 | `033_add_visibility_columns.sql` | ALTER `lists` (+visibility), ALTER `email_templates` (+visibility, +created_by_user_id), ALTER `sender_identities` (+visibility) |
 | 034 | `034_phase4_person_id_columns.sql` | Re-backfill person_id in `campaign_recipients` + `list_members`, partial indexes for NULL tracking |
+| 035 | `035_create_sequences.sql` | `campaign_sequences`, `sequence_recipients`, ALTER `campaigns` (+campaign_type, +sequence_config) |
 
 ---
 

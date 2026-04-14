@@ -60,6 +60,7 @@
 | B9 | User Data Isolation — owner/admin see all, user sees own | P1 | ✅ DONE |
 | B10 | Daily Email Limit — per-user, 429 enforcement | P1 | ✅ DONE |
 | B11 | Owner Admin Panel — user CRUD, password reset, usage stats | P1 | ✅ DONE |
+| B12 | Action Engine — multi-touch campaign sequences (migration 035, service, worker, routes, UI) | P1 | ✅ DONE |
 
 ## C. KNOWN ISSUES
 
