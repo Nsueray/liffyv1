@@ -470,7 +470,7 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
         AND NOT EXISTS (
           SELECT 1 FROM unsubscribes u
           WHERE u.organizer_id = $2
-            AND LOWER(u.email) = LOWER(email)
+            AND LOWER(u.email) = LOWER(resolved.email)
         )
         AND NOT EXISTS (
           SELECT 1 FROM campaign_recipients cr
