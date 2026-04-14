@@ -14,6 +14,14 @@ const {
   getUnsubscribeUrl
 } = require('../utils/unsubscribeHelper');
 
+// Sequence hooks (best-effort, never breaks webhook flow)
+let sequenceService;
+try {
+  sequenceService = require('../services/sequenceService');
+} catch (e) {
+  console.warn('[Webhooks] sequenceService not available:', e.message);
+}
+
 // ============================================================
 // SENDGRID WEBHOOK
 // ============================================================
@@ -184,6 +192,8 @@ async function processWebhookEvent(event) {
          WHERE id = $1`,
         [recipient.id, eventTime, errorMsg]
       );
+      // Sequence hook: stop sequence for bounced recipient
+      try { if (sequenceService) await sequenceService.handleBounce(email, recipient.campaign_id); } catch (e) { /* best-effort */ }
       break;
 
     case 'spamreport':
@@ -197,10 +207,14 @@ async function processWebhookEvent(event) {
       );
       // Also add to unsubscribe list
       await addToUnsubscribeList(recipient.organizer_id, email, 'spam_report');
+      // Sequence hook: stop all sequences for this email
+      try { if (sequenceService) await sequenceService.handleUnsubscribe(email, recipient.organizer_id); } catch (e) { /* best-effort */ }
       break;
 
     case 'unsubscribe':
       await addToUnsubscribeList(recipient.organizer_id, email, 'sendgrid_unsubscribe');
+      // Sequence hook: stop all sequences for this email
+      try { if (sequenceService) await sequenceService.handleUnsubscribe(email, recipient.organizer_id); } catch (e) { /* best-effort */ }
       break;
   }
 
@@ -807,7 +821,14 @@ router.post(
       console.warn('  ⚠️ contact_activities insert failed:', activityErr.message);
     }
 
-    // 6. Forward reply to organizer's inbox (best-effort, never blocks response)
+    // 6a. Sequence hook: stop sequence for replied recipient (best-effort)
+    try {
+      if (sequenceService) await sequenceService.handleReply(recipient.email, recipient.campaign_id, recipient.organizer_id);
+    } catch (seqErr) {
+      console.warn('  ⚠️ Sequence reply hook failed:', seqErr.message);
+    }
+
+    // 6b. Forward reply to organizer's inbox (best-effort, never blocks response)
     await forwardReplyToOrganizer({
       campaignId: recipient.campaign_id,
       from,

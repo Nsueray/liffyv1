@@ -55,23 +55,26 @@ router.post('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     const userId = req.auth.user_id;
-    const { name, template_id, list_id, sender_id } = req.body;
+    const { name, template_id, list_id, sender_id, campaign_type } = req.body;
+    const cType = campaign_type === 'sequence' ? 'sequence' : 'single';
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       return res.status(400).json({ error: 'Campaign name is required' });
     }
 
-    if (!template_id) {
+    // Sequence campaigns don't require template_id upfront (steps have their own templates)
+    if (cType === 'single' && !template_id) {
       return res.status(400).json({ error: 'Template is required' });
     }
 
-    const templateCheck = await db.query(
-      `SELECT id FROM email_templates WHERE id = $1 AND organizer_id = $2`,
-      [template_id, organizerId]
-    );
-
-    if (templateCheck.rows.length === 0) {
-      return res.status(400).json({ error: 'Template not found or access denied' });
+    if (template_id) {
+      const templateCheck = await db.query(
+        `SELECT id FROM email_templates WHERE id = $1 AND organizer_id = $2`,
+        [template_id, organizerId]
+      );
+      if (templateCheck.rows.length === 0) {
+        return res.status(400).json({ error: 'Template not found or access denied' });
+      }
     }
 
     if (list_id) {
@@ -95,10 +98,10 @@ router.post('/', authRequired, async (req, res) => {
     }
 
     const result = await db.query(
-      `INSERT INTO campaigns (organizer_id, template_id, list_id, sender_id, name, status, created_by_user_id)
-       VALUES ($1, $2, $3, $4, $5, 'draft', $6)
+      `INSERT INTO campaigns (organizer_id, template_id, list_id, sender_id, name, status, created_by_user_id, campaign_type)
+       VALUES ($1, $2, $3, $4, $5, 'draft', $6, $7)
        RETURNING *`,
-      [organizerId, template_id, list_id || null, sender_id || null, name.trim(), userId]
+      [organizerId, template_id || null, list_id || null, sender_id || null, name.trim(), userId, cType]
     );
 
     res.status(201).json(result.rows[0]);

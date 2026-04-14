@@ -34,6 +34,7 @@ const sourceDiscoveryRouter = require('./routes/sourceDiscovery');
 const contactCrmRouter = require('./routes/contactCrm');
 const pipelineRouter = require('./routes/pipeline');
 const userManagementRouter = require('./routes/userManagement');
+const sequencesRouter = require('./routes/sequences');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -86,6 +87,7 @@ app.use('/api/unsubscribes', unsubscribesRouter);
 app.use('/api/admin/ai-miner', adminAIMinerRouter);
 app.use('/api/source-discovery', sourceDiscoveryRouter);
 app.use('/api/users', userManagementRouter);
+app.use(sequencesRouter);
 app.use(webhooksRouter);
 app.use(statsRouter);
 
@@ -102,4 +104,11 @@ const { runMiningTest } = require('./services/miningWorker');
 
 if (process.env.MINING_TEST === "1") {
   runMiningTest();
+}
+
+// Sequence worker — polls and sends multi-touch sequence emails
+if (!process.env.DISABLE_SEQUENCE_WORKER) {
+  const sequenceWorker = require('./services/sequenceWorker');
+  sequenceWorker.start();
+  process.on('SIGTERM', () => sequenceWorker.stop());
 }
