@@ -22,6 +22,14 @@ try {
   console.warn('[Webhooks] sequenceService not available:', e.message);
 }
 
+// Action Engine hooks (best-effort, never breaks webhook flow)
+let actionEngine;
+try {
+  actionEngine = require('../engines/action-engine/actionEngine');
+} catch (e) {
+  console.warn('[Webhooks] actionEngine not available:', e.message);
+}
+
 // ============================================================
 // SENDGRID WEBHOOK
 // ============================================================
@@ -223,6 +231,22 @@ async function processWebhookEvent(event) {
 
   // Record prospect intent for intent-bearing events (Phase 2)
   await recordProspectIntent(recipient, email, eventType, eventTime);
+
+  // Action Engine: evaluate triggers for reply, open, click events
+  if (actionEngine && ['reply', 'open', 'click'].includes(eventType)) {
+    try {
+      const personRes = await db.query(
+        `SELECT id FROM persons WHERE organizer_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+        [recipient.organizer_id, email]
+      );
+      if (personRes.rows.length > 0) {
+        const hint = eventType === 'reply' ? 'reply_received' : 'engaged_hot';
+        await actionEngine.evaluateForPerson(personRes.rows[0].id, recipient.organizer_id, hint);
+      }
+    } catch (aeErr) {
+      console.error('[ActionEngine] Webhook trigger failed:', aeErr.message);
+    }
+  }
 }
 
 /**
@@ -828,7 +852,22 @@ router.post(
       console.warn('  ⚠️ Sequence reply hook failed:', seqErr.message);
     }
 
-    // 6b. Forward reply to organizer's inbox (best-effort, never blocks response)
+    // 6b. Action Engine: evaluate reply trigger (best-effort)
+    try {
+      if (actionEngine) {
+        const aePersonRes = await db.query(
+          `SELECT id FROM persons WHERE organizer_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+          [recipient.organizer_id, recipient.email]
+        );
+        if (aePersonRes.rows.length > 0) {
+          await actionEngine.evaluateForPerson(aePersonRes.rows[0].id, recipient.organizer_id, 'reply_received');
+        }
+      }
+    } catch (aeErr) {
+      console.warn('  ⚠️ Action Engine reply trigger failed:', aeErr.message);
+    }
+
+    // 6c. Forward reply to organizer's inbox (best-effort, never blocks response)
     await forwardReplyToOrganizer({
       campaignId: recipient.campaign_id,
       from,

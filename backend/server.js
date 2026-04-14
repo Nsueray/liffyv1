@@ -35,6 +35,7 @@ const contactCrmRouter = require('./routes/contactCrm');
 const pipelineRouter = require('./routes/pipeline');
 const userManagementRouter = require('./routes/userManagement');
 const sequencesRouter = require('./routes/sequences');
+const actionsRouter = require('./routes/actions');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -88,6 +89,7 @@ app.use('/api/admin/ai-miner', adminAIMinerRouter);
 app.use('/api/source-discovery', sourceDiscoveryRouter);
 app.use('/api/users', userManagementRouter);
 app.use(sequencesRouter);
+app.use('/api/actions', actionsRouter);
 app.use(webhooksRouter);
 app.use(statsRouter);
 
@@ -111,4 +113,11 @@ if (!process.env.DISABLE_SEQUENCE_WORKER) {
   const sequenceWorker = require('./services/sequenceWorker');
   sequenceWorker.start();
   process.on('SIGTERM', () => sequenceWorker.stop());
+}
+
+// Action Engine worker — reconciles triggers every 15 min
+if (!process.env.DISABLE_ACTION_WORKER) {
+  const actionWorker = require('./engines/action-engine/actionWorker');
+  actionWorker.start();
+  process.on('SIGTERM', () => actionWorker.stop());
 }

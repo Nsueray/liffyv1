@@ -122,6 +122,17 @@ async function processSequenceStep(seqRecipient) {
       `UPDATE sequence_recipients SET status = 'completed', next_send_at = NULL, updated_at = NOW() WHERE id = $1`,
       [id]
     );
+
+    // Action Engine: evaluate sequence_exhausted trigger (best-effort)
+    try {
+      const actionEngine = require('../engines/action-engine/actionEngine');
+      if (seqRecipient.person_id) {
+        await actionEngine.evaluateForPerson(seqRecipient.person_id, organizer_id, 'sequence_exhausted');
+      }
+    } catch (aeErr) {
+      console.error('[ActionEngine] Sequence exhausted trigger failed:', aeErr.message);
+    }
+
     return { action: 'completed', reason: 'no_step_found' };
   }
 
@@ -277,6 +288,16 @@ async function processSequenceStep(seqRecipient) {
        WHERE id = $1`,
       [id, current_step]
     );
+
+    // Action Engine: evaluate sequence_exhausted trigger (best-effort)
+    try {
+      const actionEngine = require('../engines/action-engine/actionEngine');
+      if (seqRecipient.person_id) {
+        await actionEngine.evaluateForPerson(seqRecipient.person_id, organizer_id, 'sequence_exhausted');
+      }
+    } catch (aeErr) {
+      console.error('[ActionEngine] Sequence exhausted trigger failed:', aeErr.message);
+    }
   }
 
   return { action: 'sent', step: current_step };
