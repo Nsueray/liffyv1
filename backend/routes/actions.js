@@ -91,13 +91,13 @@ router.get('/', authRequired, async (req, res) => {
              aff.company_name,
              aff.job_title,
              c.name AS campaign_name,
-             u.full_name AS assigned_to_name
+             COALESCE(u.first_name || ' ' || u.last_name, u.email) AS assigned_to_name
       FROM action_items ai
       LEFT JOIN persons p ON p.id = ai.person_id
       LEFT JOIN LATERAL (
-        SELECT company_name, job_title FROM affiliations
+        SELECT company_name, position AS job_title FROM affiliations
         WHERE person_id = ai.person_id AND organizer_id = ai.organizer_id
-        ORDER BY is_primary DESC NULLS LAST, updated_at DESC
+        ORDER BY updated_at DESC NULLS LAST
         LIMIT 1
       ) aff ON true
       LEFT JOIN campaigns c ON c.id = ai.campaign_id
@@ -290,7 +290,7 @@ router.get('/history', authRequired, async (req, res) => {
               p.email AS person_email,
               p.first_name AS person_first_name,
               p.last_name AS person_last_name,
-              ru.full_name AS resolved_by_name
+              COALESCE(ru.first_name || ' ' || ru.last_name, ru.email) AS resolved_by_name
        FROM action_items ai
        LEFT JOIN persons p ON p.id = ai.person_id
        LEFT JOIN users ru ON ru.id = ai.resolved_by
