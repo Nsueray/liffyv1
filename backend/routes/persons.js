@@ -27,7 +27,7 @@ router.get('/', authRequired, async (req, res) => {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 50));
     const offset = (page - 1) * limit;
 
-    const { search, verification_status, country, company, has_intent } = req.query;
+    const { search, verification_status, country, company, has_intent, industry } = req.query;
 
     let where = ['p.organizer_id = $1'];
     const params = [organizerId];
@@ -63,6 +63,16 @@ router.get('/', authRequired, async (req, res) => {
     if (company && company.trim()) {
       where.push(`LOWER(a.company_name) LIKE LOWER($${idx})`);
       params.push(`%${company.trim()}%`);
+      idx++;
+    }
+
+    if (industry && industry.trim()) {
+      where.push(`EXISTS (
+        SELECT 1 FROM affiliations af
+        WHERE af.person_id = p.id AND af.organizer_id = p.organizer_id
+          AND af.industry = $${idx}
+      )`);
+      params.push(industry.trim());
       idx++;
     }
 
@@ -116,13 +126,14 @@ router.get('/', authRequired, async (req, res) => {
          a.city,
          a.website,
          a.phone,
+         a.industry,
          EXISTS (
            SELECT 1 FROM prospect_intents pi
            WHERE pi.person_id = p.id AND pi.organizer_id = p.organizer_id
          ) AS has_intent
        FROM persons p
        LEFT JOIN LATERAL (
-         SELECT company_name, position, country_code, city, website, phone
+         SELECT company_name, position, country_code, city, website, phone, industry
          FROM affiliations
          WHERE person_id = p.id AND organizer_id = p.organizer_id
            AND (company_name IS NULL OR company_name NOT LIKE '%@%')
@@ -142,6 +153,27 @@ router.get('/', authRequired, async (req, res) => {
     });
   } catch (err) {
     console.error('GET /api/persons error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/persons/industries — Distinct industry list for dropdown filter
+router.get('/industries', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+
+    const result = await db.query(
+      `SELECT af.industry, COUNT(DISTINCT af.person_id) AS contact_count
+       FROM affiliations af
+       WHERE af.organizer_id = $1 AND af.industry IS NOT NULL AND af.industry != ''
+       GROUP BY af.industry
+       ORDER BY contact_count DESC`,
+      [organizerId]
+    );
+
+    res.json({ industries: result.rows });
+  } catch (err) {
+    console.error('GET /api/persons/industries error:', err);
     res.status(500).json({ error: err.message });
   }
 });
