@@ -43,7 +43,7 @@ router.get('/:personId', authRequired, async (req, res) => {
        FROM affiliations
        WHERE person_id = $1 AND organizer_id = $2
          AND company_name IS NOT NULL AND company_name NOT LIKE '%@%'
-       ORDER BY updated_at DESC NULLS LAST
+       ORDER BY created_at DESC NULLS LAST
        LIMIT 1`,
       [personId, organizer_id]
     );
