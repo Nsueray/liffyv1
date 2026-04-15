@@ -146,6 +146,42 @@ router.get('/', authRequired, async (req, res) => {
   }
 });
 
+// GET /api/persons/companies — Distinct company list for autocomplete
+router.get('/companies', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const q = req.query.q || '';
+
+    let where = `af.organizer_id = $1
+      AND af.company_name IS NOT NULL
+      AND af.company_name != ''
+      AND af.company_name NOT LIKE '%@%'`;
+    const params = [organizerId];
+    let idx = 2;
+
+    if (q.trim()) {
+      where += ` AND LOWER(af.company_name) LIKE LOWER($${idx})`;
+      params.push(`%${q.trim()}%`);
+      idx++;
+    }
+
+    const result = await db.query(
+      `SELECT af.company_name, COUNT(DISTINCT af.person_id) AS contact_count
+       FROM affiliations af
+       WHERE ${where}
+       GROUP BY af.company_name
+       ORDER BY contact_count DESC, af.company_name ASC
+       LIMIT 50`,
+      params
+    );
+
+    res.json({ companies: result.rows });
+  } catch (err) {
+    console.error('GET /api/persons/companies error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/persons/stats — Quick counts for dashboard
 router.get('/stats', authRequired, async (req, res) => {
   try {
