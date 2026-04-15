@@ -123,6 +123,39 @@ router.get('/:personId', authRequired, async (req, res) => {
       });
     }
 
+    // 5. Pipeline stage (if assigned)
+    const stageRes = await db.query(
+      `SELECT ps.name AS stage_name
+       FROM persons p
+       JOIN pipeline_stages ps ON ps.id = p.pipeline_stage_id AND ps.organizer_id = $2
+       WHERE p.id = $1 AND p.organizer_id = $2 AND p.pipeline_stage_id IS NOT NULL`,
+      [personId, organizer_id]
+    );
+    if (stageRes.rows.length > 0) {
+      cards.push({
+        type: 'stage',
+        icon: 'activity',
+        text: `Pipeline: ${stageRes.rows[0].stage_name}`
+      });
+    }
+
+    // 6. Email verification status
+    const verRes = await db.query(
+      `SELECT email, verification_status FROM persons
+       WHERE id = $1 AND organizer_id = $2 AND verification_status IS NOT NULL
+         AND verification_status NOT IN ('unknown', 'pending')`,
+      [personId, organizer_id]
+    );
+    if (verRes.rows.length > 0) {
+      const v = verRes.rows[0];
+      const emoji = v.verification_status === 'valid' ? 'Valid' : v.verification_status === 'invalid' ? 'Invalid' : v.verification_status;
+      cards.push({
+        type: 'verification',
+        icon: 'mail',
+        text: `Email: ${emoji}`
+      });
+    }
+
     res.json({ cards });
   } catch (err) {
     console.error('[Context] GET /:personId error:', err.message);

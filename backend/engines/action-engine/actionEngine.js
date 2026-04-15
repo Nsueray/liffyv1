@@ -135,53 +135,48 @@ async function checkRebookingDue(/* personId, organizerId */) {
 }
 
 // ---------------------------------------------------------------------------
-// T5: engaged_hot — Priority 3
+// T5: engaged_hot — Priority 3 (Blueprint Section 6 strict rules)
+//
+// Action item created ONLY for these combinations:
+//   A) 2+ distinct open events on DIFFERENT days in 7 days
+//   B) Click + past exhibitor history (tags / past contract)
+//   C) Click + high_value tag
+//   D) Click + link URL contains floorplan/pricing/register/book/stand/booth
+//
+// Single click without qualifying context → NO action item.
+// Single open → NO action item.
 // ---------------------------------------------------------------------------
 async function checkEngagedHot(personId, organizerId) {
-  // Skip if reply_received already exists (reply > engaged)
-  const replyExists = await db.query(
-    `SELECT 1 FROM action_items
-     WHERE organizer_id = $1 AND person_id = $2 AND trigger_reason = 'reply_received'
-       AND status IN ('open', 'in_progress')
+  // RULE: If person has a reply, engaged_hot is suppressed (reply_received takes precedence)
+  const hasReply = await db.query(
+    `SELECT 1 FROM campaign_events
+     WHERE person_id = $1 AND organizer_id = $2 AND event_type = 'reply'
      LIMIT 1`,
-    [organizerId, personId]
+    [personId, organizerId]
   );
-  if (replyExists.rows.length > 0) return;
+  if (hasReply.rows.length > 0) return;
 
-  // Check for 2+ opens on different days in last 7 days
+  // RULE: Skip if open engaged_hot action item already exists (dedup)
+  const hasOpen = await db.query(
+    `SELECT 1 FROM action_items
+     WHERE person_id = $1 AND organizer_id = $2
+       AND trigger_reason = 'engaged_hot' AND status IN ('open', 'in_progress')
+     LIMIT 1`,
+    [personId, organizerId]
+  );
+  if (hasOpen.rows.length > 0) return;
+
+  // --- COMBINATION A: 2+ distinct opens on different days in 7 days ---
   const openRes = await db.query(
-    `SELECT COUNT(DISTINCT DATE(occurred_at)) AS open_days
+    `SELECT COUNT(DISTINCT DATE(occurred_at)) AS distinct_days
      FROM campaign_events
      WHERE person_id = $1 AND organizer_id = $2 AND event_type = 'open'
        AND occurred_at >= NOW() - INTERVAL '7 days'`,
     [personId, organizerId]
   );
-  const openDays = parseInt(openRes.rows[0]?.open_days || 0, 10);
+  const distinctOpenDays = parseInt(openRes.rows[0]?.distinct_days || 0, 10);
 
-  // Check for click in last 7 days
-  const clickRes = await db.query(
-    `SELECT ce.campaign_id, c.created_by_user_id, ce.occurred_at
-     FROM campaign_events ce
-     JOIN campaigns c ON c.id = ce.campaign_id
-     WHERE ce.person_id = $1 AND ce.organizer_id = $2 AND ce.event_type = 'click'
-       AND ce.occurred_at >= NOW() - INTERVAL '7 days'
-     ORDER BY ce.occurred_at DESC LIMIT 1`,
-    [personId, organizerId]
-  );
-
-  let detail = null;
-  let campaignId = null;
-  let assignedTo = null;
-  let lastActivityAt = null;
-
-  if (clickRes.rows.length > 0) {
-    const click = clickRes.rows[0];
-    detail = 'Clicked link in campaign email';
-    campaignId = click.campaign_id;
-    assignedTo = click.created_by_user_id;
-    lastActivityAt = click.occurred_at;
-  } else if (openDays >= 2) {
-    // Get campaign info from most recent open
+  if (distinctOpenDays >= 2) {
     const latestOpen = await db.query(
       `SELECT ce.campaign_id, c.created_by_user_id, ce.occurred_at
        FROM campaign_events ce
@@ -192,30 +187,67 @@ async function checkEngagedHot(personId, organizerId) {
       [personId, organizerId]
     );
     if (latestOpen.rows.length > 0) {
-      detail = `Opened ${openDays}x in the last 7 days`;
-      campaignId = latestOpen.rows[0].campaign_id;
-      assignedTo = latestOpen.rows[0].created_by_user_id;
-      lastActivityAt = latestOpen.rows[0].occurred_at;
+      const open = latestOpen.rows[0];
+      const assignedTo = open.created_by_user_id || await getFallbackOwner(organizerId);
+      if (!assignedTo) return;
+      await upsertActionItem({
+        organizerId,
+        assignedTo,
+        personId,
+        campaignId: open.campaign_id,
+        triggerReason: 'engaged_hot',
+        triggerDetail: `Opened on ${distinctOpenDays} different days in the last week`,
+        priority: 3,
+        priorityLabel: 'P3',
+        lastActivityAt: open.occurred_at,
+        engagementScore: await computeEngagementScore(personId, organizerId),
+      });
+      return;
     }
   }
 
-  if (!detail) return;
+  // --- COMBINATION B/C/D: Click + qualifying context ---
+  const clicks = await db.query(
+    `SELECT ce.url, ce.occurred_at, ce.campaign_id, c.created_by_user_id
+     FROM campaign_events ce
+     JOIN campaigns c ON c.id = ce.campaign_id
+     WHERE ce.person_id = $1 AND ce.organizer_id = $2 AND ce.event_type = 'click'
+       AND ce.occurred_at >= NOW() - INTERVAL '30 days'
+     ORDER BY ce.occurred_at DESC
+     LIMIT 5`,
+    [personId, organizerId]
+  );
 
-  assignedTo = assignedTo || await getFallbackOwner(organizerId);
-  if (!assignedTo) return;
+  if (clicks.rows.length === 0) return; // No clicks → no action item
 
-  await upsertActionItem({
-    organizerId,
-    assignedTo,
-    personId,
-    campaignId,
-    triggerReason: 'engaged_hot',
-    triggerDetail: detail,
-    priority: 3,
-    priorityLabel: 'P3',
-    lastActivityAt,
-    engagementScore: await computeEngagementScore(personId, organizerId),
+  // COMBINATION D: Check if any click URL is high-value
+  const HIGH_VALUE_KEYWORDS = ['floorplan', 'pricing', 'register', 'book', 'stand', 'booth'];
+  const highValueClick = clicks.rows.find(c => {
+    const url = (c.url || '').toLowerCase();
+    return HIGH_VALUE_KEYWORDS.some(kw => url.includes(kw));
   });
+
+  if (highValueClick) {
+    const assignedTo = highValueClick.created_by_user_id || await getFallbackOwner(organizerId);
+    if (!assignedTo) return;
+    await upsertActionItem({
+      organizerId,
+      assignedTo,
+      personId,
+      campaignId: highValueClick.campaign_id,
+      triggerReason: 'engaged_hot',
+      triggerDetail: `Clicked high-value link: ${(highValueClick.url || '').substring(0, 80)}`,
+      priority: 3,
+      priorityLabel: 'P3',
+      lastActivityAt: highValueClick.occurred_at,
+      engagementScore: await computeEngagementScore(personId, organizerId),
+    });
+    return;
+  }
+
+  // Click exists but no qualifying context → NO action item
+  // Blueprint: "Single click without qualifying context" does NOT create action item
+  return;
 }
 
 // ---------------------------------------------------------------------------
