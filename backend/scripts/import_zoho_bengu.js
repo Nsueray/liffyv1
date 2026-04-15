@@ -71,6 +71,7 @@ function parseCSV(filePath, skipLines = 0) {
   }
 
   const headers = parseCSVLine(lines[headerIdx]).map(h => h.trim());
+  console.log(`[CSV] ${path.basename(filePath)}: header at line ${headerIdx + 1}, ${headers.length} columns: ${headers.slice(0, 6).join(', ')}...`);
   const rows = [];
 
   for (let i = headerIdx + 1; i < lines.length; i++) {
@@ -224,7 +225,7 @@ async function main() {
   // Phase A: Company lookup
   // -----------------------------------------------------------------------
   console.log('[Phase A] Parsing Companies CSV...');
-  const companyRows = parseCSV(COMPANY_CSV, 5); // 5 lines metadata, header at line 6 (0-indexed)
+  const companyRows = parseCSV(COMPANY_CSV, 6); // 6 lines metadata (1-indexed lines 1-6), header at line 7 (index 6)
   const companyLookup = buildCompanyLookup(companyRows);
   console.log(`[Phase A] ${companyLookup.size} companies loaded into lookup`);
 
@@ -243,7 +244,7 @@ async function main() {
   if (DRY_RUN) {
     // Parse and count contacts/leads for dry-run summary
     console.log('\n[Phase B] Parsing Contacts CSV...');
-    const contactRows = parseCSV(CONTACT_CSV, 5);
+    const contactRows = parseCSV(CONTACT_CSV, 6);
     const contactsWithEmail = contactRows.filter(r => getCol(r, 'Email'));
     console.log(`[Phase B] ${contactRows.length} rows, ${contactsWithEmail.length} with email`);
 
@@ -265,7 +266,7 @@ async function main() {
   // Phase B: Contacts CSV → persons + affiliations
   // -----------------------------------------------------------------------
   console.log('\n[Phase B] Importing Contacts...');
-  const contactRows = parseCSV(CONTACT_CSV, 5);
+  const contactRows = parseCSV(CONTACT_CSV, 6);
   let cPersons = 0, cAffs = 0, cSkipped = 0, cErrors = 0;
 
   for (let i = 0; i < contactRows.length; i += BATCH_SIZE) {
