@@ -38,7 +38,7 @@ Engagement is stored as events, not scores.
 
 ---
 
-## Database — Current State (27 tables, 30 migrations)
+## Database — Current State (31 tables, 37 migrations)
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -48,10 +48,10 @@ Engagement is stored as events, not scores.
 | `mining_jobs` | ACTIVE | Scraping job definitions |
 | `mining_results` | ACTIVE | Discovery events (discovery only!) |
 | `mining_job_logs` | ACTIVE | Job execution logs |
-| `campaigns` | ACTIVE | Email campaigns |
-| `campaign_recipients` | ACTIVE | Per-recipient tracking |
-| `email_templates` | ACTIVE | Reusable templates with placeholders |
-| `sender_identities` | ACTIVE | Verified sender emails |
+| `campaigns` | ACTIVE | Email campaigns. campaign_type (single/sequence) + sequence_config from 035. |
+| `campaign_recipients` | ACTIVE | Per-recipient tracking. person_id column from 034. |
+| `email_templates` | ACTIVE | Reusable templates with placeholders. visibility + created_by_user_id from 033. |
+| `sender_identities` | ACTIVE | Verified sender emails. visibility from 033. |
 | `unsubscribes` | ACTIVE | Opt-out records |
 
 ### Canonical Tables (Constitution Migration — Active)
@@ -68,13 +68,16 @@ Engagement is stored as events, not scores.
 | `contact_activities` | ACTIVE | 030 | Auto-logged activity timeline per person (calls, emails, status changes). |
 | `contact_tasks` | ACTIVE | 030 | Follow-up tasks with due dates, priority, assignment. |
 | `pipeline_stages` | ACTIVE | 031 | Configurable sales pipeline stages (name, sort_order, color, is_won, is_lost). |
+| `campaign_sequences` | ACTIVE | 035 | Multi-touch sequence step definitions (template, delay, condition per step). |
+| `sequence_recipients` | ACTIVE | 035 | Per-recipient sequence tracking (current_step, status, next_send_at). |
+| `action_items` | ACTIVE | 037 | Trigger-based follow-up items with priority scoring (P1-P4). 6 triggers. |
 
 ### Legacy Tables (Exist but transitional)
 | Table | Status | Notes |
 |-------|--------|-------|
 | `prospects` | LEGACY | Import-all + CSV upload (dual-write) still write here. Will be replaced when features migrate to persons + affiliations. |
-| `lists` | LEGACY | Used by campaign resolve + CSV upload. Will be re-evaluated. |
-| `list_members` | LEGACY | Used by campaign resolve + CSV upload. Will be re-evaluated. |
+| `lists` | LEGACY | Used by campaign resolve + CSV upload. Will be re-evaluated. visibility from 033. |
+| `list_members` | LEGACY | Used by campaign resolve + CSV upload. Will be re-evaluated. person_id from 034. |
 | `email_logs` | DEPRECATED | No longer written to (last write in `campaignSend.js` removed). Reports + logs migrated to `campaign_events`. Table retained for historical data only. |
 
 **RULE:** Legacy tables must NOT be deleted. They remain until migration is complete.
@@ -91,7 +94,7 @@ Phase 4 — Remove legacy tables (5 steps). Full plan in `MIGRATION_PLAN.md`.
 
 **Current phase: Late Phase 3 (approaching Phase 4)**
 
-All migrations (001–032) applied in production. 25 tables active.
+All migrations (001–032) applied in production. Migrations 033–037 written, pending application.
 `AGGREGATION_PERSIST=true` set on Render — mining pipeline writes to `persons` + `affiliations`.
 All import paths (CSV upload, import-all, leads/import) dual-write to both legacy and canonical tables.
 Campaign resolve prefers canonical data with legacy fallback.
@@ -153,7 +156,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 
 ---
 
-## Migrations (27 files)
+## Migrations (29 files)
 
 | # | File | Tables |
 |---|------|--------|
@@ -186,6 +189,8 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 | 033 | `033_add_visibility_columns.sql` | ALTER `lists` (+visibility), ALTER `email_templates` (+visibility, +created_by_user_id), ALTER `sender_identities` (+visibility) |
 | 034 | `034_phase4_person_id_columns.sql` | Re-backfill person_id in `campaign_recipients` + `list_members`, partial indexes for NULL tracking |
 | 035 | `035_create_sequences.sql` | `campaign_sequences`, `sequence_recipients`, ALTER `campaigns` (+campaign_type, +sequence_config) |
+| 036 | `036_allow_null_template_id.sql` | ALTER `campaigns` (DROP NOT NULL on template_id for sequence campaigns) |
+| 037 | `037_create_action_items.sql` | `action_items` (6 trigger reasons, priority 1-4, dedup partial unique index) |
 
 ---
 
@@ -200,3 +205,27 @@ Legacy removal must be **incremental and reversible**.
 5. ~~Campaign resolve uses canonical path~~ — fallback for NULL person_id added
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) section E for task tracking.
+
+---
+
+## Entity Relationships
+
+```
+organizers ──── persons ──── affiliations
+                  │
+                  ├── prospect_intents
+                  ├── contact_notes
+                  ├── contact_activities
+                  ├── contact_tasks
+                  ├── action_items (via person_id)
+                  └── pipeline_stages (via pipeline_stage_id)
+
+campaigns ──┬── campaign_recipients ──── campaign_events
+            ├── campaign_sequences
+            └── sequence_recipients
+
+users ──── action_items (via assigned_to)
+
+organizers ──── mining_jobs ──── mining_results
+                                 └── mining_job_logs
+```

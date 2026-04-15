@@ -63,6 +63,11 @@
 - **Owner Admin Panel** — `/admin` page with user CRUD table (role badges: purple/blue/green, active/inactive status). Add User modal (email, password, name, role, daily limit). Edit User modal (role, limit, active toggle). Reset Password modal. Per-user expandable stats row with email usage progress bar (green/amber/red). Sidebar Admin item visible only to owner/admin. Auth guard redirects non-privileged to /dashboard. (commit: 4a47e3e liffy-ui)
 - **Sidebar Updates** — Added Tasks (CheckSquare icon, overdue badge), Pipeline (Kanban icon), Admin (Shield icon, owner/admin only) menu items. User profile card shows role badge. Dynamic badge counts from `/api/stats` + `/api/tasks/summary`. 401 polling stop.
 - **Layout Client Updates** — JWT decode persists `role` + `user_id` to `liffy_user` localStorage. Route titles for `/admin`, `/leads`, `/prospects`. Hardcoded user fallback removed (commit: 112ad19 liffy-ui).
+- **Multi-Touch Sequences** — Campaign type selector (single/sequence) in create modal, SEQ badge in campaigns table. Sequence Builder page at `/campaigns/[id]/sequences` with step CRUD (add/edit/delete, max 5), condition/delay config, start/pause/resume controls, analytics with status breakdown and step funnel bars. (commits: aee4603 backend, liffy-ui)
+- **Action Screen (Homepage)** — Action Center at `/` (homepage) with priority dots (P1=red, P2=yellow, P3=orange, P4=blue), summary cards (Open/P1/P2/P3/P4/Snoozed), trigger filter dropdown, sort by priority/recent/company/engagement, quick actions (Done/Dismiss/Snooze), snooze modal with duration picker, history view for resolved items, empty state. (commits: cc241d2 backend, 9d36975 liffy-ui)
+- **Sidebar: Action Center** — "Action" menu item with Zap icon at top position, dynamic open count badge from `/api/actions/summary`, exact pathname match for `/`. (commit: 9d36975 liffy-ui)
+- **Dashboard Stat Fix** — totalSent now uses events.sent (not recipients.sent), open/click/bounce rates use COUNT(DISTINCT email). (commits in liffyv1)
+- **Visibility Columns** — Migration 033 adds sharing (private/team/shared) to lists, email_templates, sender_identities. lists.js enforced with visibilityFilter(). (commit in liffyv1)
 
 ---
 
@@ -71,6 +76,7 @@
 | Priority | Task | Backend Endpoints |
 |----------|------|-------------------|
 | P2 #6 | Zoho CRM Push UI — push button, module select, push history | `POST /api/zoho/push`, `GET /push-history` |
+| P2 #7 | Action Screen improvements — inline reply compose, bulk actions, notification bell | `/api/actions` |
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for full task tracking.
 
@@ -101,6 +107,7 @@ See [LIFFY_TODO.md](./LIFFY_TODO.md) for full task tracking.
 - ~~**/api/stats 401 Unauthorized**~~ — FIXED: `/api/stats` had no local API route proxy (relied on `next.config.ts` rewrite which doesn't forward auth headers). Added `app/api/stats/route.ts`. Sidebar polling also stops on 401 to prevent console spam. (commits: 4694792, 919ac26 in liffy-ui)
 
 ### Open
+- **Action Screen API proxy** — Action Center fetches may need direct API URL (api.liffy.app) if Next.js proxy doesn't forward auth headers correctly
 - **AI Miner Generator Phase 0** — Lab mode only. Phase 1 (multi-page crawl, production integration) not yet started. See CLAUDE_FEATURES.md for details.
 - ZeroBounce account not yet configured — settings UI untested against live API
 - Prospects page search is client-side only (backend `/api/intents` doesn't support text search param)

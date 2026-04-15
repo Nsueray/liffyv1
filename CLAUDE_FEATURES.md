@@ -1354,3 +1354,171 @@ Or if campaign would exceed:
   "attempted": 350
 }
 ```
+
+---
+
+## Multi-Touch Campaign Sequences
+
+**Status:** LIVE.
+
+Campaign sequences allow sending a series of emails over time with configurable delays and conditions.
+
+**Architecture:**
+```
+Campaign (campaign_type='sequence')
+  → campaign_sequences (step definitions: template, delay, condition)
+  → initializeSequence() populates sequence_recipients from resolved campaign_recipients
+  → sequenceWorker polls every 60s for due recipients
+  → processSequenceStep() sends email, advances step or completes
+```
+
+**Sequence step conditions:**
+- `no_reply` — send only if recipient hasn't replied (default)
+- `no_open` — send only if recipient hasn't opened
+- `always` — send regardless
+
+**Lifecycle:** active → paused (manual) → resumed → completed/replied/bounced/unsubscribed
+
+**Daily limit enforcement:** Sequence worker checks per-user daily_email_limit before each send.
+
+**API endpoints:**
+- `GET /api/campaigns/:id/sequences` — list steps
+- `POST /api/campaigns/:id/sequences` — add step
+- `PATCH /api/campaigns/:id/sequences/:stepId` — update step
+- `DELETE /api/campaigns/:id/sequences/:stepId` — remove step
+- `POST /api/campaigns/:id/sequences/reorder` — reorder steps
+- `POST /api/campaigns/:id/start` — start sequence (initializes recipients)
+- `POST /api/campaigns/:id/pause` — pause sequence
+- `POST /api/campaigns/:id/resume` — resume sequence
+- `GET /api/campaigns/:id/sequence-analytics` — per-step analytics
+
+**Files:**
+- `backend/services/sequenceService.js` — core logic (init, step processing, reply/bounce/unsub handling)
+- `backend/services/sequenceWorker.js` — 60s polling, batch 50, daily limit, auto-completion
+- `backend/routes/sequences.js` — CRUD + control endpoints
+- `backend/migrations/035_create_sequences.sql` — campaign_sequences + sequence_recipients tables
+- `backend/migrations/036_allow_null_template_id.sql` — template_id nullable for sequence campaigns
+
+---
+
+## Action Engine (Blueprint Section 6)
+
+**Status:** LIVE.
+
+The Action Engine evaluates trigger rules and creates prioritized follow-up items for users.
+
+**Two modes:**
+1. **Near-real-time:** `evaluateForPerson()` called from webhooks and sequence completion hooks
+2. **Periodic:** `reconcile()` called every 15 minutes by actionWorker
+
+**6 Trigger Rules:**
+
+| # | Trigger | Priority | Condition | Status |
+|---|---------|----------|-----------|--------|
+| T1 | `reply_received` | P1 | Person replied to any campaign email | LIVE |
+| T2 | `sequence_exhausted` | P3 | Sequence completed, no reply received | LIVE |
+| T3 | `quote_no_response` | P2 | Quote sent, no response (requires quotes table) | STUB |
+| T4 | `rebooking_due` | P2 | Rebooking date approaching (requires ELIZA DB) | STUB |
+| T5 | `engaged_hot` | P3 | Click in 7 days, or 2+ opens on different days in 7 days | LIVE |
+| T6 | `manual_flag` | P4 | User manually flagged a person | LIVE (via POST /api/actions) |
+
+**Engagement scoring:** Computed from campaign_events in last 30 days.
+- Open = +1 point
+- Click = +3 points
+- Reply = +10 points
+- 7-day inactive = -2 penalty
+
+**Deduplication:** Partial unique index `(organizer_id, person_id, trigger_reason) WHERE status IN ('open', 'in_progress')` prevents duplicate items. Upsert via ON CONFLICT updates existing.
+
+**Reconciliation (every 15 min):**
+1. Resurface snoozed items past snoozed_until
+2. Evaluate all persons with campaign activity in last 7 days
+3. Check completed sequences without action items
+4. Bulk-update engagement scores on open items
+
+**Webhook hooks (best-effort, never breaks webhook flow):**
+- SendGrid events: reply → reply_received, open/click → engaged_hot
+- Inbound reply: → reply_received
+- Sequence completion: → sequence_exhausted
+
+**Files:**
+- `backend/engines/action-engine/actionEngine.js` — trigger evaluation + reconciliation
+- `backend/engines/action-engine/actionWorker.js` — 15-min polling worker
+- `backend/migrations/037_create_action_items.sql` — action_items table
+
+---
+
+## Action Items API (Blueprint Section 8)
+
+**Status:** LIVE.
+
+CRUD endpoints for action items with user-scoped access.
+
+**Endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/actions` | List open/in_progress items (user-scoped, person+affiliation JOIN) |
+| GET | `/api/actions/summary` | Badge counts by priority + snoozed |
+| PATCH | `/api/actions/:id` | Update status (done/dismissed/snoozed/in_progress) |
+| POST | `/api/actions` | Create manual_flag item |
+| GET | `/api/actions/history` | Resolved items (done/dismissed) |
+
+**User isolation:** Regular users see only items assigned to them. Owner/admin see all items in org.
+
+**GET /api/actions query params:**
+- `status` — comma-separated (default: open,in_progress)
+- `trigger_reason` — filter by trigger type
+- `sort` — priority (default), recent, company, engagement
+- `limit` — max 200
+- `offset` — pagination offset
+
+**PATCH status transitions:**
+- `done` / `dismissed` → sets resolved_at, resolved_by, optional resolution_note
+- `snoozed` → requires snoozed_until datetime
+- `in_progress` → clears snoozed_until
+- `open` → reset
+
+**Files:**
+- `backend/routes/actions.js` — all endpoints
+- `backend/server.js` — mounted at `/api/actions`
+
+---
+
+## Visibility System (Migration 033)
+
+**Status:** LIVE (migration pending application).
+
+Sharing control on lists, email_templates, and sender_identities.
+
+**Column:** `visibility VARCHAR(20) DEFAULT 'shared'`
+**Values:** `private` (creator only), `team` (same role group), `shared` (all org users)
+
+**Enforcement (lists.js):**
+- Owner/admin: see all lists regardless of visibility
+- Regular user: see shared lists + their own private/team lists
+- `visibilityFilter()` helper builds parameterized WHERE clause
+
+**Default:** All existing rows backfilled to 'shared' (no access changes).
+
+**Files:**
+- `backend/migrations/033_add_visibility_columns.sql`
+- `backend/routes/lists.js` — visibilityFilter() applied to GET /, GET /:id, DELETE /:id
+
+---
+
+## Phase 4 — Legacy Removal Progress
+
+**Status:** Preparation complete, execution pending.
+
+**Completed:**
+- Migration 034: Re-backfill person_id on campaign_recipients + list_members, NULL tracking partial indexes
+- Backfill script: `backend/scripts/backfill_person_ids.js` (idempotent, --dry-run/--apply)
+- Campaign resolve: CTE UNION with Path A (person_id canonical) + Path B (prospect email fallback)
+- TODO [Phase 4] comments added to dual-write locations
+
+**Remaining:**
+- Run backfill script in production (--apply)
+- Apply migrations 033-037
+- Remove dual-write to prospects table
+- Archive/drop prospects table

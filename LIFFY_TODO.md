@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-14*
+*Updated: 2026-04-15*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -61,6 +61,9 @@
 | B10 | Daily Email Limit — per-user, 429 enforcement | P1 | ✅ DONE |
 | B11 | Owner Admin Panel — user CRUD, password reset, usage stats | P1 | ✅ DONE |
 | B12 | Action Engine — multi-touch campaign sequences (migration 035, service, worker, routes, UI) | P1 | ✅ DONE |
+| B13 | Multi-Touch Sequences UI — campaign type selector, sequence builder, step CRUD, analytics | P1 | ✅ DONE |
+| B14 | Action Engine — trigger rules, priority scoring, webhook hooks, action worker | P1 | ✅ DONE |
+| B15 | Action Screen — homepage, priority cards, filter/sort, snooze, history | P1 | ✅ DONE |
 
 ## C. KNOWN ISSUES
 
@@ -93,6 +96,9 @@
 | E7 | Campaign resolve canonical path with fallback — UNION (person_id path + prospect email fallback) | P2 | ✅ DONE |
 | E8 | Visibility columns — migration 033, lists.js enforcement | P2 | ✅ DONE (not applied) |
 | E9 | Dashboard stat fix — COUNT(DISTINCT email) for rates | P1 | ✅ DONE |
+| E10 | Migration 035 — campaign_sequences + sequence_recipients | P1 | ✅ DONE (not applied) |
+| E11 | Migration 036 — template_id nullable for sequence campaigns | P1 | ✅ DONE (not applied) |
+| E12 | Migration 037 — action_items table | P1 | ✅ DONE (not applied) |
 
 ## F. NEW MINERS
 

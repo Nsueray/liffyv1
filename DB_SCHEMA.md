@@ -1,6 +1,6 @@
 # Liffy DB Schema Guide
 
-> 25 tables, 27 migrations, PostgreSQL 17 (Render hosted)
+> 31 tables, 37 migrations, PostgreSQL 17 (Render hosted)
 > All PKs: UUID via `gen_random_uuid()`. All tables include `organizer_id` for multi-tenant isolation.
 
 ---
@@ -34,6 +34,9 @@
 | 23 | [contact_activities](#23-contact_activities) | ACTIVE | CRM | 030 |
 | 24 | [contact_tasks](#24-contact_tasks) | ACTIVE | CRM | 030 |
 | 25 | [pipeline_stages](#25-pipeline_stages) | ACTIVE | Sales Pipeline | 031 |
+| 26 | [campaign_sequences](#26-campaign_sequences) | ACTIVE | Sequences | 035 |
+| 27 | [sequence_recipients](#27-sequence_recipients) | ACTIVE | Sequences | 035 |
+| 28 | [action_items](#28-action_items) | ACTIVE | Action Engine | 037 |
 
 ---
 
@@ -41,12 +44,15 @@
 
 ```
 organizers ──┬── users ──┬── contact_tasks (assigned_to, created_by)
-             │           └── contact_activities (user_id)
+             │           ├── contact_activities (user_id)
+             │           └── action_items (assigned_to, resolved_by)
              ├── sender_identities
              ├── email_templates
              ├── campaigns ──┬── campaign_recipients
              │               ├── campaign_events
-             │               └── prospect_intents (via campaign_id)
+             │               ├── prospect_intents (via campaign_id)
+             │               ├── campaign_sequences
+             │               └── sequence_recipients
              ├── mining_jobs ──┬── mining_results
              │                 ├── mining_job_logs
              │                 └── affiliations (via mining_job_id)
@@ -56,7 +62,8 @@ organizers ──┬── users ──┬── contact_tasks (assigned_to, cre
              │             ├── zoho_push_log
              │             ├── contact_notes
              │             ├── contact_activities
-             │             └── contact_tasks
+             │             ├── contact_tasks
+             │             └── action_items
              ├── pipeline_stages ── persons (via pipeline_stage_id)
              ├── prospects ── list_members ── lists
              ├── unsubscribes
@@ -134,6 +141,7 @@ Multi-tenant root table. Every other table references `organizer_id`.
 | `reply_to` | VARCHAR(255) | | |
 | `is_default` | BOOLEAN | DEFAULT FALSE | |
 | `is_active` | BOOLEAN | DEFAULT TRUE | |
+| `visibility` | VARCHAR(20) | DEFAULT 'shared' | private, team, shared (migration 033) |
 | `created_at` | TIMESTAMP | DEFAULT NOW() | |
 
 **Indexes:** `idx_sender_identities_org`, `idx_sender_identities_user`
@@ -153,6 +161,8 @@ Multi-tenant root table. Every other table references `organizer_id`.
 | `subject` | VARCHAR(255) | NOT NULL | Supports `{{placeholders}}` |
 | `body_html` | TEXT | NOT NULL | HTML with `{{placeholders}}` |
 | `body_text` | TEXT | | Plain text version |
+| `visibility` | VARCHAR(20) | DEFAULT 'shared' | private, team, shared (migration 033) |
+| `created_by_user_id` | UUID | FK → users, ON DELETE SET NULL | Creator (migration 033) |
 | `created_at` | TIMESTAMP | DEFAULT NOW() | |
 
 **Indexes:** `idx_email_templates_organizer_id`
@@ -178,6 +188,8 @@ Multi-tenant root table. Every other table references `organizer_id`.
 | `recipient_count` | INTEGER | | Set at resolve time (migration 010) |
 | `verification_mode` | VARCHAR(20) | DEFAULT 'exclude_invalid' | exclude_invalid or verified_only (migration 023) |
 | `created_by_user_id` | UUID | FK → users, ON DELETE SET NULL | User who created (migration 032, data isolation) |
+| `campaign_type` | VARCHAR(20) | DEFAULT 'single' | single or sequence (migration 035) |
+| `sequence_config` | JSONB | | Sequence metadata (migration 035) |
 | `created_at` | TIMESTAMP | DEFAULT NOW() | |
 
 **Indexes:** `idx_campaigns_organizer_id`, `idx_campaigns_template_id`, `idx_campaigns_list_id`, `idx_campaigns_sender_id`, `idx_campaigns_created_by_user`
@@ -200,6 +212,7 @@ Multi-tenant root table. Every other table references `organizer_id`.
 | `status` | VARCHAR(20) | DEFAULT 'pending' | pending → sent → delivered/bounced/failed |
 | `last_error` | TEXT | | |
 | `prospect_id` | UUID | | FK → prospects (migration 011) |
+| `person_id` | UUID | FK → persons, ON DELETE SET NULL | Canonical person link (migration 034) |
 | `sent_at` | TIMESTAMP | | (migration 005 — implicit from send) |
 | `delivered_at` | TIMESTAMP | | (migration 013) |
 | `opened_at` | TIMESTAMP | | (migration 013) |
@@ -446,6 +459,7 @@ Intent signals — records that a person demonstrated interest.
 | `created_by_user_id` | UUID | FK → users, ON DELETE SET NULL | |
 | `import_status` | VARCHAR(20) | DEFAULT NULL | processing, completed, failed (migration 022) |
 | `import_progress` | JSONB | DEFAULT NULL | (migration 022) |
+| `visibility` | VARCHAR(20) | DEFAULT 'shared' | private, team, shared (migration 033) |
 | `created_at` | TIMESTAMP | DEFAULT NOW() | |
 
 **Indexes:** `idx_lists_organizer_id`
@@ -465,6 +479,7 @@ Intent signals — records that a person demonstrated interest.
 | `organizer_id` | UUID | FK → organizers, NOT NULL | |
 | `list_id` | UUID | FK → lists, NOT NULL | |
 | `prospect_id` | UUID | FK → prospects, NOT NULL | |
+| `person_id` | UUID | FK → persons, ON DELETE SET NULL | Canonical person link (migration 034) |
 | `created_at` | TIMESTAMP | DEFAULT NOW() | |
 
 **Constraints:** UNIQUE (list_id, prospect_id)
@@ -695,6 +710,11 @@ verify-list → verification_queue INSERT (pending)
 | 030 | `030_contact_crm.sql` | contact_notes, contact_activities, contact_tasks |
 | 031 | `031_pipeline_stages.sql` | pipeline_stages, ALTER persons (+pipeline_stage_id, +pipeline_entered_at) |
 | 032 | `032_user_isolation.sql` | ALTER campaigns (+created_by_user_id), ALTER mining_jobs (+created_by_user_id), ALTER persons (+pipeline_assigned_user_id), ALTER users (+daily_email_limit, +first_name, +last_name) |
+| 033 | `033_add_visibility_columns.sql` | ALTER lists (+visibility), ALTER email_templates (+visibility, +created_by_user_id), ALTER sender_identities (+visibility) |
+| 034 | `034_phase4_person_id_columns.sql` | Re-backfill person_id in campaign_recipients + list_members, partial indexes for NULL tracking |
+| 035 | `035_create_sequences.sql` | campaign_sequences, sequence_recipients, ALTER campaigns (+campaign_type, +sequence_config) |
+| 036 | `036_allow_null_template_id.sql` | ALTER campaigns (DROP NOT NULL on template_id) |
+| 037 | `037_create_action_items.sql` | action_items (6 trigger reasons, priority 1-4, dedup partial unique index) |
 
 ---
 
@@ -788,6 +808,87 @@ Configurable sales pipeline stages per organizer.
 
 ---
 
+### 26. campaign_sequences
+
+Multi-touch sequence step definitions.
+
+| Column | Type | Constraints | Notes |
+|--------|------|-------------|-------|
+| `id` | UUID | PK | |
+| `campaign_id` | UUID | FK → campaigns, NOT NULL | |
+| `organizer_id` | UUID | FK → organizers, NOT NULL | |
+| `template_id` | UUID | FK → email_templates, NOT NULL | Step's email template |
+| `sequence_order` | INTEGER | NOT NULL | Step number (1, 2, 3...) |
+| `delay_days` | INTEGER | NOT NULL, DEFAULT 3 | Days to wait before sending |
+| `condition` | VARCHAR(20) | DEFAULT 'no_reply' | no_reply, no_open, always |
+| `is_active` | BOOLEAN | DEFAULT TRUE | |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+**Indexes:** `idx_campaign_sequences_campaign` (campaign_id, sequence_order)
+**Read by:** Sequence worker, sequence analytics, sequence builder UI
+**Written by:** POST/PATCH/DELETE /api/campaigns/:id/sequences
+**UI pages:** Sequence Builder
+
+---
+
+### 27. sequence_recipients
+
+Per-recipient sequence tracking.
+
+| Column | Type | Constraints | Notes |
+|--------|------|-------------|-------|
+| `id` | UUID | PK | |
+| `campaign_id` | UUID | FK → campaigns, NOT NULL | |
+| `organizer_id` | UUID | FK → organizers, NOT NULL | |
+| `person_id` | UUID | FK → persons, ON DELETE SET NULL | |
+| `email` | VARCHAR(320) | NOT NULL | |
+| `meta` | JSONB | | Template variables |
+| `status` | VARCHAR(20) | DEFAULT 'active' | active, paused, completed, replied, bounced, unsubscribed |
+| `current_step` | INTEGER | DEFAULT 1 | Next step to send |
+| `last_sent_step` | INTEGER | | Last successfully sent step |
+| `last_sent_at` | TIMESTAMPTZ | | |
+| `next_send_at` | TIMESTAMPTZ | | When to send next step |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+| `updated_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+
+**Indexes:** `idx_sequence_recipients_campaign`, `idx_sequence_recipients_status`, `idx_sequence_recipients_next_send` (status='active', next_send_at), `idx_sequence_recipients_person`
+**Read by:** Sequence worker (poll due), sequence analytics, sequence builder UI
+**Written by:** initializeSequence(), processSequenceStep(), handleReply/Bounce/Unsubscribe
+**UI pages:** Sequence Builder (analytics)
+
+---
+
+### 28. action_items
+
+Trigger-based follow-up items for the Action Screen (Blueprint Section 6 & 8).
+
+| Column | Type | Constraints | Notes |
+|--------|------|-------------|-------|
+| `id` | UUID | PK | |
+| `organizer_id` | UUID | FK → organizers, NOT NULL | |
+| `assigned_to` | UUID | FK → users, NOT NULL | |
+| `person_id` | UUID | FK → persons, ON DELETE CASCADE | |
+| `campaign_id` | UUID | FK → campaigns, ON DELETE SET NULL | |
+| `trigger_reason` | VARCHAR(30) | NOT NULL, CHECK IN (...) | reply_received, sequence_exhausted, quote_no_response, rebooking_due, engaged_hot, manual_flag |
+| `trigger_detail` | TEXT | | Human-readable detail |
+| `priority` | INTEGER | NOT NULL, DEFAULT 3, CHECK 1-4 | P1=urgent, P2=high, P3=medium, P4=low |
+| `priority_label` | VARCHAR(4) | CHECK IN (P1,P2,P3,P4) | |
+| `status` | VARCHAR(20) | DEFAULT 'open' | open, in_progress, done, dismissed, snoozed |
+| `snoozed_until` | TIMESTAMPTZ | | |
+| `last_activity_at` | TIMESTAMPTZ | | |
+| `engagement_score` | INTEGER | DEFAULT 0 | Weighted: open=1, click=3, reply=10 |
+| `created_at` | TIMESTAMPTZ | DEFAULT NOW() | |
+| `resolved_at` | TIMESTAMPTZ | | |
+| `resolved_by` | UUID | FK → users | |
+| `resolution_note` | TEXT | | |
+
+**Indexes:** `idx_action_items_assigned`, `idx_action_items_status`, `idx_action_items_priority`, `idx_action_items_trigger`, `idx_action_items_organizer`, `idx_action_items_person`, `idx_action_items_open` (partial: assigned_to, status, priority WHERE status='open'), `idx_action_items_snoozed` (partial: snoozed_until WHERE status='snoozed'), `idx_action_items_dedup` (UNIQUE partial: organizer_id, person_id, trigger_reason WHERE status IN open/in_progress)
+**Read by:** GET /api/actions (list, summary, history)
+**Written by:** Action Engine (upsertActionItem), PATCH /api/actions/:id, POST /api/actions (manual_flag)
+**UI pages:** Action Center (homepage)
+
+---
+
 ## UI Page → API → Table Map (updated)
 
 | UI Page | Route | Primary API Endpoints | Primary Tables |
@@ -795,6 +896,8 @@ Configurable sales pipeline stages per organizer.
 | **Pipeline** | `/pipeline` | pipeline/stages, pipeline/board, persons/:id/stage | pipeline_stages, persons, affiliations, contact_activities |
 | **Tasks** | `/tasks` | tasks/mine, tasks/summary | contact_tasks, persons |
 | **Admin** | `/admin` | users, users/:id/stats, users/:id/reset-password | users, campaigns, mining_jobs, campaign_events, contact_tasks |
+| **Sequence Builder** | `/campaigns/[id]/sequences` | campaigns/:id/sequences, campaigns/:id/sequence-analytics | campaign_sequences, sequence_recipients, campaigns |
+| **Action Center** | `/` | actions, actions/summary, actions/history | action_items, persons, affiliations, campaigns |
 
 ---
 

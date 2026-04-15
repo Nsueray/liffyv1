@@ -79,6 +79,10 @@ Cross-organizer email uniqueness does NOT exist.
 | Contact Note | User-created note on a person | `contact_notes` table |
 | Contact Activity | Auto-logged activity on a person | `contact_activities` table |
 | Contact Task | Follow-up task assigned to a user | `contact_tasks` table |
+| Action Item | Trigger-based follow-up item for a person | `action_items` table |
+| Sequence | Multi-touch email sequence (campaign steps) | `campaign_sequences` table |
+| Sequence Recipient | Person enrolled in a sequence | `sequence_recipients` table |
+| Engagement Score | Weighted score: open=1, click=3, reply=10 | Computed from `campaign_events` |
 
 ### UI Concepts (Views, NOT tables)
 | UI Page | Meaning |
@@ -91,6 +95,7 @@ Cross-organizer email uniqueness does NOT exist.
 | Pipeline | Kanban board of contacts across stages |
 | Tasks | Follow-up tasks assigned to current user |
 | Admin | Owner/admin user management panel |
+| Action Center | Prioritized follow-up items (homepage) |
 
 **UI page names must NEVER mirror table names directly.**
 **liffy-ui must treat API responses as canonical domain views, not database representations.**
@@ -103,7 +108,6 @@ Cross-organizer email uniqueness does NOT exist.
 - Mining writes to persons/prospects directly
 - Email uniqueness enforced across organizers
 - UI logic based on table names
-- Storing engagement scores as persisted values
 - Campaign directly mutating a person record
 - Cross-domain side effects (mining → prospect creation)
 - Miners normalizing, parsing names, inferring countries, or writing to DB
@@ -166,8 +170,13 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 13. ~~User Data Isolation~~ ✅ DONE — owner sees all, user sees own rows only
 14. ~~Daily Email Limit~~ ✅ DONE — per-user limit, 429 enforcement on /start
 15. ~~Owner Admin Panel~~ ✅ DONE — user CRUD, password reset, usage stats
-16. **Frontend UI build** — liffy-ui (Next.js) pages for canonical APIs ← CURRENT
-17. **AI Miner Generator v2** — AXTree + Config-Driven + Self-Healing REPL. glmis ✅ 11 contact (3.5K token). expat.com multi-step ✅ 7 contact best case (tutarsız — Claude non-deterministic). Performans 24dk→2dk. Kalan: Claude tutarlılığı, anchor vs container mode seçimi. Bkz: [RFC_v4_AI_Miner_Generator.md](./RFC_v4_AI_Miner_Generator.md) ← PARKED (ASE'ye geçiş)
+16. ~~Multi-Touch Sequences~~ ✅ DONE — campaign_sequences, sequence_recipients, worker
+17. ~~Action Engine~~ ✅ DONE — 6 triggers (reply_received, sequence_exhausted, quote_no_response, rebooking_due, engaged_hot, manual_flag), priority scoring (P1-P4), 15-min reconciliation
+18. ~~Action Screen~~ ✅ DONE — Blueprint Section 8 homepage, priority cards, filter/sort, snooze, history
+19. ~~Phase 4 Prep~~ ✅ DONE — person_id backfill script, campaign resolve canonical path, visibility columns (migration 033-034)
+20. ~~Dashboard Stat Fix~~ ✅ DONE — COUNT(DISTINCT email) for rates, events.sent for total
+21. **Frontend UI build** — liffy-ui (Next.js) pages for canonical APIs ← CURRENT
+22. **AI Miner Generator v2** — AXTree + Config-Driven + Self-Healing REPL. glmis ✅ 11 contact (3.5K token). expat.com multi-step ✅ 7 contact best case (tutarsız — Claude non-deterministic). Performans 24dk→2dk. Kalan: Claude tutarlılığı, anchor vs container mode seçimi. Bkz: [RFC_v4_AI_Miner_Generator.md](./RFC_v4_AI_Miner_Generator.md) ← PARKED (ASE'ye geçiş)
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for detailed task tracking.
 
