@@ -38,6 +38,7 @@ const sequencesRouter = require('./routes/sequences');
 const actionsRouter = require('./routes/actions');
 const timelineRouter = require('./routes/timeline');
 const contextRouter = require('./routes/context');
+const waitingRouter = require('./routes/waiting');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -94,6 +95,7 @@ app.use(sequencesRouter);
 app.use('/api/actions', actionsRouter);
 app.use('/api/timeline', timelineRouter);
 app.use('/api/context', contextRouter);
+app.use('/api/waiting', waitingRouter);
 app.use(webhooksRouter);
 app.use(statsRouter);
 
