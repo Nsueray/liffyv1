@@ -11,7 +11,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
-const { userScopeFilter } = require('../middleware/userScope');
+const { getHierarchicalScope } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -45,7 +45,7 @@ router.get('/', authRequired, async (req, res) => {
     const { organizer_id } = req.auth;
 
     // --- Section 1: Active Campaigns ---
-    const scope1 = userScopeFilter(req, 2, 'c.created_by_user_id');
+    const scope1 = getHierarchicalScope(req, 2, 'c.created_by_user_id');
     const campaignRes = await db.query(
       `SELECT
          c.id, c.name, c.status, c.campaign_type, c.created_at,
@@ -57,7 +57,7 @@ router.get('/', authRequired, async (req, res) => {
        LEFT JOIN campaign_recipients cr ON cr.campaign_id = c.id
        WHERE c.organizer_id = $1
          AND c.status IN ('sending', 'scheduled', 'ready', 'completed')
-         ${scope1.clause}
+         ${scope1.sql}
        GROUP BY c.id
        ORDER BY c.created_at DESC
        LIMIT 50`,
@@ -90,7 +90,7 @@ router.get('/', authRequired, async (req, res) => {
     });
 
     // --- Section 2: Leads in Sequence ---
-    const scope2 = userScopeFilter(req, 2, 'c.created_by_user_id');
+    const scope2 = getHierarchicalScope(req, 2, 'c.created_by_user_id');
     const seqRes = await db.query(
       `SELECT
          sr.id, sr.email, sr.current_step, sr.last_sent_step, sr.status,
@@ -107,7 +107,7 @@ router.get('/', authRequired, async (req, res) => {
        LEFT JOIN persons p ON p.id = sr.person_id
        WHERE sr.organizer_id = $1
          AND sr.status = 'active'
-         ${scope2.clause}
+         ${scope2.sql}
        ORDER BY sr.next_send_at ASC NULLS LAST
        LIMIT 100`,
       [organizer_id, ...scope2.params]

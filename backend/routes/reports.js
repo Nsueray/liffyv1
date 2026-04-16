@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
-const { isPrivileged, getUserContext, canAccessRow } = require('../middleware/userScope');
+const { isPrivileged, getUserContext, getHierarchicalScope, canAccessRowHierarchical } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -73,7 +73,7 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
     const campaign = campRes.rows[0];
 
     // Non-privileged users only see reports for their own (or team's) campaigns
-    if (campaign.created_by_user_id && !canAccessRow(req, campaign.created_by_user_id)) {
+    if (campaign.created_by_user_id && !(await canAccessRowHierarchical(req, campaign.created_by_user_id))) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
@@ -276,16 +276,21 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
   try {
     const organizer_id = req.auth.organizer_id;
 
-    // Non-privileged users see only their own campaigns' data. We pre-load
-    // the list of campaign IDs they own and then scope every follow-up query.
+    // Non-privileged users see only their team's campaigns' data (hierarchy).
     let campaignIds = null; // null = unrestricted (owner/admin)
     if (!isPrivileged(req)) {
-      const { userId, teamIds } = getUserContext(req);
-      const allUserIds = [userId, ...teamIds];
-      const placeholders = allUserIds.map((_, i) => `$${i + 2}`).join(', ');
+      const { userId } = getUserContext(req);
       const idsRes = await db.query(
-        `SELECT id FROM campaigns WHERE organizer_id = $1 AND created_by_user_id IN (${placeholders})`,
-        [organizer_id, ...allUserIds]
+        `SELECT id FROM campaigns WHERE organizer_id = $1
+           AND created_by_user_id IN (
+             WITH RECURSIVE my_team AS (
+               SELECT id FROM users WHERE id = $2
+               UNION ALL
+               SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+             )
+             SELECT id FROM my_team
+           )`,
+        [organizer_id, userId]
       );
       campaignIds = idsRes.rows.map(r => r.id);
       // If user has no campaigns, return empty report early

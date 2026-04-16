@@ -43,7 +43,7 @@ router.get('/', authRequired, requirePrivileged, async (req, res) => {
     const { organizerId } = getUserContext(req);
     const r = await db.query(
       `SELECT id, email, role, is_active, first_name, last_name,
-              daily_email_limit, manager_id, created_at
+              daily_email_limit, reports_to, manager_id, created_at
          FROM users
         WHERE organizer_id = $1
         ORDER BY
@@ -72,6 +72,7 @@ router.post('/', authRequired, requirePrivileged, async (req, res) => {
       first_name,
       last_name,
       daily_email_limit,
+      reports_to,
       manager_id,
     } = req.body || {};
 
@@ -103,11 +104,14 @@ router.post('/', authRequired, requirePrivileged, async (req, res) => {
       ? parseInt(daily_email_limit, 10)
       : 500;
 
+    const reportsToVal = (reports_to && isUuid(reports_to)) ? reports_to
+                       : (manager_id && isUuid(manager_id)) ? manager_id
+                       : null;
     const insertRes = await db.query(
       `INSERT INTO users
-         (organizer_id, email, password_hash, role, first_name, last_name, daily_email_limit, manager_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       RETURNING id, email, role, is_active, first_name, last_name, daily_email_limit, manager_id, created_at`,
+         (organizer_id, email, password_hash, role, first_name, last_name, daily_email_limit, reports_to, manager_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+       RETURNING id, email, role, is_active, first_name, last_name, daily_email_limit, reports_to, manager_id, created_at`,
       [
         organizerId,
         email.trim().toLowerCase(),
@@ -116,7 +120,7 @@ router.post('/', authRequired, requirePrivileged, async (req, res) => {
         first_name || null,
         last_name || null,
         limit,
-        (manager_id && isUuid(manager_id)) ? manager_id : null,
+        reportsToVal,
       ]
     );
 
@@ -162,7 +166,7 @@ router.patch('/:id', authRequired, requirePrivileged, async (req, res) => {
       }
     }
 
-    const allowed = ['role', 'first_name', 'last_name', 'daily_email_limit', 'is_active', 'manager_id'];
+    const allowed = ['role', 'first_name', 'last_name', 'daily_email_limit', 'is_active', 'reports_to', 'manager_id'];
     const sets = [];
     const vals = [];
     let idx = 1;
@@ -186,8 +190,8 @@ router.patch('/:id', authRequired, requirePrivileged, async (req, res) => {
           v = n;
         }
         if (k === 'is_active') v = !!v;
-        if (k === 'manager_id') {
-          v = (v && isUuid(v)) ? v : null; // null clears the manager
+        if (k === 'manager_id' || k === 'reports_to') {
+          v = (v && isUuid(v)) ? v : null; // null clears the manager/reports_to
         }
         sets.push(`${k} = $${idx++}`);
         vals.push(v);
@@ -201,7 +205,7 @@ router.patch('/:id', authRequired, requirePrivileged, async (req, res) => {
     vals.push(id, organizerId);
     const q = `UPDATE users SET ${sets.join(', ')}
                 WHERE id = $${idx++} AND organizer_id = $${idx}
-            RETURNING id, email, role, is_active, first_name, last_name, daily_email_limit, manager_id, created_at`;
+            RETURNING id, email, role, is_active, first_name, last_name, daily_email_limit, reports_to, manager_id, created_at`;
     const r = await db.query(q, vals);
 
     res.json({ user: r.rows[0] });

@@ -4,7 +4,7 @@ const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
-const { isPrivileged, userScopeFilter, getUserContext, canAccessRow } = require('../middleware/userScope');
+const { isPrivileged, getHierarchicalScope, getUserContext, canAccessRowHierarchical } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
 
@@ -82,7 +82,7 @@ async function loadOwnedJob(req, jobId, selectCols = 'id, organizer_id, created_
     return { error: { status: 404, message: 'Job not found' } };
   }
   const job = r.rows[0];
-  if (job.created_by_user_id && !canAccessRow(req, job.created_by_user_id)) {
+  if (job.created_by_user_id && !(await canAccessRowHierarchical(req, job.created_by_user_id))) {
     return { error: { status: 403, message: 'Forbidden' } };
   }
   return { job };
@@ -234,12 +234,12 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
       idx++;
     }
 
-    // User isolation: non-privileged users only see their own jobs
-    const scope = userScopeFilter(req, idx, 'created_by_user_id');
-    if (scope.clause) {
-      where.push(scope.clause.replace(/^ AND /, ''));
+    // User isolation: hierarchical (self + descendants)
+    const scope = getHierarchicalScope(req, 'created_by_user_id', idx);
+    if (scope.sql) {
+      where.push(scope.sql.replace(/^AND /, ''));
       params.push(...scope.params);
-      idx = scope.nextIdx;
+      idx = scope.nextIndex;
     }
 
     // ÖNEMLİ: file_data sütununu seçmiyoruz - performans için
@@ -255,7 +255,7 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
     );
 
     // Stats follow the same scope so non-privileged users see their own totals
-    const statsScope = userScopeFilter(req, 2, 'created_by_user_id');
+    const statsScope = getHierarchicalScope(req, 'created_by_user_id', 2);
     const statsRes = await db.query(
       `SELECT
         COUNT(*)::int AS total,
@@ -265,7 +265,7 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
         COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
         COALESCE(SUM(total_emails_raw), 0)::int AS total_emails
        FROM mining_jobs
-       WHERE organizer_id = $1${statsScope.clause}`,
+       WHERE organizer_id = $1 ${statsScope.sql}`,
       [organizer_id, ...statsScope.params]
     );
 
@@ -307,7 +307,7 @@ router.get('/api/mining/jobs/:id', authRequired, validateJobId, async (req, res)
     const job = result.rows[0];
 
     // Ownership check
-    if (job.created_by_user_id && !canAccessRow(req, job.created_by_user_id)) {
+    if (job.created_by_user_id && !(await canAccessRowHierarchical(req, job.created_by_user_id))) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
@@ -384,7 +384,7 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
 
     const j = jobRes.rows[0];
 
-    if (j.created_by_user_id && !canAccessRow(req, j.created_by_user_id)) {
+    if (j.created_by_user_id && !(await canAccessRowHierarchical(req, j.created_by_user_id))) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
@@ -438,7 +438,7 @@ router.post('/api/mining/jobs/:id/enrich', authRequired, validateJobId, async (r
 
     const job = jobRes.rows[0];
 
-    if (job.created_by_user_id && !canAccessRow(req, job.created_by_user_id)) {
+    if (job.created_by_user_id && !(await canAccessRowHierarchical(req, job.created_by_user_id))) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
@@ -630,7 +630,7 @@ router.get('/api/mining/jobs/:id/enrich-stats', authRequired, validateJobId, asy
     }
 
     const ownerId = jobRes.rows[0].created_by_user_id;
-    if (ownerId && !canAccessRow(req, ownerId)) {
+    if (ownerId && !(await canAccessRowHierarchical(req, ownerId))) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
@@ -675,7 +675,7 @@ router.delete('/api/mining/jobs/:id', authRequired, validateJobId, async (req, r
     }
 
     const ownerId = checkRes.rows[0].created_by_user_id;
-    if (ownerId && !canAccessRow(req, ownerId)) {
+    if (ownerId && !(await canAccessRowHierarchical(req, ownerId))) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 
@@ -714,7 +714,7 @@ router.get('/api/mining/jobs/:id/file', authRequired, validateJobId, async (req,
 
     const job = result.rows[0];
 
-    if (job.created_by_user_id && !canAccessRow(req, job.created_by_user_id)) {
+    if (job.created_by_user_id && !(await canAccessRowHierarchical(req, job.created_by_user_id))) {
       return res.status(403).json({ error: 'Forbidden' });
     }
 

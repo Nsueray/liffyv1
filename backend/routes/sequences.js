@@ -6,7 +6,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
-const { getUserContext, isPrivileged, canAccessRow } = require('../middleware/userScope');
+const { getUserContext, isPrivileged, canAccessRowHierarchical } = require('../middleware/userScope');
 const {
   initializeSequence,
   pauseSequence,
@@ -60,7 +60,7 @@ async function loadOwnedCampaign(req, res, next) {
     const campaign = result.rows[0];
 
     // User isolation: non-privileged users can only manage campaigns they own or their team's
-    if (campaign.created_by_user_id && !canAccessRow(req, campaign.created_by_user_id)) {
+    if (campaign.created_by_user_id && !(await canAccessRowHierarchical(req, campaign.created_by_user_id))) {
       return res.status(403).json({ error: 'Access denied' });
     }
 

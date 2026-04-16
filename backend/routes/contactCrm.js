@@ -11,7 +11,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { authRequired } = require('../middleware/auth');
-const { isPrivileged, isManager, userScopeFilter, getUserContext, canAccessRow } = require('../middleware/userScope');
+const { isPrivileged, getHierarchicalScope, getUserContext, canAccessRowHierarchical } = require('../middleware/userScope');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (v) => typeof v === 'string' && UUID_REGEX.test(v);
@@ -67,14 +67,14 @@ router.get('/api/persons/:personId/notes', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'Person not found' });
     }
 
-    const scope = userScopeFilter(req, 3, 'n.user_id');
+    const scope = getHierarchicalScope(req, 'n.user_id', 3);
 
     const r = await db.query(
       `SELECT n.id, n.content, n.created_at,
               n.user_id, u.email AS user_email
          FROM contact_notes n
          LEFT JOIN users u ON n.user_id = u.id
-        WHERE n.person_id = $1 AND n.organizer_id = $2${scope.clause}
+        WHERE n.person_id = $1 AND n.organizer_id = $2 ${scope.sql}
         ORDER BY n.created_at DESC`,
       [personId, organizerId, ...scope.params]
     );
@@ -139,20 +139,13 @@ router.delete('/api/persons/:personId/notes/:noteId', authRequired, async (req, 
     }
 
     const params = [noteId, personId, organizerId];
-    let userFilter = '';
-    if (!isPrivileged(req)) {
-      const { userId, teamIds } = getUserContext(req);
-      const allIds = [userId, ...teamIds];
-      const ph = allIds.map((_, i) => `$${params.length + 1 + i}`).join(', ');
-      userFilter = ` AND user_id IN (${ph})`;
-      params.push(...allIds);
-    }
+    const delScope = getHierarchicalScope(req, 'user_id', 4);
 
     const r = await db.query(
       `DELETE FROM contact_notes
-        WHERE id = $1 AND person_id = $2 AND organizer_id = $3${userFilter}
+        WHERE id = $1 AND person_id = $2 AND organizer_id = $3 ${delScope.sql}
         RETURNING id`,
-      params
+      [...params, ...delScope.params]
     );
     if (r.rowCount === 0) return res.status(404).json({ error: 'Note not found' });
 
@@ -179,13 +172,19 @@ router.get('/api/persons/:personId/activities', authRequired, async (req, res) =
     // Non-privileged users only see activities they recorded. System-generated
     // activities (user_id IS NULL) stay visible to everyone.
     const filterParams = [personId, organizerId];
+    // Activities: show system activities (user_id IS NULL) + user's team hierarchy
+    const actScope = getHierarchicalScope(req, 'a.user_id', 3);
     let userFilter = '';
-    if (!isPrivileged(req)) {
-      const { userId, teamIds } = getUserContext(req);
-      const allIds = [userId, ...teamIds];
-      const ph = allIds.map((_, i) => `$${filterParams.length + 1 + i}`).join(', ');
-      userFilter = ` AND (a.user_id IN (${ph}) OR a.user_id IS NULL)`;
-      filterParams.push(...allIds);
+    if (actScope.sql) {
+      // For activities, also show system-generated (user_id IS NULL)
+      userFilter = ` AND (a.user_id IS NULL OR a.user_id IN (
+        WITH RECURSIVE my_team AS (
+          SELECT id FROM users WHERE id = $3
+          UNION ALL
+          SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+        ) SELECT id FROM my_team
+      ))`;
+      filterParams.push(...actScope.params);
     }
 
     const r = await db.query(
@@ -223,13 +222,25 @@ router.get('/api/persons/:personId/tasks', authRequired, async (req, res) => {
     }
 
     const params = [personId, organizerId];
+    const taskScope = getHierarchicalScope(req, 't.assigned_to', 3);
+    // Tasks visible if assigned_to OR created_by is in user's hierarchy
     let userFilter = '';
-    if (!isPrivileged(req)) {
-      const { userId, teamIds } = getUserContext(req);
-      const allIds = [userId, ...teamIds];
-      const ph = allIds.map((_, i) => `$${params.length + 1 + i}`).join(', ');
-      userFilter = ` AND (t.assigned_to IN (${ph}) OR t.created_by IN (${ph}))`;
-      params.push(...allIds);
+    if (taskScope.sql) {
+      const { userId } = getUserContext(req);
+      userFilter = ` AND (t.assigned_to IN (
+        WITH RECURSIVE my_team AS (
+          SELECT id FROM users WHERE id = $3
+          UNION ALL
+          SELECT u.id FROM users u JOIN my_team t2 ON u.reports_to = t2.id
+        ) SELECT id FROM my_team
+      ) OR t.created_by IN (
+        WITH RECURSIVE my_team AS (
+          SELECT id FROM users WHERE id = $3
+          UNION ALL
+          SELECT u.id FROM users u JOIN my_team t2 ON u.reports_to = t2.id
+        ) SELECT id FROM my_team
+      ))`;
+      params.push(userId);
     }
 
     const r = await db.query(
@@ -321,18 +332,26 @@ router.patch('/api/tasks/:taskId', authRequired, async (req, res) => {
 
     if (!isUuid(taskId)) return res.status(400).json({ error: 'Invalid taskId' });
 
-    // Ownership check — non-privileged users can only patch tasks
-    // assigned to them or created by them (managers include team).
+    // Ownership check — hierarchical (self + descendants)
     if (!isPrivileged(req)) {
-      const { teamIds } = getUserContext(req);
-      const allIds = [userId, ...teamIds];
-      const ph = allIds.map((_, i) => `$${i + 3}`).join(', ');
       const ownRes = await db.query(
         `SELECT 1 FROM contact_tasks
           WHERE id = $1 AND organizer_id = $2
-            AND (assigned_to IN (${ph}) OR created_by IN (${ph}))
+            AND (assigned_to IN (
+              WITH RECURSIVE my_team AS (
+                SELECT id FROM users WHERE id = $3
+                UNION ALL
+                SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+              ) SELECT id FROM my_team
+            ) OR created_by IN (
+              WITH RECURSIVE my_team AS (
+                SELECT id FROM users WHERE id = $3
+                UNION ALL
+                SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+              ) SELECT id FROM my_team
+            ))
           LIMIT 1`,
-        [taskId, organizerId, ...allIds]
+        [taskId, organizerId, userId]
       );
       if (ownRes.rowCount === 0) {
         return res.status(404).json({ error: 'Task not found' });
@@ -401,13 +420,10 @@ router.delete('/api/tasks/:taskId', authRequired, async (req, res) => {
     if (!isUuid(taskId)) return res.status(400).json({ error: 'Invalid taskId' });
 
     const params = [taskId, organizerId];
-    let userFilter = '';
-    if (!isPrivileged(req)) {
-      const { userId, teamIds } = getUserContext(req);
-      const allIds = [userId, ...teamIds];
-      const ph = allIds.map((_, i) => `$${params.length + 1 + i}`).join(', ');
-      userFilter = ` AND created_by IN (${ph})`;
-      params.push(...allIds);
+    const delTaskScope = getHierarchicalScope(req, 'created_by', 3);
+    const userFilter = delTaskScope.sql;
+    if (delTaskScope.params.length) {
+      params.push(...delTaskScope.params);
     }
 
     const r = await db.query(
@@ -455,6 +471,14 @@ router.get('/api/tasks', authRequired, async (req, res) => {
       where.push(`t.due_date = CURRENT_DATE`);
     } else if (due === 'upcoming') {
       where.push(`t.due_date >= CURRENT_DATE`);
+    }
+
+    // Hierarchical scope: non-privileged users see only their team's tasks
+    const taskListScope = getHierarchicalScope(req, 't.assigned_to', idx);
+    if (taskListScope.sql) {
+      where.push(taskListScope.sql.replace(/^AND /, ''));
+      vals.push(...taskListScope.params);
+      idx = taskListScope.nextIndex;
     }
 
     const q = `

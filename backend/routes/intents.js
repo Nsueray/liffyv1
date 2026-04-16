@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
-const { isPrivileged, isManager, getUserContext, canAccessRow, userScopeFilter } = require('../middleware/userScope');
+const { isPrivileged, getUserContext, getHierarchicalScope } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -72,14 +72,24 @@ router.get('/', authRequired, async (req, res) => {
       idx++;
     }
 
-    // User scoping: non-privileged users only see their own (or team's) intents.
+    // User scoping: hierarchical (self + descendants via reports_to)
     if (!isPrivileged(req)) {
-      const { userId, teamIds } = getUserContext(req);
-      const allIds = [userId, ...teamIds];
-      const ph = allIds.map((_, i) => `$${idx + i}`).join(', ');
-      where.push(`(c.created_by_user_id IN (${ph}) OR pi.created_by_user_id IN (${ph}))`);
-      params.push(...allIds);
-      idx += allIds.length;
+      const { userId } = getUserContext(req);
+      where.push(`(c.created_by_user_id IN (
+        WITH RECURSIVE my_team AS (
+          SELECT id FROM users WHERE id = $${idx}
+          UNION ALL
+          SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+        ) SELECT id FROM my_team
+      ) OR pi.created_by_user_id IN (
+        WITH RECURSIVE my_team AS (
+          SELECT id FROM users WHERE id = $${idx}
+          UNION ALL
+          SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+        ) SELECT id FROM my_team
+      ))`);
+      params.push(userId);
+      idx++;
     }
 
     const whereClause = where.join(' AND ');
@@ -137,12 +147,22 @@ router.get('/stats', authRequired, async (req, res) => {
     const params = [organizerId];
     let userFilter = '';
     if (!isPrivileged(req)) {
-      const { userId, teamIds } = getUserContext(req);
-      const allIds = [userId, ...teamIds];
-      const startIdx = params.length + 1;
-      const ph = allIds.map((_, i) => `$${startIdx + i}`).join(', ');
-      userFilter = ` AND (c.created_by_user_id IN (${ph}) OR pi.created_by_user_id IN (${ph}))`;
-      params.push(...allIds);
+      const { userId } = getUserContext(req);
+      const p = params.length + 1;
+      userFilter = ` AND (c.created_by_user_id IN (
+        WITH RECURSIVE my_team AS (
+          SELECT id FROM users WHERE id = $${p}
+          UNION ALL
+          SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+        ) SELECT id FROM my_team
+      ) OR pi.created_by_user_id IN (
+        WITH RECURSIVE my_team AS (
+          SELECT id FROM users WHERE id = $${p}
+          UNION ALL
+          SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+        ) SELECT id FROM my_team
+      ))`;
+      params.push(userId);
     }
 
     const statsRes = await db.query(

@@ -1,23 +1,28 @@
 /**
  * User scoping helpers for multi-user data isolation.
  *
- * Policy (hierarchical):
- *   - role === 'owner' or 'admin'  → sees every row within their organizer
- *   - role === 'manager'           → sees own rows + rows of team members (direct reports)
- *   - role === 'user' (or other)   → only their own rows
+ * Two systems coexist during transition:
  *
- * Existing route files use TWO different auth middleware shapes:
+ * LEGACY (team_ids based — used by routes not yet migrated):
+ *   - getUserContext, isPrivileged, isManager, userScopeFilter, canAccessRow
+ *   - Reads team_ids from req.auth (loaded by authRequired middleware)
+ *
+ * ADR-015 (recursive CTE — new canonical approach):
+ *   - getHierarchicalScope — recursive CTE on reports_to column
+ *   - Owner/admin: no filter. Everyone else: self + all descendants.
+ *   - Routes should migrate to this incrementally.
+ *
+ * Auth shapes supported:
  *   - Legacy local middleware  → req.auth = { user_id, organizer_id, role }
  *   - Shared middleware/auth.js → req.user = { id, user_id, organizer_id, role }
- *
- * These helpers read from BOTH shapes so they work in every route without
- * forcing a mass refactor of the existing `authRequired` duplicates.
  */
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared context extraction
+// ─────────────────────────────────────────────────────────────────────────────
 
 /**
  * Extract normalized auth context from a request.
- * @param {import('express').Request} req
- * @returns {{ userId: string|null, organizerId: string|null, role: string|null, teamIds: string[] }}
  */
 function getUserContext(req) {
   const u = req.user || req.auth || {};
@@ -38,29 +43,22 @@ function isPrivileged(req) {
 }
 
 /**
- * True if the user is a manager (sees own + team rows).
+ * True if the user is a manager.
  */
 function isManager(req) {
   const { role } = getUserContext(req);
   return role === 'manager';
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// LEGACY: team_ids based scope (kept for backward compat during migration)
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Build an AND-clause fragment + params for filtering by a user-scoped column.
+ * Uses team_ids array loaded by authRequired middleware.
  *
- * Example:
- *   const scope = userScopeFilter(req, 3, 'created_by_user_id');
- *   const sql = `SELECT * FROM campaigns WHERE organizer_id = $1 ${scope.clause}`;
- *   const params = [orgId, ...scope.params];
- *
- * For privileged users the clause is empty and no params are added.
- * For managers: column IN (self + team_ids).
- * For regular users: column = self.
- *
- * @param {import('express').Request} req
- * @param {number} paramStartIdx — the next $N placeholder to use
- * @param {string} columnName — fully qualified column name, e.g. "c.created_by_user_id"
- * @returns {{ clause: string, params: any[], nextIdx: number }}
+ * @deprecated Use getHierarchicalScope instead (ADR-015).
  */
 function userScopeFilter(req, paramStartIdx, columnName = 'created_by_user_id') {
   if (isPrivileged(req)) {
@@ -70,7 +68,6 @@ function userScopeFilter(req, paramStartIdx, columnName = 'created_by_user_id') 
   const { userId, teamIds } = getUserContext(req);
 
   if (isManager(req) && teamIds.length > 0) {
-    // Manager sees own + team: column IN ($N, $N+1, ...)
     const allIds = [userId, ...teamIds];
     const placeholders = allIds.map((_, i) => `$${paramStartIdx + i}`).join(', ');
     return {
@@ -80,7 +77,6 @@ function userScopeFilter(req, paramStartIdx, columnName = 'created_by_user_id') 
     };
   }
 
-  // Regular user (or manager with no team) — own rows only
   return {
     clause: ` AND ${columnName} = $${paramStartIdx}`,
     params: [userId],
@@ -90,8 +86,7 @@ function userScopeFilter(req, paramStartIdx, columnName = 'created_by_user_id') 
 
 /**
  * Ownership check: returns true if a row may be accessed by the current user.
- * Owner/admin → always true. Manager → if ownerUserId is self or team member.
- * Regular user → only if ownerUserId matches.
+ * @deprecated Use getHierarchicalScope for query-level filtering instead.
  */
 function canAccessRow(req, ownerUserId) {
   if (isPrivileged(req)) return true;
@@ -102,10 +97,128 @@ function canAccessRow(req, ownerUserId) {
   return false;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ADR-015: Recursive CTE based scope (canonical approach)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Hierarchical data visibility using recursive CTE on users.reports_to.
+ *
+ * Returns an AND-clause that filters `userIdColumn` to the user's team:
+ *   self + all descendants in the reports_to tree.
+ *
+ * Owner/admin: returns empty clause (sees all).
+ *
+ * Example:
+ *   const scope = getHierarchicalScope(req, 'c.created_by_user_id', 2);
+ *   const sql = `SELECT * FROM campaigns c WHERE c.organizer_id = $1 ${scope.sql}`;
+ *   const params = [orgId, ...scope.params];
+ *
+ * @param {import('express').Request} req
+ * @param {string} userIdColumn — fully qualified column, e.g. 'lists.created_by_user_id'
+ * @param {number} startParamIndex — next $N placeholder to use
+ * @returns {{ sql: string, params: any[], nextIndex: number }}
+ */
+function getHierarchicalScope(req, userIdColumn, startParamIndex) {
+  if (isPrivileged(req)) {
+    return { sql: '', params: [], nextIndex: startParamIndex };
+  }
+
+  const { userId } = getUserContext(req);
+
+  return {
+    sql: `AND ${userIdColumn} IN (
+      WITH RECURSIVE my_team AS (
+        SELECT id FROM users WHERE id = $${startParamIndex}
+        UNION ALL
+        SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+      )
+      SELECT id FROM my_team
+    )`,
+    params: [userId],
+    nextIndex: startParamIndex + 1,
+  };
+}
+
+/**
+ * Build a visibility-aware scope clause for resources with a visibility column.
+ *
+ * Logic:
+ *   - visibility = 'shared' → everyone in the org sees it
+ *   - visibility = 'team'   → user + descendants see it (hierarchy)
+ *   - visibility = 'private' OR NULL → only the owner sees it (hierarchy still)
+ *   - owner_user_id IS NULL → only owner/admin see it (legacy rows)
+ *
+ * Owner/admin: returns empty clause (sees all).
+ *
+ * @param {import('express').Request} req
+ * @param {string} ownerColumn — e.g. 'lists.created_by_user_id'
+ * @param {string} visColumn — e.g. 'lists.visibility'
+ * @param {number} startParamIndex
+ * @returns {{ sql: string, params: any[], nextIndex: number }}
+ */
+function getVisibilityScope(req, ownerColumn, visColumn, startParamIndex) {
+  if (isPrivileged(req)) {
+    return { sql: '', params: [], nextIndex: startParamIndex };
+  }
+
+  const { userId } = getUserContext(req);
+  const p = startParamIndex;
+
+  return {
+    sql: `AND (
+      ${visColumn} = 'shared'
+      OR ${ownerColumn} IN (
+        WITH RECURSIVE my_team AS (
+          SELECT id FROM users WHERE id = $${p}
+          UNION ALL
+          SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+        )
+        SELECT id FROM my_team
+      )
+    )`,
+    params: [userId],
+    nextIndex: p + 1,
+  };
+}
+
+/**
+ * Async row-level access check using recursive CTE on reports_to.
+ * Use for single-row ownership checks (e.g., loadOwnedCampaign).
+ *
+ * @param {import('express').Request} req
+ * @param {string} ownerUserId — the user_id that owns the row
+ * @returns {Promise<boolean>}
+ */
+async function canAccessRowHierarchical(req, ownerUserId) {
+  if (isPrivileged(req)) return true;
+  const { userId } = getUserContext(req);
+  if (!userId || !ownerUserId) return false;
+  if (userId === ownerUserId) return true;
+
+  const db = require('../db');
+  const r = await db.query(
+    `WITH RECURSIVE my_team AS (
+       SELECT id FROM users WHERE id = $1
+       UNION ALL
+       SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+     )
+     SELECT 1 FROM my_team WHERE id = $2 LIMIT 1`,
+    [userId, ownerUserId]
+  );
+  return r.rows.length > 0;
+}
+
 module.exports = {
+  // Shared
   getUserContext,
   isPrivileged,
   isManager,
+  // Legacy (deprecated — use ADR-015 functions)
   userScopeFilter,
   canAccessRow,
+  // ADR-015 (canonical)
+  getHierarchicalScope,
+  getVisibilityScope,
+  canAccessRowHierarchical,
 };

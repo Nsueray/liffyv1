@@ -7,6 +7,7 @@ const csvParser = require('csv-parser');
 const { Readable } = require('stream');
 
 const { generateExport } = require('../utils/exportHelper');
+const { getVisibilityScope } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -42,23 +43,19 @@ async function authRequired(req, res, next) {
 
 /**
  * Build visibility WHERE clause for lists.
- * Owner/admin see all lists; regular users see shared + their own private/team lists.
- * Returns { clause, params } — caller must append params and adjust param indices.
+ * Uses ADR-015 getVisibilityScope: owner sees all, others see shared + hierarchy.
  */
 function visibilityFilter(auth, startParamIndex, tableAlias = '') {
   const prefix = tableAlias ? `${tableAlias}.` : '';
-  if (auth.role === 'owner' || auth.role === 'admin') {
-    return { clause: '', params: [], nextIndex: startParamIndex };
-  }
-  // Manager/user: shared OR created by them (managers include team)
-  const teamIds = auth.team_ids || [];
-  const allIds = [auth.user_id, ...teamIds];
-  const ph = allIds.map((_, i) => `$${startParamIndex + i}`).join(', ');
-  return {
-    clause: `AND (${prefix}visibility = 'shared' OR ${prefix}created_by_user_id IN (${ph}))`,
-    params: allIds,
-    nextIndex: startParamIndex + allIds.length
-  };
+  // Build a fake req object for getVisibilityScope
+  const fakeReq = { auth };
+  const scope = getVisibilityScope(
+    fakeReq,
+    `${prefix}created_by_user_id`,
+    `${prefix}visibility`,
+    startParamIndex
+  );
+  return { clause: scope.sql, params: scope.params, nextIndex: scope.nextIndex };
 }
 
 function isValidDateString(str) {

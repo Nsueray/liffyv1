@@ -13,7 +13,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
-const { getUserContext, isPrivileged, userScopeFilter } = require('../middleware/userScope');
+const { getUserContext, isPrivileged, getHierarchicalScope } = require('../middleware/userScope');
 const { upsertActionItem, computeEngagementScore, getFallbackOwner } = require('../engines/action-engine/actionEngine');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
@@ -60,16 +60,11 @@ router.get('/', authRequired, async (req, res) => {
     let paramIdx = 2;
     const params = [organizer_id];
 
-    // User scope: regular users see own items, managers see own + team's
-    let userClause = '';
-    if (role !== 'owner' && role !== 'admin') {
-      const teamIds = req.auth.team_ids || [];
-      const allIds = [user_id, ...teamIds];
-      const ph = allIds.map((_, i) => `$${paramIdx + i}`).join(', ');
-      userClause = ` AND ai.assigned_to IN (${ph})`;
-      params.push(...allIds);
-      paramIdx += allIds.length;
-    }
+    // User scope: hierarchical (self + descendants via reports_to)
+    const scope = getHierarchicalScope(req, 'ai.assigned_to', paramIdx);
+    const userClause = scope.sql;
+    params.push(...scope.params);
+    paramIdx = scope.nextIndex;
 
     // Status filter
     const statusPlaceholders = statuses.map((_, i) => `$${paramIdx + i}`).join(',');
@@ -138,14 +133,10 @@ router.get('/summary', authRequired, async (req, res) => {
     let paramIdx = 2;
 
     let userClause = '';
-    if (role !== 'owner' && role !== 'admin') {
-      const teamIds = req.auth.team_ids || [];
-      const allIds = [user_id, ...teamIds];
-      const ph = allIds.map((_, i) => `$${paramIdx + i}`).join(', ');
-      userClause = ` AND assigned_to IN (${ph})`;
-      params.push(...allIds);
-      paramIdx += allIds.length;
-    }
+    const summaryScope = getHierarchicalScope(req, 'assigned_to', paramIdx);
+    userClause = summaryScope.sql;
+    params.push(...summaryScope.params);
+    paramIdx = summaryScope.nextIndex;
 
     const result = await db.query(
       `SELECT
@@ -289,15 +280,10 @@ router.get('/history', authRequired, async (req, res) => {
     const params = [organizer_id];
     let paramIdx = 2;
 
-    let userClause = '';
-    if (role !== 'owner' && role !== 'admin') {
-      const teamIds = req.auth.team_ids || [];
-      const allIds = [user_id, ...teamIds];
-      const ph = allIds.map((_, i) => `$${paramIdx + i}`).join(', ');
-      userClause = ` AND ai.assigned_to IN (${ph})`;
-      params.push(...allIds);
-      paramIdx += allIds.length;
-    }
+    const histScope = getHierarchicalScope(req, 'ai.assigned_to', paramIdx);
+    const userClause = histScope.sql;
+    params.push(...histScope.params);
+    paramIdx = histScope.nextIndex;
 
     const limit = Math.min(parseInt(rawLimit, 10) || 50, 200);
     const offset = parseInt(rawOffset, 10) || 0;

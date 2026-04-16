@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const db = require('../db');
-const { isPrivileged, userScopeFilter, getUserContext, canAccessRow } = require('../middleware/userScope');
+const { isPrivileged, getHierarchicalScope, getUserContext, canAccessRowHierarchical } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -49,7 +49,7 @@ async function loadOwnedCampaign(req, campaignId) {
     return { error: { status: 404, message: 'Campaign not found' } };
   }
   const campaign = campRes.rows[0];
-  if (campaign.created_by_user_id && !canAccessRow(req, campaign.created_by_user_id)) {
+  if (campaign.created_by_user_id && !(await canAccessRowHierarchical(req, campaign.created_by_user_id))) {
     return { error: { status: 403, message: 'Forbidden' } };
   }
   return { campaign };
@@ -120,7 +120,7 @@ router.post('/', authRequired, async (req, res) => {
 router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    const scope = userScopeFilter(req, 2, 'c.created_by_user_id');
+    const scope = getHierarchicalScope(req, 'c.created_by_user_id', 2);
 
     const result = await db.query(
       `SELECT c.*,
@@ -133,7 +133,7 @@ router.get('/', authRequired, async (req, res) => {
        LEFT JOIN email_templates t ON c.template_id = t.id
        LEFT JOIN lists l ON c.list_id = l.id
        LEFT JOIN sender_identities s ON c.sender_id = s.id
-       WHERE c.organizer_id = $1${scope.clause}
+       WHERE c.organizer_id = $1 ${scope.sql}
        ORDER BY c.created_at DESC`,
       [organizerId, ...scope.params]
     );
@@ -327,13 +327,10 @@ router.post('/:id/resolve', authRequired, async (req, res) => {
 
     const campaign = campRes.rows[0];
 
-    // Ownership check for non-privileged users
-    if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      if (campaign.created_by_user_id && campaign.created_by_user_id !== userId) {
-        await client.query('ROLLBACK');
-        return res.status(403).json({ error: 'Forbidden' });
-      }
+    // Ownership check (hierarchical)
+    if (campaign.created_by_user_id && !(await canAccessRowHierarchical(req, campaign.created_by_user_id))) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'Forbidden' });
     }
 
     if (campaign.status !== 'draft') {
