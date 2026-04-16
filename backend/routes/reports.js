@@ -2,11 +2,11 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
-const { isPrivileged, getUserContext } = require('../middleware/userScope');
+const { isPrivileged, getUserContext, canAccessRow } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
-function authRequired(req, res, next) {
+async function authRequired(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
@@ -16,10 +16,18 @@ function authRequired(req, res, next) {
     const token = authHeader.replace("Bearer ", "").trim();
     const payload = jwt.verify(token, JWT_SECRET);
 
+    let team_ids = [];
+    if (payload.role === 'manager') {
+      try {
+        const t = await db.query(`SELECT id FROM users WHERE manager_id = $1 AND organizer_id = $2`, [payload.user_id, payload.organizer_id]);
+        team_ids = t.rows.map(r => r.id);
+      } catch (_) { /* migration pending */ }
+    }
     req.auth = {
       user_id: payload.user_id,
       organizer_id: payload.organizer_id,
-      role: payload.role
+      role: payload.role,
+      team_ids
     };
 
     next();
@@ -64,12 +72,9 @@ router.get('/api/reports/campaign/:id', authRequired, async (req, res) => {
 
     const campaign = campRes.rows[0];
 
-    // Non-privileged users only see reports for their own campaigns
-    if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      if (campaign.created_by_user_id && campaign.created_by_user_id !== userId) {
-        return res.status(403).json({ error: 'Forbidden' });
-      }
+    // Non-privileged users only see reports for their own (or team's) campaigns
+    if (campaign.created_by_user_id && !canAccessRow(req, campaign.created_by_user_id)) {
+      return res.status(403).json({ error: 'Forbidden' });
     }
 
     // 2) Recipient stats
@@ -275,10 +280,12 @@ router.get('/api/reports/organizer/overview', authRequired, async (req, res) => 
     // the list of campaign IDs they own and then scope every follow-up query.
     let campaignIds = null; // null = unrestricted (owner/admin)
     if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
+      const { userId, teamIds } = getUserContext(req);
+      const allUserIds = [userId, ...teamIds];
+      const placeholders = allUserIds.map((_, i) => `$${i + 2}`).join(', ');
       const idsRes = await db.query(
-        `SELECT id FROM campaigns WHERE organizer_id = $1 AND created_by_user_id = $2`,
-        [organizer_id, userId]
+        `SELECT id FROM campaigns WHERE organizer_id = $1 AND created_by_user_id IN (${placeholders})`,
+        [organizer_id, ...allUserIds]
       );
       campaignIds = idsRes.rows.map(r => r.id);
       // If user has no campaigns, return empty report early

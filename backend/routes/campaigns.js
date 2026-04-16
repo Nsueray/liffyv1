@@ -2,11 +2,11 @@ const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
 const db = require('../db');
-const { isPrivileged, userScopeFilter, getUserContext } = require('../middleware/userScope');
+const { isPrivileged, userScopeFilter, getUserContext, canAccessRow } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
-function authRequired(req, res, next) {
+async function authRequired(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
@@ -16,10 +16,18 @@ function authRequired(req, res, next) {
     const token = authHeader.replace("Bearer ", "").trim();
     const payload = jwt.verify(token, JWT_SECRET);
 
+    let team_ids = [];
+    if (payload.role === 'manager') {
+      try {
+        const t = await db.query(`SELECT id FROM users WHERE manager_id = $1 AND organizer_id = $2`, [payload.user_id, payload.organizer_id]);
+        team_ids = t.rows.map(r => r.id);
+      } catch (_) { /* migration pending */ }
+    }
     req.auth = {
       user_id: payload.user_id,
       organizer_id: payload.organizer_id,
-      role: payload.role
+      role: payload.role,
+      team_ids
     };
     next();
   } catch (err) {
@@ -41,11 +49,8 @@ async function loadOwnedCampaign(req, campaignId) {
     return { error: { status: 404, message: 'Campaign not found' } };
   }
   const campaign = campRes.rows[0];
-  if (!isPrivileged(req)) {
-    const { userId } = getUserContext(req);
-    if (campaign.created_by_user_id && campaign.created_by_user_id !== userId) {
-      return { error: { status: 403, message: 'Forbidden' } };
-    }
+  if (campaign.created_by_user_id && !canAccessRow(req, campaign.created_by_user_id)) {
+    return { error: { status: 403, message: 'Forbidden' } };
   }
   return { campaign };
 }

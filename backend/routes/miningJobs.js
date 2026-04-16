@@ -4,7 +4,7 @@ const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
-const { isPrivileged, userScopeFilter, getUserContext } = require('../middleware/userScope');
+const { isPrivileged, userScopeFilter, getUserContext, canAccessRow } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
 
@@ -18,7 +18,7 @@ const upload = multer({
 /**
  * Auth middleware
  */
-function authRequired(req, res, next) {
+async function authRequired(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
@@ -28,10 +28,18 @@ function authRequired(req, res, next) {
     const token = authHeader.replace('Bearer ', '').trim();
     const payload = jwt.verify(token, JWT_SECRET);
 
+    let team_ids = [];
+    if (payload.role === 'manager') {
+      try {
+        const t = await db.query(`SELECT id FROM users WHERE manager_id = $1 AND organizer_id = $2`, [payload.user_id, payload.organizer_id]);
+        team_ids = t.rows.map(r => r.id);
+      } catch (_) { /* migration pending */ }
+    }
     req.auth = {
       user_id: payload.user_id,
       organizer_id: payload.organizer_id,
       role: payload.role,
+      team_ids,
     };
 
     req.user = req.auth;
@@ -74,11 +82,8 @@ async function loadOwnedJob(req, jobId, selectCols = 'id, organizer_id, created_
     return { error: { status: 404, message: 'Job not found' } };
   }
   const job = r.rows[0];
-  if (!isPrivileged(req)) {
-    const { userId } = getUserContext(req);
-    if (job.created_by_user_id && job.created_by_user_id !== userId) {
-      return { error: { status: 403, message: 'Forbidden' } };
-    }
+  if (job.created_by_user_id && !canAccessRow(req, job.created_by_user_id)) {
+    return { error: { status: 403, message: 'Forbidden' } };
   }
   return { job };
 }
@@ -301,12 +306,9 @@ router.get('/api/mining/jobs/:id', authRequired, validateJobId, async (req, res)
 
     const job = result.rows[0];
 
-    // Ownership check for non-privileged users
-    if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      if (job.created_by_user_id && job.created_by_user_id !== userId) {
-        return res.status(403).json({ error: 'Forbidden' });
-      }
+    // Ownership check
+    if (job.created_by_user_id && !canAccessRow(req, job.created_by_user_id)) {
+      return res.status(403).json({ error: 'Forbidden' });
     }
 
     return res.json({ job });
@@ -382,11 +384,8 @@ router.post('/api/mining/jobs/:id/retry', authRequired, validateJobId, async (re
 
     const j = jobRes.rows[0];
 
-    if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      if (j.created_by_user_id && j.created_by_user_id !== userId) {
-        return res.status(403).json({ error: 'Forbidden' });
-      }
+    if (j.created_by_user_id && !canAccessRow(req, j.created_by_user_id)) {
+      return res.status(403).json({ error: 'Forbidden' });
     }
 
     // Yeni job oluştur — retry'ı başlatan kullanıcıya ait olur
@@ -439,11 +438,8 @@ router.post('/api/mining/jobs/:id/enrich', authRequired, validateJobId, async (r
 
     const job = jobRes.rows[0];
 
-    if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      if (job.created_by_user_id && job.created_by_user_id !== userId) {
-        return res.status(403).json({ error: 'Forbidden' });
-      }
+    if (job.created_by_user_id && !canAccessRow(req, job.created_by_user_id)) {
+      return res.status(403).json({ error: 'Forbidden' });
     }
 
     if (job.status === 'enriching') {
@@ -633,12 +629,9 @@ router.get('/api/mining/jobs/:id/enrich-stats', authRequired, validateJobId, asy
       return res.status(404).json({ error: 'Job not found' });
     }
 
-    if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      const ownerId = jobRes.rows[0].created_by_user_id;
-      if (ownerId && ownerId !== userId) {
-        return res.status(403).json({ error: 'Forbidden' });
-      }
+    const ownerId = jobRes.rows[0].created_by_user_id;
+    if (ownerId && !canAccessRow(req, ownerId)) {
+      return res.status(403).json({ error: 'Forbidden' });
     }
 
     const countRes = await db.query(
@@ -681,12 +674,9 @@ router.delete('/api/mining/jobs/:id', authRequired, validateJobId, async (req, r
       return res.status(404).json({ error: 'Job not found' });
     }
 
-    if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      const ownerId = checkRes.rows[0].created_by_user_id;
-      if (ownerId && ownerId !== userId) {
-        return res.status(403).json({ error: 'Forbidden' });
-      }
+    const ownerId = checkRes.rows[0].created_by_user_id;
+    if (ownerId && !canAccessRow(req, ownerId)) {
+      return res.status(403).json({ error: 'Forbidden' });
     }
 
     // mining_results'lar CASCADE ile silinecek
@@ -724,13 +714,10 @@ router.get('/api/mining/jobs/:id/file', authRequired, validateJobId, async (req,
 
     const job = result.rows[0];
 
-    if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      if (job.created_by_user_id && job.created_by_user_id !== userId) {
-        return res.status(403).json({ error: 'Forbidden' });
-      }
+    if (job.created_by_user_id && !canAccessRow(req, job.created_by_user_id)) {
+      return res.status(403).json({ error: 'Forbidden' });
     }
-    
+
     if (!job.file_data) {
       return res.status(404).json({ error: 'No file data available' });
     }

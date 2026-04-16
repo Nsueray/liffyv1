@@ -10,7 +10,7 @@ const { generateExport } = require('../utils/exportHelper');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
-function authRequired(req, res, next) {
+async function authRequired(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
@@ -20,10 +20,18 @@ function authRequired(req, res, next) {
     const token = authHeader.replace("Bearer ", "").trim();
     const payload = jwt.verify(token, JWT_SECRET);
 
+    let team_ids = [];
+    if (payload.role === 'manager') {
+      try {
+        const t = await db.query(`SELECT id FROM users WHERE manager_id = $1 AND organizer_id = $2`, [payload.user_id, payload.organizer_id]);
+        team_ids = t.rows.map(r => r.id);
+      } catch (_) { /* migration pending */ }
+    }
     req.auth = {
       user_id: payload.user_id,
       organizer_id: payload.organizer_id,
-      role: payload.role
+      role: payload.role,
+      team_ids
     };
     next();
   } catch (err) {
@@ -42,11 +50,14 @@ function visibilityFilter(auth, startParamIndex, tableAlias = '') {
   if (auth.role === 'owner' || auth.role === 'admin') {
     return { clause: '', params: [], nextIndex: startParamIndex };
   }
-  // Regular user: shared OR created by them
+  // Manager/user: shared OR created by them (managers include team)
+  const teamIds = auth.team_ids || [];
+  const allIds = [auth.user_id, ...teamIds];
+  const ph = allIds.map((_, i) => `$${startParamIndex + i}`).join(', ');
   return {
-    clause: `AND (${prefix}visibility = 'shared' OR ${prefix}created_by_user_id = $${startParamIndex})`,
-    params: [auth.user_id],
-    nextIndex: startParamIndex + 1
+    clause: `AND (${prefix}visibility = 'shared' OR ${prefix}created_by_user_id IN (${ph}))`,
+    params: allIds,
+    nextIndex: startParamIndex + allIds.length
   };
 }
 

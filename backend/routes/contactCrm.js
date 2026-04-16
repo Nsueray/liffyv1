@@ -11,7 +11,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { authRequired } = require('../middleware/auth');
-const { isPrivileged, userScopeFilter, getUserContext } = require('../middleware/userScope');
+const { isPrivileged, isManager, userScopeFilter, getUserContext, canAccessRow } = require('../middleware/userScope');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (v) => typeof v === 'string' && UUID_REGEX.test(v);
@@ -141,9 +141,11 @@ router.delete('/api/persons/:personId/notes/:noteId', authRequired, async (req, 
     const params = [noteId, personId, organizerId];
     let userFilter = '';
     if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      userFilter = ' AND user_id = $4';
-      params.push(userId);
+      const { userId, teamIds } = getUserContext(req);
+      const allIds = [userId, ...teamIds];
+      const ph = allIds.map((_, i) => `$${params.length + 1 + i}`).join(', ');
+      userFilter = ` AND user_id IN (${ph})`;
+      params.push(...allIds);
     }
 
     const r = await db.query(
@@ -179,9 +181,11 @@ router.get('/api/persons/:personId/activities', authRequired, async (req, res) =
     const filterParams = [personId, organizerId];
     let userFilter = '';
     if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      userFilter = ' AND (a.user_id = $3 OR a.user_id IS NULL)';
-      filterParams.push(userId);
+      const { userId, teamIds } = getUserContext(req);
+      const allIds = [userId, ...teamIds];
+      const ph = allIds.map((_, i) => `$${filterParams.length + 1 + i}`).join(', ');
+      userFilter = ` AND (a.user_id IN (${ph}) OR a.user_id IS NULL)`;
+      filterParams.push(...allIds);
     }
 
     const r = await db.query(
@@ -221,9 +225,11 @@ router.get('/api/persons/:personId/tasks', authRequired, async (req, res) => {
     const params = [personId, organizerId];
     let userFilter = '';
     if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      userFilter = ' AND (t.assigned_to = $3 OR t.created_by = $3)';
-      params.push(userId);
+      const { userId, teamIds } = getUserContext(req);
+      const allIds = [userId, ...teamIds];
+      const ph = allIds.map((_, i) => `$${params.length + 1 + i}`).join(', ');
+      userFilter = ` AND (t.assigned_to IN (${ph}) OR t.created_by IN (${ph}))`;
+      params.push(...allIds);
     }
 
     const r = await db.query(
@@ -316,14 +322,17 @@ router.patch('/api/tasks/:taskId', authRequired, async (req, res) => {
     if (!isUuid(taskId)) return res.status(400).json({ error: 'Invalid taskId' });
 
     // Ownership check — non-privileged users can only patch tasks
-    // assigned to them or created by them.
+    // assigned to them or created by them (managers include team).
     if (!isPrivileged(req)) {
+      const { teamIds } = getUserContext(req);
+      const allIds = [userId, ...teamIds];
+      const ph = allIds.map((_, i) => `$${i + 3}`).join(', ');
       const ownRes = await db.query(
         `SELECT 1 FROM contact_tasks
           WHERE id = $1 AND organizer_id = $2
-            AND (assigned_to = $3 OR created_by = $3)
+            AND (assigned_to IN (${ph}) OR created_by IN (${ph}))
           LIMIT 1`,
-        [taskId, organizerId, userId]
+        [taskId, organizerId, ...allIds]
       );
       if (ownRes.rowCount === 0) {
         return res.status(404).json({ error: 'Task not found' });
@@ -394,9 +403,11 @@ router.delete('/api/tasks/:taskId', authRequired, async (req, res) => {
     const params = [taskId, organizerId];
     let userFilter = '';
     if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      userFilter = ' AND created_by = $3';
-      params.push(userId);
+      const { userId, teamIds } = getUserContext(req);
+      const allIds = [userId, ...teamIds];
+      const ph = allIds.map((_, i) => `$${params.length + 1 + i}`).join(', ');
+      userFilter = ` AND created_by IN (${ph})`;
+      params.push(...allIds);
     }
 
     const r = await db.query(

@@ -14,7 +14,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { authRequired } = require('../middleware/auth');
-const { isPrivileged, getUserContext } = require('../middleware/userScope');
+const { isPrivileged, getUserContext, canAccessRow } = require('../middleware/userScope');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (v) => typeof v === 'string' && UUID_REGEX.test(v);
@@ -333,11 +333,9 @@ router.patch('/api/persons/:id/stage', authRequired, async (req, res) => {
     const fromStageId = personRes.rows[0].pipeline_stage_id;
     const currentAssignee = personRes.rows[0].pipeline_assigned_user_id;
 
-    // Ownership enforcement for non-privileged users
-    if (!isPrivileged(req)) {
-      if (currentAssignee && currentAssignee !== userId) {
-        return res.status(403).json({ error: 'This contact is assigned to another user' });
-      }
+    // Ownership enforcement for non-privileged users (managers can access team's)
+    if (currentAssignee && !canAccessRow(req, currentAssignee)) {
+      return res.status(403).json({ error: 'This contact is assigned to another user' });
     }
 
     let toStage = null;

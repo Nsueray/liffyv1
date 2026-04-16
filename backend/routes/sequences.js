@@ -6,7 +6,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
-const { getUserContext, isPrivileged } = require('../middleware/userScope');
+const { getUserContext, isPrivileged, canAccessRow } = require('../middleware/userScope');
 const {
   initializeSequence,
   pauseSequence,
@@ -16,16 +16,24 @@ const {
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
-function authRequired(req, res, next) {
+async function authRequired(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader) return res.status(401).json({ error: 'Missing Authorization header' });
     const token = authHeader.replace('Bearer ', '').trim();
     const payload = jwt.verify(token, JWT_SECRET);
+    let team_ids = [];
+    if (payload.role === 'manager') {
+      try {
+        const t = await db.query(`SELECT id FROM users WHERE manager_id = $1 AND organizer_id = $2`, [payload.user_id, payload.organizer_id]);
+        team_ids = t.rows.map(r => r.id);
+      } catch (_) { /* migration pending */ }
+    }
     req.auth = {
       user_id: payload.user_id,
       organizer_id: payload.organizer_id,
-      role: payload.role
+      role: payload.role,
+      team_ids
     };
     next();
   } catch (err) {
@@ -51,12 +59,9 @@ async function loadOwnedCampaign(req, res, next) {
 
     const campaign = result.rows[0];
 
-    // User isolation: regular users can only manage their own campaigns
-    if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      if (campaign.created_by_user_id && campaign.created_by_user_id !== userId) {
-        return res.status(403).json({ error: 'Access denied' });
-      }
+    // User isolation: non-privileged users can only manage campaigns they own or their team's
+    if (campaign.created_by_user_id && !canAccessRow(req, campaign.created_by_user_id)) {
+      return res.status(403).json({ error: 'Access denied' });
     }
 
     req.campaign = campaign;

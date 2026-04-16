@@ -18,7 +18,7 @@ const { upsertActionItem, computeEngagementScore, getFallbackOwner } = require('
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
-function authRequired(req, res, next) {
+async function authRequired(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
@@ -26,10 +26,18 @@ function authRequired(req, res, next) {
     }
     const token = authHeader.replace("Bearer ", "").trim();
     const payload = jwt.verify(token, JWT_SECRET);
+    let team_ids = [];
+    if (payload.role === 'manager') {
+      try {
+        const t = await db.query(`SELECT id FROM users WHERE manager_id = $1 AND organizer_id = $2`, [payload.user_id, payload.organizer_id]);
+        team_ids = t.rows.map(r => r.id);
+      } catch (_) { /* migration pending */ }
+    }
     req.auth = {
       user_id: payload.user_id,
       organizer_id: payload.organizer_id,
-      role: payload.role
+      role: payload.role,
+      team_ids
     };
     next();
   } catch (err) {
@@ -52,12 +60,15 @@ router.get('/', authRequired, async (req, res) => {
     let paramIdx = 2;
     const params = [organizer_id];
 
-    // User scope: regular users only see items assigned to them
+    // User scope: regular users see own items, managers see own + team's
     let userClause = '';
     if (role !== 'owner' && role !== 'admin') {
-      userClause = ` AND ai.assigned_to = $${paramIdx}`;
-      params.push(user_id);
-      paramIdx++;
+      const teamIds = req.auth.team_ids || [];
+      const allIds = [user_id, ...teamIds];
+      const ph = allIds.map((_, i) => `$${paramIdx + i}`).join(', ');
+      userClause = ` AND ai.assigned_to IN (${ph})`;
+      params.push(...allIds);
+      paramIdx += allIds.length;
     }
 
     // Status filter
@@ -128,9 +139,12 @@ router.get('/summary', authRequired, async (req, res) => {
 
     let userClause = '';
     if (role !== 'owner' && role !== 'admin') {
-      userClause = ` AND assigned_to = $${paramIdx}`;
-      params.push(user_id);
-      paramIdx++;
+      const teamIds = req.auth.team_ids || [];
+      const allIds = [user_id, ...teamIds];
+      const ph = allIds.map((_, i) => `$${paramIdx + i}`).join(', ');
+      userClause = ` AND assigned_to IN (${ph})`;
+      params.push(...allIds);
+      paramIdx += allIds.length;
     }
 
     const result = await db.query(
@@ -277,9 +291,12 @@ router.get('/history', authRequired, async (req, res) => {
 
     let userClause = '';
     if (role !== 'owner' && role !== 'admin') {
-      userClause = ` AND ai.assigned_to = $${paramIdx}`;
-      params.push(user_id);
-      paramIdx++;
+      const teamIds = req.auth.team_ids || [];
+      const allIds = [user_id, ...teamIds];
+      const ph = allIds.map((_, i) => `$${paramIdx + i}`).join(', ');
+      userClause = ` AND ai.assigned_to IN (${ph})`;
+      params.push(...allIds);
+      paramIdx += allIds.length;
     }
 
     const limit = Math.min(parseInt(rawLimit, 10) || 50, 200);

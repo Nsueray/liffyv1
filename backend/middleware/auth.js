@@ -10,15 +10,19 @@
  *   router.get('/api/foo', authRequired, (req, res) => { ... });
  *
  * Sets:
- *   req.auth = { user_id, organizer_id, role, email }
+ *   req.auth = { user_id, organizer_id, role, email, team_ids }
  *   req.user = same reference (alias for new-style code)
+ *
+ * For managers: team_ids is populated with direct-report user IDs (one DB query).
+ * For owner/admin/user: team_ids is [].
  */
 
 const jwt = require('jsonwebtoken');
+const db = require('../db');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
 
-function authRequired(req, res, next) {
+async function authRequired(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader) {
@@ -32,11 +36,27 @@ function authRequired(req, res, next) {
 
     const payload = jwt.verify(token, JWT_SECRET);
 
+    // Load team_ids for managers (direct reports)
+    let teamIds = [];
+    if (payload.role === 'manager') {
+      try {
+        const teamRes = await db.query(
+          `SELECT id FROM users WHERE manager_id = $1 AND organizer_id = $2`,
+          [payload.user_id, payload.organizer_id]
+        );
+        teamIds = teamRes.rows.map(r => r.id);
+      } catch (err) {
+        // If manager_id column doesn't exist yet (migration not applied), skip
+        console.warn('[auth] team_ids query failed (migration pending?):', err.message);
+      }
+    }
+
     req.auth = {
       user_id: payload.user_id,
       organizer_id: payload.organizer_id,
       role: payload.role,
       email: payload.email || null,
+      team_ids: teamIds,
     };
     // Alias: new code can use req.user with .id instead of .user_id
     req.user = {
@@ -45,6 +65,7 @@ function authRequired(req, res, next) {
       organizer_id: payload.organizer_id,
       role: payload.role,
       email: payload.email || null,
+      team_ids: teamIds,
     };
 
     next();

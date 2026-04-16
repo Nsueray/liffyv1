@@ -2,16 +2,24 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
-const { isPrivileged, getUserContext } = require('../middleware/userScope');
+const { isPrivileged, isManager, getUserContext, canAccessRow, userScopeFilter } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
-function authRequired(req, res, next) {
+async function authRequired(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).json({ error: "No token" });
   const token = authHeader.replace("Bearer ", "").trim();
   try {
-    req.auth = jwt.verify(token, JWT_SECRET);
+    const payload = jwt.verify(token, JWT_SECRET);
+    let team_ids = [];
+    if (payload.role === 'manager') {
+      try {
+        const t = await db.query(`SELECT id FROM users WHERE manager_id = $1 AND organizer_id = $2`, [payload.user_id, payload.organizer_id]);
+        team_ids = t.rows.map(r => r.id);
+      } catch (_) { /* migration pending */ }
+    }
+    req.auth = { ...payload, team_ids };
     next();
   } catch (err) {
     return res.status(401).json({ error: "Invalid token" });
@@ -64,12 +72,14 @@ router.get('/', authRequired, async (req, res) => {
       idx++;
     }
 
-    // User scoping: non-privileged users only see their own intents.
+    // User scoping: non-privileged users only see their own (or team's) intents.
     if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      where.push(`(c.created_by_user_id = $${idx} OR pi.created_by_user_id = $${idx})`);
-      params.push(userId);
-      idx++;
+      const { userId, teamIds } = getUserContext(req);
+      const allIds = [userId, ...teamIds];
+      const ph = allIds.map((_, i) => `$${idx + i}`).join(', ');
+      where.push(`(c.created_by_user_id IN (${ph}) OR pi.created_by_user_id IN (${ph}))`);
+      params.push(...allIds);
+      idx += allIds.length;
     }
 
     const whereClause = where.join(' AND ');
@@ -127,9 +137,12 @@ router.get('/stats', authRequired, async (req, res) => {
     const params = [organizerId];
     let userFilter = '';
     if (!isPrivileged(req)) {
-      const { userId } = getUserContext(req);
-      userFilter = ' AND (c.created_by_user_id = $2 OR pi.created_by_user_id = $2)';
-      params.push(userId);
+      const { userId, teamIds } = getUserContext(req);
+      const allIds = [userId, ...teamIds];
+      const startIdx = params.length + 1;
+      const ph = allIds.map((_, i) => `$${startIdx + i}`).join(', ');
+      userFilter = ` AND (c.created_by_user_id IN (${ph}) OR pi.created_by_user_id IN (${ph}))`;
+      params.push(...allIds);
     }
 
     const statsRes = await db.query(
