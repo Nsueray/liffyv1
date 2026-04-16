@@ -183,6 +183,55 @@ function getVisibilityScope(req, ownerColumn, visColumn, startParamIndex) {
 }
 
 /**
+ * Upward visibility scope for resources where "private" means
+ * creator + everyone ABOVE in the hierarchy can see.
+ *
+ * Use case: email_templates, sender_identities — a manager can see
+ * their subordinate's private templates (because the manager is above).
+ *
+ * Logic:
+ *   - visibility = 'public' → everyone in the org sees it
+ *   - visibility = 'private' → only the creator, OR anyone who is an
+ *     ancestor of the creator (walks UP the reports_to chain from
+ *     the creator and checks if the current user is in that chain).
+ *
+ * Owner/admin: returns empty clause (sees all).
+ *
+ * @param {import('express').Request} req
+ * @param {string} ownerColumn — e.g. 'et.created_by_user_id'
+ * @param {string} visColumn — e.g. 'et.visibility'
+ * @param {number} startParamIndex
+ * @returns {{ sql: string, params: any[], nextIndex: number }}
+ */
+function getUpwardVisibilityScope(req, ownerColumn, visColumn, startParamIndex) {
+  if (isPrivileged(req)) {
+    return { sql: '', params: [], nextIndex: startParamIndex };
+  }
+
+  const { userId } = getUserContext(req);
+  const p = startParamIndex;
+
+  // Walk UP from the creator: start at creator, follow reports_to upward.
+  // If the current user appears in that chain → they are above the creator → allowed.
+  return {
+    sql: `AND (
+      ${visColumn} = 'public'
+      OR ${ownerColumn} = $${p}
+      OR $${p} IN (
+        WITH RECURSIVE upward AS (
+          SELECT reports_to FROM users WHERE id = ${ownerColumn}
+          UNION ALL
+          SELECT u.reports_to FROM users u JOIN upward up ON u.id = up.reports_to WHERE up.reports_to IS NOT NULL
+        )
+        SELECT reports_to FROM upward WHERE reports_to IS NOT NULL
+      )
+    )`,
+    params: [userId],
+    nextIndex: p + 1,
+  };
+}
+
+/**
  * Async row-level access check using recursive CTE on reports_to.
  * Use for single-row ownership checks (e.g., loadOwnedCampaign).
  *
@@ -220,5 +269,6 @@ module.exports = {
   // ADR-015 (canonical)
   getHierarchicalScope,
   getVisibilityScope,
+  getUpwardVisibilityScope,
   canAccessRowHierarchical,
 };

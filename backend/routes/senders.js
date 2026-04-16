@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
+const { getUserContext, isPrivileged, getUpwardVisibilityScope, canAccessRowHierarchical } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -32,14 +33,15 @@ async function authRequired(req, res, next) {
 
 /**
  * GET /api/senders
- * List all active sender identities for current organizer
+ * List all active sender identities for current organizer (visibility-filtered)
  */
 router.get('/api/senders', authRequired, async (req, res) => {
   try {
     const { organizer_id } = req.auth;
+    const scope = getUpwardVisibilityScope(req, 'user_id', 'visibility', 2);
 
     const result = await db.query(
-      `SELECT 
+      `SELECT
          id,
          organizer_id,
          user_id,
@@ -49,11 +51,12 @@ router.get('/api/senders', authRequired, async (req, res) => {
          reply_to,
          is_default,
          is_active,
+         visibility,
          created_at
        FROM sender_identities
-       WHERE organizer_id = $1 AND is_active = true
+       WHERE organizer_id = $1 AND is_active = true ${scope.sql}
        ORDER BY is_default DESC, created_at DESC`,
-      [organizer_id]
+      [organizer_id, ...scope.params]
     );
 
     // Map to expected format for frontend
@@ -66,6 +69,8 @@ router.get('/api/senders', authRequired, async (req, res) => {
       reply_to: row.reply_to,
       is_default: row.is_default,
       is_active: row.is_active,
+      visibility: row.visibility || 'public',
+      user_id: row.user_id,
       created_at: row.created_at
     }));
 
@@ -88,7 +93,7 @@ router.get('/api/senders', authRequired, async (req, res) => {
 router.post('/api/senders', authRequired, async (req, res) => {
   try {
     const { organizer_id, user_id } = req.auth;
-    const { label, from_name, from_email, reply_to, is_default } = req.body;
+    const { label, from_name, from_email, reply_to, is_default, visibility } = req.body;
 
     if (!from_name || !from_email) {
       return res.status(400).json({ error: "from_name and from_email are required" });
@@ -97,17 +102,19 @@ router.post('/api/senders', authRequired, async (req, res) => {
     // If this should be default, reset other defaults
     if (is_default === true) {
       await db.query(
-        `UPDATE sender_identities 
-         SET is_default = false 
+        `UPDATE sender_identities
+         SET is_default = false
          WHERE organizer_id = $1`,
         [organizer_id]
       );
     }
 
+    const vis = (visibility === 'private') ? 'private' : 'public';
+
     const insertResult = await db.query(
       `INSERT INTO sender_identities
-       (organizer_id, user_id, label, from_name, from_email, reply_to, is_default)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       (organizer_id, user_id, label, from_name, from_email, reply_to, is_default, visibility)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        RETURNING *`,
       [
         organizer_id,
@@ -116,7 +123,8 @@ router.post('/api/senders', authRequired, async (req, res) => {
         from_name,
         from_email,
         reply_to || null,
-        is_default === true
+        is_default === true,
+        vis
       ]
     );
 
@@ -133,6 +141,8 @@ router.post('/api/senders', authRequired, async (req, res) => {
         reply_to: row.reply_to,
         is_default: row.is_default,
         is_active: row.is_active,
+        visibility: row.visibility || 'public',
+        user_id: row.user_id,
         created_at: row.created_at
       }
     });
@@ -152,17 +162,28 @@ router.delete('/api/senders/:id', authRequired, async (req, res) => {
     const { organizer_id } = req.auth;
     const { id } = req.params;
 
+    // Check ownership
+    const existing = await db.query(
+      'SELECT id, user_id FROM sender_identities WHERE id = $1 AND organizer_id = $2 LIMIT 1',
+      [id, organizer_id]
+    );
+
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ error: "Sender not found" });
+    }
+
+    const ownerId = existing.rows[0].user_id;
+    if (ownerId && !(await canAccessRowHierarchical(req, ownerId))) {
+      return res.status(403).json({ error: 'You can only delete your own sender identities' });
+    }
+
     const result = await db.query(
-      `UPDATE sender_identities 
-       SET is_active = false 
+      `UPDATE sender_identities
+       SET is_active = false
        WHERE id = $1 AND organizer_id = $2
        RETURNING id`,
       [id, organizer_id]
     );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: "Sender not found" });
-    }
 
     return res.json({ success: true, deleted: id });
 

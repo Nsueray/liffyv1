@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../db');
 const jwt = require('jsonwebtoken');
 const { processTemplate } = require('../utils/templateProcessor');
+const { getUserContext, isPrivileged, getUpwardVisibilityScope, canAccessRowHierarchical } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -22,16 +23,20 @@ function authRequired(req, res, next) {
   }
 }
 
+const TEMPLATE_COLS = `id, name, subject, body_html, body_text, visibility, created_by_user_id, created_at`;
+
 // GET /api/email-templates
 router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
+    const scope = getUpwardVisibilityScope(req, 'created_by_user_id', 'visibility', 2);
+
     const result = await pool.query(
-      `SELECT id, name, subject, body_html, body_text, created_at
+      `SELECT ${TEMPLATE_COLS}
        FROM email_templates
-       WHERE organizer_id = $1
+       WHERE organizer_id = $1 ${scope.sql}
        ORDER BY created_at DESC`,
-      [organizerId]
+      [organizerId, ...scope.params]
     );
 
     res.json({ templates: result.rows });
@@ -45,18 +50,21 @@ router.get('/', authRequired, async (req, res) => {
 router.post('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    const { name, subject, body_html, body_text } = req.body;
+    const userId = req.auth.user_id;
+    const { name, subject, body_html, body_text, visibility } = req.body;
 
     if (!name || !name.trim()) return res.status(400).json({ error: 'Name is required' });
     if (!subject || !subject.trim()) return res.status(400).json({ error: 'Subject is required' });
     if (!body_html || !body_html.trim()) return res.status(400).json({ error: 'Body HTML is required' });
 
+    const vis = (visibility === 'private') ? 'private' : 'public';
+
     const result = await pool.query(
       `INSERT INTO email_templates
-       (organizer_id, name, subject, body_html, body_text, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
-       RETURNING id, name, subject, body_html, body_text, created_at`,
-      [organizerId, name.trim(), subject.trim(), body_html, body_text || null]
+       (organizer_id, created_by_user_id, name, subject, body_html, body_text, visibility, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+       RETURNING ${TEMPLATE_COLS}`,
+      [organizerId, userId, name.trim(), subject.trim(), body_html, body_text || null, vis]
     );
 
     res.status(201).json({ template: result.rows[0] });
@@ -71,12 +79,13 @@ router.get('/:id', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     const templateId = req.params.id;
+    const scope = getUpwardVisibilityScope(req, 'created_by_user_id', 'visibility', 3);
 
     const result = await pool.query(
-      `SELECT id, name, subject, body_html, body_text, created_at
+      `SELECT ${TEMPLATE_COLS}
        FROM email_templates
-       WHERE id = $1 AND organizer_id = $2`,
-      [templateId, organizerId]
+       WHERE id = $1 AND organizer_id = $2 ${scope.sql}`,
+      [templateId, organizerId, ...scope.params]
     );
 
     if (result.rows.length === 0) {
@@ -95,15 +104,15 @@ router.put('/:id', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     const templateId = req.params.id;
-    const { name, subject, body_html, body_text } = req.body;
+    const { name, subject, body_html, body_text, visibility } = req.body;
 
     if (!name || !subject || !body_html) {
       return res.status(400).json({ error: 'Name, subject, and body_html are required' });
     }
 
-    // Check template exists and belongs to organizer
+    // Check template exists and user can access it
     const existing = await pool.query(
-      'SELECT id FROM email_templates WHERE id = $1 AND organizer_id = $2',
+      'SELECT id, created_by_user_id FROM email_templates WHERE id = $1 AND organizer_id = $2',
       [templateId, organizerId]
     );
 
@@ -111,12 +120,23 @@ router.put('/:id', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'Template not found' });
     }
 
+    // Only creator or privileged user can update
+    const ownerId = existing.rows[0].created_by_user_id;
+    if (ownerId && !(await canAccessRowHierarchical(req, ownerId))) {
+      return res.status(403).json({ error: 'You can only edit your own templates' });
+    }
+
+    // Only owner/admin can change visibility
+    const vis = (visibility === 'private' || visibility === 'public') ? visibility : undefined;
+    const visSql = vis ? ', visibility = $7' : '';
+    const visParams = vis ? [vis] : [];
+
     const result = await pool.query(
-      `UPDATE email_templates 
-       SET name = $1, subject = $2, body_html = $3, body_text = $4
+      `UPDATE email_templates
+       SET name = $1, subject = $2, body_html = $3, body_text = $4${visSql}
        WHERE id = $5 AND organizer_id = $6
-       RETURNING id, name, subject, body_html, body_text, created_at`,
-      [name.trim(), subject.trim(), body_html, body_text || null, templateId, organizerId]
+       RETURNING ${TEMPLATE_COLS}`,
+      [name.trim(), subject.trim(), body_html, body_text || null, ...visParams, templateId, organizerId]
     );
 
     res.json({ template: result.rows[0] });
@@ -132,14 +152,19 @@ router.delete('/:id', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
     const templateId = req.params.id;
 
-    // Check template exists and belongs to organizer
+    // Check template exists and user can access it
     const existing = await pool.query(
-      'SELECT id FROM email_templates WHERE id = $1 AND organizer_id = $2',
+      'SELECT id, created_by_user_id FROM email_templates WHERE id = $1 AND organizer_id = $2',
       [templateId, organizerId]
     );
 
     if (existing.rows.length === 0) {
       return res.status(404).json({ error: 'Template not found' });
+    }
+
+    const ownerId = existing.rows[0].created_by_user_id;
+    if (ownerId && !(await canAccessRowHierarchical(req, ownerId))) {
+      return res.status(403).json({ error: 'You can only delete your own templates' });
     }
 
     await pool.query(
@@ -163,12 +188,13 @@ router.post('/:id/preview', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
     const templateId = req.params.id;
+    const scope = getUpwardVisibilityScope(req, 'created_by_user_id', 'visibility', 3);
 
     const result = await pool.query(
       `SELECT id, name, subject, body_html, body_text
        FROM email_templates
-       WHERE id = $1 AND organizer_id = $2`,
-      [templateId, organizerId]
+       WHERE id = $1 AND organizer_id = $2 ${scope.sql}`,
+      [templateId, organizerId, ...scope.params]
     );
 
     if (result.rows.length === 0) {
@@ -215,13 +241,15 @@ router.post('/:id/preview', authRequired, async (req, res) => {
 router.post('/:id/clone', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
+    const userId = req.auth.user_id;
     const templateId = req.params.id;
+    const scope = getUpwardVisibilityScope(req, 'created_by_user_id', 'visibility', 3);
 
     const existing = await pool.query(
       `SELECT name, subject, body_html, body_text
        FROM email_templates
-       WHERE id = $1 AND organizer_id = $2`,
-      [templateId, organizerId]
+       WHERE id = $1 AND organizer_id = $2 ${scope.sql}`,
+      [templateId, organizerId, ...scope.params]
     );
 
     if (existing.rows.length === 0) {
@@ -233,10 +261,10 @@ router.post('/:id/clone', authRequired, async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO email_templates
-       (organizer_id, name, subject, body_html, body_text, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
-       RETURNING id, name, subject, body_html, body_text, created_at`,
-      [organizerId, newName, source.subject, source.body_html, source.body_text]
+       (organizer_id, created_by_user_id, name, subject, body_html, body_text, visibility, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 'public', NOW())
+       RETURNING ${TEMPLATE_COLS}`,
+      [organizerId, userId, newName, source.subject, source.body_html, source.body_text]
     );
 
     res.status(201).json({ template: result.rows[0] });
