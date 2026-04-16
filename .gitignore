@@ -20,3 +20,4 @@ build/
 # Logs
 logs/
 *.log
+backend/scripts/Bengu_*.csv
