@@ -66,29 +66,46 @@ app.get('/api/debug-scope', async (req, res) => {
   try {
     const jwt = require('jsonwebtoken');
     const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
+    const { getUserContext, isPrivileged, getHierarchicalScope } = require('./middleware/userScope');
+
+    let userId, organizerId, jwtRole, jwtInfo;
+
+    // Mode 1: decode actual JWT from Authorization header
     const authHeader = req.headers.authorization;
-    if (!authHeader) return res.status(401).json({ error: 'No auth header' });
-    const token = authHeader.replace('Bearer ', '').trim();
-    const payload = jwt.verify(token, JWT_SECRET);
+    if (authHeader) {
+      const token = authHeader.replace('Bearer ', '').trim();
+      const payload = jwt.verify(token, JWT_SECRET);
+      userId = payload.user_id;
+      organizerId = payload.organizer_id;
+      jwtRole = payload.role;
+      jwtInfo = {
+        user_id: payload.user_id,
+        organizer_id: payload.organizer_id,
+        role: payload.role,
+        email: payload.email,
+        iat: new Date(payload.iat * 1000).toISOString(),
+        exp: new Date(payload.exp * 1000).toISOString(),
+      };
+    }
+    // Mode 2: pass user_id as query param (no JWT needed)
+    else if (req.query.user_id) {
+      userId = req.query.user_id;
+      organizerId = req.query.org_id || '63b52d61-ae2c-4dad-b429-48151b1b16d6';
+      jwtInfo = { note: 'No JWT — using query params' };
+    } else {
+      return res.status(400).json({ error: 'Pass Authorization header or ?user_id=...' });
+    }
 
-    // What the JWT says
-    const jwtInfo = {
-      user_id: payload.user_id,
-      organizer_id: payload.organizer_id,
-      role: payload.role,
-      email: payload.email,
-      iat: new Date(payload.iat * 1000).toISOString(),
-      exp: new Date(payload.exp * 1000).toISOString(),
-    };
-
-    // What the DB says
+    // DB user record
     const userRes = await db.query(
       `SELECT id, email, role, reports_to, organizer_id FROM users WHERE id = $1`,
-      [payload.user_id]
+      [userId]
     );
     const dbUser = userRes.rows[0] || null;
+    if (!organizerId && dbUser) organizerId = dbUser.organizer_id;
+    const effectiveRole = jwtRole || (dbUser ? dbUser.role : null);
 
-    // Recursive CTE test
+    // Recursive CTE team
     const teamRes = await db.query(
       `WITH RECURSIVE my_team AS (
          SELECT id, email, role FROM users WHERE id = $1
@@ -96,16 +113,15 @@ app.get('/api/debug-scope', async (req, res) => {
          SELECT u.id, u.email, u.role FROM users u JOIN my_team t ON u.reports_to = t.id
        )
        SELECT id, email, role FROM my_team`,
-      [payload.user_id]
+      [userId]
     );
 
-    // getUserContext simulation
-    const { getUserContext, isPrivileged, getHierarchicalScope } = require('./middleware/userScope');
-    const fakeReq = { auth: { user_id: payload.user_id, organizer_id: payload.organizer_id, role: payload.role } };
+    // getUserContext + scope simulation
+    const fakeReq = { auth: { user_id: userId, organizer_id: organizerId, role: effectiveRole } };
     const ctx = getUserContext(fakeReq);
     const scope = getHierarchicalScope(fakeReq, 'test_col', 1);
 
-    // Quick campaign count test
+    // Campaign count using CTE
     const campRes = await db.query(
       `SELECT COUNT(*)::int AS cnt FROM campaigns
        WHERE organizer_id = $1 AND created_by_user_id IN (
@@ -116,18 +132,37 @@ app.get('/api/debug-scope', async (req, res) => {
          )
          SELECT id FROM my_team
        )`,
-      [payload.organizer_id, payload.user_id]
+      [organizerId, userId]
+    );
+
+    // List count
+    const listRes = await db.query(
+      `SELECT COUNT(*)::int AS cnt FROM lists
+       WHERE organizer_id = $1 AND (
+         visibility = 'shared'
+         OR created_by_user_id IN (
+           WITH RECURSIVE my_team AS (
+             SELECT id FROM users WHERE id = $2
+             UNION ALL
+             SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+           )
+           SELECT id FROM my_team
+         )
+       )`,
+      [organizerId, userId]
     );
 
     res.json({
       jwt: jwtInfo,
       db_user: dbUser,
+      effective_role: effectiveRole,
       recursive_team: teamRes.rows,
       getUserContext: ctx,
       isPrivileged: isPrivileged(fakeReq),
-      scope_sql_preview: scope.sql.substring(0, 200),
-      scope_params: scope.params,
+      scope_sql_empty: scope.sql === '',
+      scope_sql_preview: scope.sql ? scope.sql.substring(0, 300) : '(empty — owner sees all)',
       campaign_count_via_cte: campRes.rows[0].cnt,
+      list_count_via_visibility_scope: listRes.rows[0].cnt,
     });
   } catch (err) {
     res.status(500).json({ error: err.message, stack: err.stack });
