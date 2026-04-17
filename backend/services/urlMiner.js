@@ -348,14 +348,15 @@ async function runUrlMiningJob(jobId, organizerId) {
 
       const listRes = await client.query(
         `INSERT INTO lists
-         (organizer_id, name, description, type)
-         VALUES ($1,$2,$3,$4)
+         (organizer_id, name, description, type, created_by_user_id, visibility)
+         VALUES ($1,$2,$3,$4,$5,'shared')
          RETURNING id`,
         [
           organizerId,
           listName,
           `Auto-created from URL mining job ${jobId}`,
-          'mined'
+          'mined',
+          job.created_by_user_id || null
         ]
       );
 

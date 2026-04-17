@@ -893,8 +893,8 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
       }
 
       const listRes = await db.query(
-        `INSERT INTO lists (organizer_id, name) VALUES ($1, $2) RETURNING id, name, created_at`,
-        [organizerId, trimmedListName]
+        `INSERT INTO lists (organizer_id, name, created_by_user_id, visibility) VALUES ($1, $2, $3, 'shared') RETURNING id, name, created_at`,
+        [organizerId, trimmedListName, req.auth.user_id]
       );
       listId = listRes.rows[0].id;
       listCreated = listRes.rows[0];

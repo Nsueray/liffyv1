@@ -345,10 +345,10 @@ router.post('/import', authRequired, async (req, res) => {
       if (trimmedListName) {
         // Create the list
         const listResult = await client.query(`
-          INSERT INTO lists (organizer_id, name, created_at)
-          VALUES ($1, $2, NOW())
+          INSERT INTO lists (organizer_id, name, created_at, created_by_user_id, visibility)
+          VALUES ($1, $2, NOW(), $3, 'shared')
           RETURNING id, name
-        `, [organizerId, trimmedListName]);
+        `, [organizerId, trimmedListName, req.auth.user_id]);
         
         createdList = listResult.rows[0];
         

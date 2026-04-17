@@ -442,8 +442,8 @@ router.post('/upload-csv', authRequired, upload.single('file'), async (req, res)
 
     // Create list (fast, single query — outside transaction so it persists for background path)
     const listResult = await db.query(
-      `INSERT INTO lists (organizer_id, name, type) VALUES ($1, $2, 'import') RETURNING id, name, created_at`,
-      [organizerId, listName]
+      `INSERT INTO lists (organizer_id, name, type, created_by_user_id, visibility) VALUES ($1, $2, 'import', $3, 'shared') RETURNING id, name, created_at`,
+      [organizerId, listName, req.auth.user_id]
     );
     const newList = listResult.rows[0];
 
