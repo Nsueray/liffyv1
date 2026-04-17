@@ -86,12 +86,51 @@ app.get('/api/diag/counts', async (req, res) => {
       [orgId, ...sndScope.params]
     );
 
+    // If JWT is provided, also decode it and simulate with THAT user's context
+    let jwtDiag = null;
+    const authHeader = req.headers.authorization;
+    if (authHeader) {
+      try {
+        const jwt = require('jsonwebtoken');
+        const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
+        const token = authHeader.replace('Bearer ', '').trim();
+        const payload = jwt.verify(token, JWT_SECRET);
+        payload.user_id = payload.user_id || payload.id; // normalize
+
+        const jwtReq = { auth: { user_id: payload.user_id, organizer_id: payload.organizer_id, role: payload.role } };
+        const jwtPriv = isPrivileged(jwtReq);
+        const jwtTplScope = getUpwardVisibilityScope(jwtReq, 'created_by_user_id', 'visibility', 2);
+        const jwtSndScope = getUpwardVisibilityScope(jwtReq, 'user_id', 'visibility', 2);
+
+        const jwtTpl = await db.query(
+          `SELECT COUNT(*)::int AS cnt FROM email_templates WHERE organizer_id = $1 ${jwtTplScope.sql}`,
+          [payload.organizer_id, ...jwtTplScope.params]
+        );
+        const jwtSnd = await db.query(
+          `SELECT COUNT(*)::int AS cnt FROM sender_identities WHERE organizer_id = $1 AND is_active = true ${jwtSndScope.sql}`,
+          [payload.organizer_id, ...jwtSndScope.params]
+        );
+
+        jwtDiag = {
+          payload: { user_id: payload.user_id, organizer_id: payload.organizer_id, role: payload.role, email: payload.email },
+          isPrivileged: jwtPriv,
+          tpl_scope_empty: jwtTplScope.sql === '',
+          snd_scope_empty: jwtSndScope.sql === '',
+          templates: jwtTpl.rows[0].cnt,
+          senders: jwtSnd.rows[0].cnt,
+        };
+      } catch (e) {
+        jwtDiag = { error: e.message };
+      }
+    }
+
     res.json({
       db: { templates: tpl.rows[0], senders: snd.rows[0] },
       suer_privileged: priv,
       suer_tpl_scope_empty: tplScope.sql === '',
       suer_snd_scope_empty: sndScope.sql === '',
       route_sim: { templates: tplRoute.rows[0].cnt, senders: sndRoute.rows[0].cnt },
+      jwt_diag: jwtDiag,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
