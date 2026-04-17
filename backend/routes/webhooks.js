@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-const { sendEmail } = require('../mailer');
+// sendEmail no longer used — forward uses sgMail directly for tracking control
 const multer = require('multer');
 const upload = multer();
 
@@ -457,92 +457,30 @@ function extractName(fromField) {
 }
 
 /**
- * Strip quoted reply history from email body.
- * Removes "On [date] ... wrote:" lines and subsequent > quoted lines.
- */
-function stripQuotedHistory(text) {
-  if (!text) return text;
-  const lines = text.split('\n');
-  const result = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
-    // "On ... wrote:" pattern (English) — may span 2 lines
-    // e.g. "On Mon, 16 Mar 2026 at 14:57, Elif AY <elif@elan-expo.com> wrote:"
-    if (/^On\s.+wrote:\s*$/i.test(line)) break;
-    // "On ..." first line, "wrote:" on next line
-    if (/^On\s.+[^:]\s*$/i.test(line) && i + 1 < lines.length && /wrote:\s*$/i.test(lines[i + 1])) break;
-    // Greek: "Στις ... έγραψε:" — may span 2 lines
-    if (/^Στις\s.+έγραψε:\s*$/i.test(line)) break;
-    if (/^Στις\s.+/i.test(line) && i + 1 < lines.length && /έγραψε:\s*$/i.test(lines[i + 1])) break;
-    // German: "Am ... schrieb ..."
-    if (/^Am\s.+schrieb\s.+:?\s*$/i.test(line)) break;
-    // French: "Le ... a écrit :"
-    if (/^Le\s.+a écrit\s*:?\s*$/i.test(line)) break;
-    // Turkish: "tarihinde ... yazdı:"
-    if (/tarihinde\s.+yazdı:\s*$/i.test(line)) break;
-    // Generic: line starts with ">" (quoted text)
-    if (/^\s*>/.test(line)) break;
-    // "---------- Forwarded message ----------" or similar separators
-    if (/^-{5,}\s*(Forwarded|Original)\s/i.test(line)) break;
-    // "From: ... Sent: ..." Outlook-style quote header
-    if (/^From:\s.+/i.test(line) && i > 0 && lines[i - 1].trim() === '') {
-      // Check if next lines look like Outlook headers (Sent:, To:, Subject:)
-      if (i + 1 < lines.length && /^(Sent|To|Date|Subject):\s/i.test(lines[i + 1])) break;
-    }
-
-    result.push(line);
-  }
-
-  // Trim trailing empty lines
-  while (result.length > 0 && result[result.length - 1].trim() === '') {
-    result.pop();
-  }
-
-  return result.length > 0 ? result.join('\n') : text;
-}
-
-/**
- * Build HTML body for the reply forward wrapper email.
- * Clean, minimal — just metadata header + reply content.
- */
-function buildReplyForwardHtml({ senderEmail, senderName, campaignName, replyBody, replyTime }) {
-  const escapedBody = (replyBody || '(no content)')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/\n/g, '<br>');
-
-  return `
-<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; color: #333;">
-  <div style="font-size: 13px; color: #64748b; margin-bottom: 16px;">
-    <strong>From:</strong> ${senderName || senderEmail} &lt;${senderEmail}&gt;<br>
-    <strong>Campaign:</strong> ${campaignName || '(unknown)'}<br>
-    <strong>Date:</strong> ${replyTime.toISOString().replace('T', ' ').substring(0, 19)} UTC
-  </div>
-
-  <div style="font-size: 14px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;">
-${escapedBody}
-  </div>
-</div>`;
-}
-
-/**
- * Forward reply to the organizer's real inbox as a wrapper email.
- * Uses the campaign's sender_identity to determine the forward target.
+ * Forward reply to the organizer's real inbox.
+ * Clean forward — customer's body as-is, no metadata, no tracking, no wrapper HTML.
+ *
+ * Headers:
+ *   From: "{customer name} via LİFFY" <notify@liffy.app>
+ *   Reply-To: customer's real email (salesperson can hit Reply → goes to customer)
+ *   Subject: original subject as-is (dedup "Re: Re:" → "Re:")
+ *
+ * Body:
+ *   ↩️ Reply from {email}
+ *   ---
+ *   {customer's body — HTML or text, as-is, no modifications}
+ *
  * Never throws — all errors are caught and logged.
  *
  * Mail loop prevention:
- * - Wrapper is sent FROM notify@liffy.app (or FORWARD_FROM_EMAIL env var) — no VERP match possible
+ * - Wrapper is sent FROM notify@liffy.app — no VERP match possible
  * - Auto-reply to notify@liffy.app will not match any VERP pattern
- * - Even if it somehow arrives at /inbound, parseVerpAddress() returns null → skipped
  *
  * Multi-tenant safety:
  * - Forward target derived from campaign → sender_identity (organizer-scoped)
  * - SendGrid API key from the organizer's own account
  */
-async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyTime }) {
+async function forwardReplyToOrganizer({ campaignId, from, subject, text, html, replyTime }) {
   try {
     // Lookup campaign → sender_identity → organizer → creator in one query
     const res = await db.query(
@@ -563,7 +501,7 @@ async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyT
       return;
     }
 
-    const { campaign_name, reply_to, from_email, sendgrid_api_key, creator_email } = res.rows[0];
+    const { reply_to, from_email, sendgrid_api_key, creator_email } = res.rows[0];
     // Forward target priority: explicit reply_to > from_email (if not noreply) > campaign creator email
     const isNoreply = from_email && /^(noreply|no-reply)/i.test(from_email);
     const forwardTo = reply_to || (isNoreply ? null : from_email) || creator_email || from_email;
@@ -580,46 +518,64 @@ async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyT
 
     const senderEmail = extractEmail(from);
     const senderName = extractName(from);
-    const replyBody = stripQuotedHistory(text) || null;
 
-    const forwardSubject = `Re: ${subject || '(no subject)'}`;
+    // Subject: use as-is, dedup "Re: Re:" → "Re:"
+    let forwardSubject = subject || '(no subject)';
+    forwardSubject = forwardSubject.replace(/^(Re:\s*)+/i, 'Re: ');
 
-    // Display name: "Reply: Raffaella Presciani" — clear indicator this is a forwarded reply
+    // Display name: "Yaprak Guzelcik via LİFFY"
     const displayName = senderName && senderName !== senderEmail
-      ? `Reply: ${senderName}`
-      : `Reply: ${senderEmail}`;
+      ? `${senderName} via LİFFY`
+      : `${senderEmail} via LİFFY`;
 
-    const forwardHtml = buildReplyForwardHtml({
-      senderEmail,
-      senderName,
-      campaignName: campaign_name,
-      replyBody,
-      replyTime,
-    });
+    // Info line
+    const infoLine = `↩️ Reply from ${senderEmail}`;
 
-    const forwardText = [
-      `From: ${senderName || senderEmail} <${senderEmail}>`,
-      `Campaign: ${campaign_name || '(unknown)'}`,
-      `Date: ${replyTime.toISOString().replace('T', ' ').substring(0, 19)} UTC`,
-      ``,
-      replyBody || '(no content)',
-    ].join('\n');
+    // Build body — HTML preferred (preserves signature formatting), text fallback
+    const customerHtml = html;
+    const customerText = text;
+    const isHtmlBody = !!customerHtml;
 
-    const result = await sendEmail({
+    const sgMail = require('@sendgrid/mail');
+    sgMail.setApiKey(sendgrid_api_key);
+
+    const msg = {
       to: forwardTo,
+      from: {
+        email: process.env.FORWARD_FROM_EMAIL || 'notify@liffy.app',
+        name: displayName,
+      },
+      replyTo: {
+        email: senderEmail,
+        name: senderName || senderEmail,
+      },
       subject: forwardSubject,
-      html: forwardHtml,
-      text: forwardText,
-      from_email: process.env.FORWARD_FROM_EMAIL || 'notify@liffy.app',
-      from_name: displayName,
-      reply_to: senderEmail, // Organizer can hit Reply to respond directly
-      sendgrid_api_key: sendgrid_api_key,
-    });
+      // NO tracking — forward should be invisible
+      trackingSettings: {
+        clickTracking: { enable: false },
+        openTracking: { enable: false },
+      },
+    };
 
-    if (result && result.success) {
+    if (isHtmlBody) {
+      // HTML body: minimal info line + separator + customer's HTML as-is
+      msg.html = `<p style="color:#666;font-size:12px;margin-bottom:8px;">${infoLine}</p><hr style="border:none;border-top:1px solid #eee;margin:12px 0;">${customerHtml}`;
+      // Also provide plain text fallback
+      if (customerText) {
+        msg.text = `${infoLine}\n\n---\n\n${customerText}`;
+      }
+    } else {
+      // Plain text only
+      msg.text = `${infoLine}\n\n---\n\n${customerText || '(empty reply)'}`;
+    }
+
+    const response = await sgMail.send(msg);
+    const success = response && response[0] && response[0].statusCode >= 200 && response[0].statusCode < 300;
+
+    if (success) {
       console.log(`  📤 Reply forwarded to ${forwardTo} (from: ${senderEmail})`);
     } else {
-      console.log(`  ⚠️ Forward failed to ${forwardTo}: ${result?.error || 'unknown error'}`);
+      console.log(`  ⚠️ Forward failed to ${forwardTo}: status ${response?.[0]?.statusCode}`);
     }
   } catch (err) {
     // Never break the inbound webhook flow
@@ -678,7 +634,7 @@ router.post(
       return res.status(200).send('OK');
     }
 
-    const { from, to, subject, text, headers } = req.body;
+    const { from, to, subject, text, html, headers } = req.body;
 
     console.log(`📨 Inbound email received — from: ${from}, to: ${to}, subject: ${subject}`);
 
@@ -877,6 +833,7 @@ router.post(
       from,
       subject,
       text,
+      html,
       replyTime,
     });
 
