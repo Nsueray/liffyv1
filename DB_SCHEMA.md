@@ -1,6 +1,6 @@
 # Liffy DB Schema Guide
 
-> 31 tables, 37 migrations, PostgreSQL 17 (Render hosted)
+> 31 tables, 40 migrations, PostgreSQL 17 (Render hosted)
 > All PKs: UUID via `gen_random_uuid()`. All tables include `organizer_id` for multi-tenant isolation.
 
 ---
@@ -45,7 +45,8 @@
 ```
 organizers ──┬── users ──┬── contact_tasks (assigned_to, created_by)
              │           ├── contact_activities (user_id)
-             │           └── action_items (assigned_to, resolved_by)
+             │           ├── action_items (assigned_to, resolved_by)
+             │           └── users (via reports_to — recursive hierarchy, ADR-015)
              ├── sender_identities
              ├── email_templates
              ├── campaigns ──┬── campaign_recipients
@@ -114,15 +115,17 @@ Multi-tenant root table. Every other table references `organizer_id`.
 | `organizer_id` | UUID | FK → organizers, NOT NULL | |
 | `email` | VARCHAR(255) | UNIQUE, NOT NULL | Login email |
 | `password_hash` | TEXT | NOT NULL | bcrypt hash |
-| `role` | VARCHAR(20) | NOT NULL, DEFAULT 'user' | owner, admin, user |
+| `role` | VARCHAR(20) | NOT NULL, DEFAULT 'user' | owner, admin, manager, sales_rep (ADR-015) |
 | `is_active` | BOOLEAN | DEFAULT TRUE | |
 | `daily_email_limit` | INTEGER | NOT NULL, DEFAULT 500 | Per-user daily send cap (migration 032) |
 | `first_name` | TEXT | | (migration 032) |
 | `last_name` | TEXT | | (migration 032) |
+| `reports_to` | UUID | FK → users, ON DELETE SET NULL | Hierarchical manager (migration 038, ADR-015) |
+| `permissions` | JSONB | | Per-user feature permissions (migration 039, ADR-015) |
 | `created_at` | TIMESTAMP | DEFAULT NOW() | |
 
 **Indexes:** `idx_users_organizer_id`
-**Read by:** Auth middleware (login), user management, daily email limit check
+**Read by:** Auth middleware (login), user management, daily email limit check, getHierarchicalScope (recursive CTE)
 **Written by:** Registration, POST/PATCH /api/users, reset-password
 **UI pages:** Login (implicit), Admin panel
 
@@ -715,6 +718,9 @@ verify-list → verification_queue INSERT (pending)
 | 035 | `035_create_sequences.sql` | campaign_sequences, sequence_recipients, ALTER campaigns (+campaign_type, +sequence_config) |
 | 036 | `036_allow_null_template_id.sql` | ALTER campaigns (DROP NOT NULL on template_id) |
 | 037 | `037_create_action_items.sql` | action_items (6 trigger reasons, priority 1-4, dedup partial unique index) |
+| 038 | `038_add_reports_to.sql` | ALTER users (+reports_to UUID FK→users) — ADR-015 hierarchical team structure |
+| 039 | `039_add_user_permissions.sql` | ALTER users (+permissions JSONB) — per-user feature permissions (ADR-015) |
+| 040 | `040_template_sender_visibility.sql` | ALTER email_templates (+visibility, +created_by_user_id), ALTER sender_identities (+visibility) — upward visibility scope (ADR-015) |
 
 ---
 

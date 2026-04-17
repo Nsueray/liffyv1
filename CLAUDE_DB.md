@@ -40,7 +40,7 @@ Engagement is stored as events, not scores.
 
 ## Database — Current State (31 tables, 40 migrations)
 
-**Production stats (2026-04-17):** ~75,399 persons, ~85,603 affiliations
+**Production stats (2026-04-18):** ~75,399 persons, ~85,603 affiliations. 3 users: Suer (owner), Elif (manager, reports_to: Suer), Bengü (sales_rep, reports_to: Elif).
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -229,7 +229,8 @@ campaigns ──┬── campaign_recipients ──── campaign_events
             ├── campaign_sequences
             └── sequence_recipients
 
-users ──── action_items (via assigned_to)
+users ──┬── action_items (via assigned_to)
+       └── users (via reports_to — recursive hierarchy, ADR-015)
 
 organizers ──── mining_jobs ──── mining_results
                                  └── mining_job_logs

@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-17*
+*Updated: 2026-04-18*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -79,6 +79,7 @@
 | C4 | Campaign analytics Sent=0 — worker not recording sent events to campaign_events | P1 | ✅ DONE |
 | C5 | Import-all deadlock cascade — PG transaction aborted state causes batch-wide failure | P1 | ✅ DONE |
 | C6 | Import-all background crash silent failure — setImmediate + async .catch() + import_status='failed' update | P1 | ✅ DONE |
+| C7 | Lists created_by_user_id NULL — 4 list creation paths missing created_by_user_id, invisible to non-owner users | P1 | ✅ DONE |
 
 ## D. TECHNICAL DEBT
 
@@ -138,27 +139,34 @@
 | G11 | Reply UX — VERP display name (sender name in reply-to) + forward FROM format ("Reply: Name") | P1 | ✅ DONE |
 | G12 | Reply Email Quality — click tracking disabled, reply body in timeline (2000 chars), forward fallback to creator email | P1 | ✅ DONE |
 | G13 | JWT Auth Fix — `id` vs `user_id` normalization across 28 auth middleware instances (critical production bug) | P1 | ✅ DONE |
+| G14 | Reply Detection v2 — VERP→Gmail migration: salesperson's real Reply-To + hidden HTML tag + Gmail auto-forward. Forward removed. | P1 | ✅ DONE |
 
 ### Context
 
-**Current state:**
+**Current state (Reply Detection v2):**
 - ✅ Click tracking works (campaign_events, event_type='click')
 - ✅ Open tracking works (campaign_events, event_type='open')
-- ✅ Reply detection backend COMPLETE — all stages implemented (Stages 1-3)
-- ✅ VERP reply-to active in both campaignSend.js and worker.js (short format: 8 hex chars, with sender display name)
-- ✅ Inbound webhook with URL path secret + envelope domain validation + multer multipart
-- ✅ Wrapper forward to organizer inbox (FROM "Reply: {name}" notify@liffy.app, reply-to = original sender)
-- ✅ Collision guard on VERP prefix lookup (LIMIT 2 + >1 match = skip)
-- ✅ DNS + SendGrid config DONE — reply.liffy.app MX + Inbound Parse URL + env var configured
+- ✅ Reply detection v2 LIVE — hidden tag + Gmail auto-forward (replaces VERP)
+- ✅ Reply-To = salesperson's real email (natural Gmail thread)
+- ✅ Hidden HTML comment tag: `<!--LIFFY:c-{8hex}-r-{8hex}-->` in email body
+- ✅ Custom headers: X-Liffy-CID, X-Liffy-RID on outbound emails
+- ✅ Inbound Parse: `parseLiffyTag()` (primary) + VERP envelope (fallback for in-flight)
+- ✅ Forward REMOVED — salesperson has reply in Gmail, LİFFY only records + triggers Action Engine
+- ✅ DNS + SendGrid config DONE — parse@inbound.liffy.app Inbound Parse URL
 - ✅ Unsubscribe tracking UI — /campaigns/unsubscribes page with stats, search, source filter, campaign attribution
 
-**Reply detection approach:** Hybrid VERP + SendGrid Inbound Parse
-- VERP format: `c-{8 hex}-r-{8 hex}@reply.liffy.app` (RFC 5321 safe, 22 char local-part)
+**Reply detection approach:** Hidden HTML comment tag + Gmail auto-forward
+- Tag format: `<!--LIFFY:c-{8 hex}-r-{8 hex}-->` (invisible in rendered email)
 - Endpoint: `POST /api/webhooks/inbound/:secret` (multer multipart middleware)
+- Detection: parseLiffyTag() from body (primary), parseVerpAddress() from envelope (fallback)
 - Auto-reply filter: RFC 3834 headers, OOO subjects, mailer-daemon from patterns
-- Forward: wrapper email FROM notify@liffy.app TO organizer (reply-to = original sender)
+- No forward — salesperson gets reply directly via Reply-To
 
-**Live:** Reply detection is fully operational. DNS, SendGrid Inbound Parse, and env vars all configured.
+**Gmail filter required:** Admin must configure Gmail Content Compliance rule:
+- Condition: Body contains `LIFFY:c-`
+- Action: Also deliver to `parse@inbound.liffy.app`
+
+**Live:** Reply detection v2 is fully operational. Gmail filter pending admin setup.
 
 **Unsubscribe:**
 - ✅ SendGrid handles unsubscribe links in emails

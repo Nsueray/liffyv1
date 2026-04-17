@@ -73,6 +73,10 @@
 - **Click Tracking Disabled** — SendGrid click tracking off (`clickTracking: { enable: false }`), open tracking remains. URLs stay clean in reply threads.
 - **Reply Forward Fallback** — Forward target priority: reply_to → from_email (if not noreply) → campaign creator email. JOINs users table for creator_email. Prevents replies going to noreply@.
 - **JWT Auth Fix** — `payload.user_id = payload.user_id || payload.id` normalization across 28 auth middleware instances. Fixed critical bug where Elif saw 0 data due to JWT `id` vs `user_id` mismatch.
+- **Reply Detection v2** — VERP Reply-To replaced with salesperson's real email + hidden HTML comment tag `<!--LIFFY:c-{8hex}-r-{8hex}-->` + Gmail auto-forward. Forward removed entirely. 3 send paths (campaignSend, worker, sequenceService) + inbound handler updated. Admin info endpoint added.
+- **Lists created_by_user_id Fix** — 4 list creation paths (CSV import, import-all, leads import, URL miner) now set `created_by_user_id` + `visibility='shared'`. Fixes bug where Elif couldn't see her own lists.
+- **Data Ownership Transfer** — Templates, senders, campaigns transferred from Suer to Elif via SQL UPDATE. One-time fix for pre-isolation resources.
+- **Contacts Page Filters** — Company autocomplete (ILIKE on affiliations.company_name) + industry dropdown via LATERAL JOIN. Works with existing search/verification filters.
 
 ---
 

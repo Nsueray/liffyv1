@@ -25,7 +25,7 @@ If any implementation conflicts with the principles below, the principles win.
 - **Database:** PostgreSQL 17 (Render hosted)
 - **Frontend:** Next.js + TypeScript (liffy-ui repo) / Bootstrap 5 + CDN for static assets
 - **Auth:** JWT (jsonwebtoken) + bcrypt — 7-day token, hierarchical role-based access (owner/admin/manager/sales_rep) with recursive CTE team visibility (ADR-015)
-- **Email:** SendGrid API only (nodemailer removed)
+- **Email:** SendGrid API only (nodemailer removed). Reply-To = salesperson's real email (v2). Reply detection via hidden HTML comment + Gmail auto-forward to SendGrid Inbound Parse.
 - **Deployment:** Render + custom domain (liffy.app, api.liffy.app, cdn.liffy.app)
 - **Design:** Static assets served from `https://cdn.liffy.app/` (logo.png, style.css)
 - **SQL:** Raw SQL with `pg` library. NO ORMs (no Sequelize, no Prisma, no Knex)
@@ -181,6 +181,8 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 24. ~~ADR-015 Hierarchical Permissions~~ ✅ DONE — recursive CTE team visibility, reports_to chain, 4 roles (owner/admin/manager/sales_rep), migrations 038-039-040, 11 routes updated
 25. ~~Reply Email Quality~~ ✅ DONE — click tracking disabled, reply body in timeline (2000 chars), forward fallback to creator email, SendGrid tracking settings
 26. ~~JWT Auth Fix~~ ✅ DONE — `id` vs `user_id` normalization across 28 auth middleware instances
+27. ~~Reply Detection v2~~ ✅ DONE — VERP Reply-To → salesperson's real email, hidden HTML comment tag (`<!--LIFFY:c-{8hex}-r-{8hex}-->`), Gmail auto-forward to parse@inbound.liffy.app, LİFFY forward removed (no duplicate), admin Gmail filter info endpoint
+28. ~~Lists created_by_user_id Fix~~ ✅ DONE — 4 list creation paths missing created_by_user_id → NULL → invisible to non-owner users
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for detailed task tracking.
 

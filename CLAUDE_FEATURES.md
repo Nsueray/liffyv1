@@ -1573,34 +1573,81 @@ Added company_name and industry filters to GET /api/persons endpoint.
 
 ---
 
-## Reply Email Quality (2026-04-17)
+## Reply Detection Architecture v2 (2026-04-18)
 
-**Status:** LIVE.
+**Status:** LIVE. Replaces VERP-based reply detection (v1).
 
-Improvements to reply detection, forwarding, and display:
+### Why the change
+AI consensus (ChatGPT + Gemini): "VERP Reply-To breaks natural human conversation; mature platforms (Outreach, SalesLoft, Apollo) use mailbox integration." Customer saw garip `@reply.liffy.app` address, broken signature formatting, campaign metadata in body. Blueprint Principle 2: "Zero Context Switching" — natural email thread.
 
-**1. Click tracking disabled:**
-- SendGrid `clickTracking: { enable: false }` in mailer.js
-- URLs in email body stay clean (no SendGrid redirect wrapping)
-- Open tracking remains enabled (invisible pixel)
+### Old system (v1 — VERP-based, DEPRECATED)
+- Reply-To: `c-{8hex}-r-{8hex}@reply.liffy.app` (VERP address)
+- Customer replies → goes to reply.liffy.app → SendGrid Inbound Parse → LİFFY detects
+- LİFFY forwards reply to salesperson: `From: "Reply: Name" <notify@liffy.app>`
+- Forward had campaign metadata, wrapper HTML, tracking pixel, broken formatting
 
-**2. Reply body in timeline:**
-- Timeline query (`timeline.js`) now includes `provider_response` as `meta` for reply events
-- ContactDrawer shows reply body (truncated to 200 chars) with red left border
-- Fallback text "Reply detected — check email for details" when no body stored
+### New system (v2 — Gmail Auto-Forward)
+- Reply-To: salesperson's real email (e.g. `elif@elan-expo.com`)
+- Body contains invisible HTML comment: `<!--LIFFY:c-{8hex}-r-{8hex}-->`
+- Custom headers: `X-Liffy-CID`, `X-Liffy-RID` (additional tracking)
+- Customer replies → goes to salesperson's Gmail inbox (natural thread)
+- Gmail auto-forward rule → `parse@inbound.liffy.app`
+- Inbound Parse → `parseLiffyTag()` from body (primary) or VERP envelope (fallback for in-flight emails)
+- Records: `campaign_events` INSERT + `prospect_intents` INSERT + `contact_activities` INSERT + pipeline auto-stage
+- Action Engine: `reply_received` trigger evaluated
+- **NO forward** — salesperson already has the reply in Gmail
 
-**3. Reply body storage increased:**
-- `webhooks.js` stores reply body text up to 2000 chars (was 500)
-- Stored in `campaign_events.provider_response` JSONB (`{ text, from, subject }`)
+### Outbound email changes (3 send paths)
+| File | Old Reply-To | New Reply-To | Tag |
+|------|-------------|-------------|-----|
+| `campaignSend.js` | VERP `c-xxx-r-xxx@reply.liffy.app` | `sender.reply_to \|\| sender.from_email` | `<!--LIFFY:c-{8hex}-r-{8hex}-->` appended to HTML |
+| `worker.js` | VERP (same) | `campaign.sender_reply_to \|\| campaign.sender_email` | Same tag |
+| `sequenceService.js` | VERP `c-xxx-sr-xxx@reply.liffy.app` | `campaign.sender_reply_to \|\| campaign.from_email` | Tag with `sr-` prefix |
 
-**4. Forward target fallback:**
-- Priority: explicit `reply_to` → `from_email` (if not noreply) → campaign creator email
-- JOINs `users` table for `creator_email` via `campaigns.created_by_user_id`
-- Prevents replies going to `noreply@liffy.app`
+### Inbound parse changes (`webhooks.js`)
+1. **Primary:** `parseLiffyTag(html || text)` — regex `<!--LIFFY:c-([a-f0-9]{8})-s?r-([a-f0-9]{8})-->`
+2. **Fallback:** `parseVerpAddress()` from envelope (for emails already in flight before v2)
+3. **Forward removed:** `forwardReplyToOrganizer()` deleted (~100 lines)
+
+### Gmail filter setup (admin must configure)
+**Google Workspace (recommended):**
+Admin Console → Gmail → Compliance → Content Compliance
+- Condition: Body contains `LIFFY:c-`
+- Action: Also deliver to `parse@inbound.liffy.app`
+
+**Per-user Gmail:**
+- Settings → Filters → Create new filter
+- Has the words: `LIFFY:c-`
+- Forward to: `parse@inbound.liffy.app` + Keep in inbox
+
+### Admin info endpoint
+`GET /api/webhooks/gmail-filter-info` — returns Gmail filter setup instructions + technical details.
+Startup log: `[Reply Detection] Mode: direct Reply-To + hidden tag + Gmail filter forward`
+
+### Deleted code
+- `forwardReplyToOrganizer()` — ~100 lines (forward email builder + sender)
+- `stripQuotedHistory()` — ~40 lines (multi-language quote stripping)
+- `buildReplyForwardHtml()` — HTML template for forward wrapper
+- `extractEmail()` / `extractName()` — helper functions for forward
+- `sendEmail` import in webhooks.js — no longer needed
+
+### Reply body still available
+- Timeline query includes `provider_response` as `meta` for reply events
+- ContactDrawer shows reply body preview (200 chars) with red left border
+- Reply body stored up to 2000 chars in `campaign_events.provider_response` JSONB
+- Click tracking disabled (`clickTracking: { enable: false }` in mailer.js), open tracking remains
+
+### Phase 2 plan
+- Gmail API OAuth integration (replaces auto-forward rule)
+- Native inbox sync, no filter needed
+- Merges with Blueprint Phase 6 (Conversations/Inbox)
 
 **Files:**
-- `backend/mailer.js` — trackingSettings
-- `backend/routes/webhooks.js` — forward fallback, body storage
+- `backend/routes/campaignSend.js` — Reply-To + hidden tag + custom headers
+- `backend/worker.js` — same changes
+- `backend/services/sequenceService.js` — same changes
+- `backend/routes/webhooks.js` — parseLiffyTag(), inbound handler, admin endpoint
+- `backend/mailer.js` — click tracking disabled
 - `backend/routes/timeline.js` — provider_response in query
 - `liffy-ui/components/ContactDrawer.tsx` — reply body display
 
@@ -1621,3 +1668,47 @@ This caused `getUserContext()` to return `userId: null`, breaking all data isola
 3. Pattern 3 (1 file): `const decoded = jwt.verify(...)` → added normalization
 
 **Files:** All 28 route files + `backend/middleware/auth.js`
+
+---
+
+## Lists created_by_user_id Bug Fix (2026-04-17)
+
+**Status:** LIVE.
+
+**Root cause:** Elif created a list ("Prod Expo 2026") but `created_by_user_id` was NULL. ADR-015 visibility filter requires `created_by_user_id` to determine who can see a list — NULL makes it invisible to non-owner users.
+
+**Fix:** All 4 list creation paths now set `created_by_user_id` and `visibility='shared'`:
+
+| Path | File | Source of user_id |
+|------|------|-------------------|
+| CSV import | `backend/routes/lists.js` | `req.auth.user_id` |
+| Import-all | `backend/routes/miningResults.js` | `req.auth.user_id` |
+| Leads import | `backend/routes/leads.js` | `req.auth.user_id` |
+| URL miner auto-create | `backend/services/urlMiner.js` | `job.created_by_user_id` (no req.auth in service layer) |
+
+---
+
+## Data Ownership Transfer (2026-04-16)
+
+**Status:** DONE. One-time production operation.
+
+Transferred ownership of templates, sender identities, and campaigns from Suer to Elif using direct SQL UPDATE statements. Required because Suer (owner) created all resources before user isolation was implemented — Elif couldn't see them under ADR-015 visibility rules.
+
+---
+
+## Blueprint Implementation Progress (2026-04-17)
+
+**Blueprint Section 6 (Action Engine):** ✅ DONE — 6 triggers, priority scoring, 15-min reconciliation worker.
+**Blueprint Section 8 (Action Screen):** ✅ DONE — homepage with priority cards, filter/sort, snooze, history.
+**Blueprint Principle 2 (Zero Context Switching):** Reply Detection v2 delivers natural email threads — customer replies go to salesperson's real inbox.
+
+---
+
+## Contacts Page Filters (2026-04-16)
+
+**Status:** LIVE.
+
+Enhanced contacts page with company and industry filtering:
+- **Company autocomplete:** ILIKE search on `affiliations.company_name` via LATERAL JOIN
+- **Industry dropdown:** ILIKE search on `affiliations.industry` (populated from Zoho import normalization)
+- Both filters work alongside existing search, verification status, and exclude_invalid filters
