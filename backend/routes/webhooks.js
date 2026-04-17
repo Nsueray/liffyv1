@@ -544,14 +544,16 @@ ${escapedBody}
  */
 async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyTime }) {
   try {
-    // Lookup campaign → sender_identity → organizer in one query
+    // Lookup campaign → sender_identity → organizer → creator in one query
     const res = await db.query(
-      `SELECT c.name as campaign_name,
+      `SELECT c.name as campaign_name, c.created_by_user_id,
               s.reply_to, s.from_email, s.from_name,
-              o.sendgrid_api_key
+              o.sendgrid_api_key,
+              u.email as creator_email
        FROM campaigns c
        JOIN sender_identities s ON c.sender_id = s.id
        JOIN organizers o ON c.organizer_id = o.id
+       LEFT JOIN users u ON u.id = c.created_by_user_id
        WHERE c.id = $1`,
       [campaignId]
     );
@@ -561,8 +563,10 @@ async function forwardReplyToOrganizer({ campaignId, from, subject, text, replyT
       return;
     }
 
-    const { campaign_name, reply_to, from_email, sendgrid_api_key } = res.rows[0];
-    const forwardTo = reply_to || from_email;
+    const { campaign_name, reply_to, from_email, sendgrid_api_key, creator_email } = res.rows[0];
+    // Forward target priority: explicit reply_to > from_email (if not noreply) > campaign creator email
+    const isNoreply = from_email && /^(noreply|no-reply)/i.test(from_email);
+    const forwardTo = reply_to || (isNoreply ? null : from_email) || creator_email || from_email;
 
     if (!forwardTo) {
       console.log(`  ⚠️ Forward: no forward target (reply_to and from_email both null) — skipping`);
@@ -746,7 +750,7 @@ router.post(
       from,
       to,
       subject,
-      text: text ? text.substring(0, 500) : null, // Truncate body for storage
+      text: text ? text.substring(0, 2000) : null, // Store reply body (truncated for safety)
     };
     await recordCampaignEvent(recipient, recipient.email, 'reply', replyTime, rawEvent);
 

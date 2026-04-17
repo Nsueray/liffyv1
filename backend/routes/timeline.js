@@ -47,7 +47,8 @@ router.get('/:personId', authRequired, async (req, res) => {
           ce.url AS link_clicked,
           ce.reason AS detail,
           NULL AS user_name,
-          ce.email
+          ce.email,
+          CASE WHEN ce.event_type = 'reply' THEN ce.provider_response END AS meta
         FROM campaign_events ce
         LEFT JOIN campaigns c ON c.id = ce.campaign_id
         WHERE ce.person_id = $1 AND ce.organizer_id = $2
@@ -62,7 +63,8 @@ router.get('/:personId', authRequired, async (req, res) => {
           NULL AS link_clicked,
           cn.content AS detail,
           COALESCE(u.first_name || ' ' || u.last_name, u.email) AS user_name,
-          NULL AS email
+          NULL AS email,
+          NULL AS meta
         FROM contact_notes cn
         LEFT JOIN users u ON u.id = cn.user_id
         WHERE cn.person_id = $1 AND cn.organizer_id = $2
@@ -77,7 +79,8 @@ router.get('/:personId', authRequired, async (req, res) => {
           NULL AS link_clicked,
           ca.description AS detail,
           COALESCE(u.first_name || ' ' || u.last_name, u.email) AS user_name,
-          NULL AS email
+          NULL AS email,
+          NULL AS meta
         FROM contact_activities ca
         LEFT JOIN users u ON u.id = ca.user_id
         WHERE ca.person_id = $1 AND ca.organizer_id = $2

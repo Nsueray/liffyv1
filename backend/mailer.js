@@ -91,6 +91,13 @@ const sendEmail = async ({
       msg.replyTo = replyToEmail;
     }
 
+    // Tracking: keep open tracking (invisible pixel), disable click tracking
+    // Click tracking wraps URLs in SendGrid redirects which look ugly in reply threads
+    msg.trackingSettings = {
+      clickTracking: { enable: false },
+      openTracking: { enable: true },
+    };
+
     // ============================================================
     // LIST-UNSUBSCRIBE HEADERS (RFC 8058)
     // ============================================================
