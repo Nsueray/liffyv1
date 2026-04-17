@@ -216,21 +216,25 @@ async function processSequenceStep(seqRecipient) {
   // 7) Headers
   const unsubHeaders = getListUnsubscribeHeaders(email, organizer_id, campaign.from_email);
 
-  // 8) VERP reply-to (same pattern as campaignSend.js)
-  const verpReplyTo = {
-    email: `c-${campaign_id.slice(0, 8)}-sr-${id.slice(0, 8)}@reply.liffy.app`,
-    name: campaign.from_name || 'Reply'
-  };
+  // 8) Reply-To = salesperson's real email (customer replies go directly to their inbox)
+  const replyToAddr = campaign.sender_reply_to || campaign.from_email;
+
+  // 8b) Tracking tag — hidden HTML comment with campaign/recipient IDs
+  const liffyTag = `<!--LIFFY:c-${campaign_id.slice(0, 8)}-sr-${id.slice(0, 8)}-->`;
+
+  // 8c) Custom headers for reply tracking
+  unsubHeaders['X-Liffy-CID'] = campaign_id.slice(0, 8);
+  unsubHeaders['X-Liffy-RID'] = id.slice(0, 8);
 
   // 9) Send via SendGrid
   const mailResult = await sendEmail({
     to: email,
     subject: personalizedSubject,
     text: compliance.text,
-    html: compliance.html,
+    html: compliance.html + liffyTag,
     from_name: campaign.from_name,
     from_email: campaign.from_email,
-    reply_to: verpReplyTo,
+    reply_to: replyToAddr,
     sendgrid_api_key: campaign.sendgrid_api_key,
     headers: unsubHeaders
   });

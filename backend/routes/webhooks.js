@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../db');
-// sendEmail no longer used — forward uses sgMail directly for tracking control
+// sendEmail + sgMail no longer needed — Liffy no longer forwards replies
 const multer = require('multer');
 const upload = multer();
 
@@ -386,6 +386,19 @@ function parseVerpAddress(address) {
 }
 
 /**
+ * Parse hidden LIFFY tracking comment from email body.
+ * Format: <!--LIFFY:c-{8hex}-r-{8hex}--> or <!--LIFFY:c-{8hex}-sr-{8hex}-->
+ * The comment is injected into outbound emails for reply detection via Gmail auto-forward.
+ * Returns { campaignShort, recipientShort } or null if not found.
+ */
+function parseLiffyTag(body) {
+  if (!body || typeof body !== 'string') return null;
+  const match = body.match(/<!--LIFFY:c-([a-f0-9]{8})-s?r-([a-f0-9]{8})-->/i);
+  if (!match) return null;
+  return { campaignShort: match[1].toLowerCase(), recipientShort: match[2].toLowerCase() };
+}
+
+/**
  * Detect auto-replies (OOO, mailer-daemon, noreply, etc.) to avoid
  * creating false prospect intents.
  *
@@ -438,150 +451,6 @@ function isAutoReply({ subject, headers, from }) {
   return false;
 }
 
-/**
- * Extract bare email address from "Name <email>" or plain "email" format.
- */
-function extractEmail(fromField) {
-  if (!fromField) return null;
-  const match = fromField.match(/<([^>]+)>/);
-  return match ? match[1].trim() : fromField.trim();
-}
-
-/**
- * Extract display name from "Name <email>" format. Returns email if no name.
- */
-function extractName(fromField) {
-  if (!fromField) return null;
-  const match = fromField.match(/^([^<]+)<[^>]+>/);
-  return match ? match[1].trim().replace(/^"|"$/g, '') : extractEmail(fromField);
-}
-
-/**
- * Forward reply to the organizer's real inbox.
- * Clean forward — customer's body as-is, no metadata, no tracking, no wrapper HTML.
- *
- * Headers:
- *   From: "{customer name} via LİFFY" <notify@liffy.app>
- *   Reply-To: customer's real email (salesperson can hit Reply → goes to customer)
- *   Subject: original subject as-is (dedup "Re: Re:" → "Re:")
- *
- * Body:
- *   ↩️ Reply from {email}
- *   ---
- *   {customer's body — HTML or text, as-is, no modifications}
- *
- * Never throws — all errors are caught and logged.
- *
- * Mail loop prevention:
- * - Wrapper is sent FROM notify@liffy.app — no VERP match possible
- * - Auto-reply to notify@liffy.app will not match any VERP pattern
- *
- * Multi-tenant safety:
- * - Forward target derived from campaign → sender_identity (organizer-scoped)
- * - SendGrid API key from the organizer's own account
- */
-async function forwardReplyToOrganizer({ campaignId, from, subject, text, html, replyTime }) {
-  try {
-    // Lookup campaign → sender_identity → organizer → creator in one query
-    const res = await db.query(
-      `SELECT c.name as campaign_name, c.created_by_user_id,
-              s.reply_to, s.from_email, s.from_name,
-              o.sendgrid_api_key,
-              u.email as creator_email
-       FROM campaigns c
-       JOIN sender_identities s ON c.sender_id = s.id
-       JOIN organizers o ON c.organizer_id = o.id
-       LEFT JOIN users u ON u.id = c.created_by_user_id
-       WHERE c.id = $1`,
-      [campaignId]
-    );
-
-    if (res.rows.length === 0) {
-      console.log(`  ⚠️ Forward: campaign/sender not found for ${campaignId} — skipping`);
-      return;
-    }
-
-    const { reply_to, from_email, sendgrid_api_key, creator_email } = res.rows[0];
-    // Forward target priority: explicit reply_to > from_email (if not noreply) > campaign creator email
-    const isNoreply = from_email && /^(noreply|no-reply)/i.test(from_email);
-    const forwardTo = reply_to || (isNoreply ? null : from_email) || creator_email || from_email;
-
-    if (!forwardTo) {
-      console.log(`  ⚠️ Forward: no forward target (reply_to and from_email both null) — skipping`);
-      return;
-    }
-
-    if (!sendgrid_api_key) {
-      console.log(`  ⚠️ Forward: no SendGrid API key for organizer — skipping`);
-      return;
-    }
-
-    const senderEmail = extractEmail(from);
-    const senderName = extractName(from);
-
-    // Subject: use as-is, dedup "Re: Re:" → "Re:"
-    let forwardSubject = subject || '(no subject)';
-    forwardSubject = forwardSubject.replace(/^(Re:\s*)+/i, 'Re: ');
-
-    // Display name: "Yaprak Guzelcik via LİFFY"
-    const displayName = senderName && senderName !== senderEmail
-      ? `${senderName} via LİFFY`
-      : `${senderEmail} via LİFFY`;
-
-    // Info line
-    const infoLine = `↩️ Reply from ${senderEmail}`;
-
-    // Build body — HTML preferred (preserves signature formatting), text fallback
-    const customerHtml = html;
-    const customerText = text;
-    const isHtmlBody = !!customerHtml;
-
-    const sgMail = require('@sendgrid/mail');
-    sgMail.setApiKey(sendgrid_api_key);
-
-    const msg = {
-      to: forwardTo,
-      from: {
-        email: process.env.FORWARD_FROM_EMAIL || 'notify@liffy.app',
-        name: displayName,
-      },
-      replyTo: {
-        email: senderEmail,
-        name: senderName || senderEmail,
-      },
-      subject: forwardSubject,
-      // NO tracking — forward should be invisible
-      trackingSettings: {
-        clickTracking: { enable: false },
-        openTracking: { enable: false },
-      },
-    };
-
-    if (isHtmlBody) {
-      // HTML body: minimal info line + separator + customer's HTML as-is
-      msg.html = `<p style="color:#666;font-size:12px;margin-bottom:8px;">${infoLine}</p><hr style="border:none;border-top:1px solid #eee;margin:12px 0;">${customerHtml}`;
-      // Also provide plain text fallback
-      if (customerText) {
-        msg.text = `${infoLine}\n\n---\n\n${customerText}`;
-      }
-    } else {
-      // Plain text only
-      msg.text = `${infoLine}\n\n---\n\n${customerText || '(empty reply)'}`;
-    }
-
-    const response = await sgMail.send(msg);
-    const success = response && response[0] && response[0].statusCode >= 200 && response[0].statusCode < 300;
-
-    if (success) {
-      console.log(`  📤 Reply forwarded to ${forwardTo} (from: ${senderEmail})`);
-    } else {
-      console.log(`  ⚠️ Forward failed to ${forwardTo}: status ${response?.[0]?.statusCode}`);
-    }
-  } catch (err) {
-    // Never break the inbound webhook flow
-    console.error(`  ❌ Forward error for campaign ${campaignId}:`, err.message);
-  }
-}
 
 /**
  * POST /api/webhooks/inbound/:secret
@@ -595,13 +464,13 @@ async function forwardReplyToOrganizer({ campaignId, from, subject, text, html, 
  *
  * Flow:
  * 1. Validate shared secret
- * 2. Extract VERP from envelope.to or to field
+ * 2. Extract tracking IDs: hidden comment tag in body (primary) or VERP envelope (fallback)
  * 3. Filter auto-replies
- * 4. Look up campaign_recipient by VERP (campaign_id + recipient_id)
+ * 4. Look up campaign_recipient by short IDs
  * 5. Record reply as campaign_event (event_type='reply')
  * 6. Record prospect_intent (intent_type='reply')
- * 7. Forward reply to organizer's inbox (wrapper email)
- * 8. Do NOT update campaign_recipients.status
+ * 7. Update status, contact_activities, pipeline auto-stage
+ * 8. NO forward — salesperson already has the reply in their inbox (Reply-To = their email)
  */
 router.post(
   '/api/webhooks/inbound/:secret',
@@ -615,59 +484,63 @@ router.post(
       return res.status(200).send('OK');
     }
 
-    // Envelope domain validation — only accept emails to @reply.liffy.app
-    const envelope = typeof req.body.envelope === 'string'
-      ? JSON.parse(req.body.envelope || '{}')
-      : req.body.envelope || {};
-
-    const toAddresses = Array.isArray(envelope?.to)
-      ? envelope.to
-      : [envelope?.to].filter(Boolean);
-
-    const validDomain = toAddresses.some(addr =>
-      typeof addr === 'string' &&
-      addr.toLowerCase().endsWith('@reply.liffy.app')
-    );
-
-    if (!validDomain) {
-      console.warn('⚠️ Inbound webhook: invalid envelope domain');
-      return res.status(200).send('OK');
-    }
-
     const { from, to, subject, text, html, headers } = req.body;
 
     console.log(`📨 Inbound email received — from: ${from}, to: ${to}, subject: ${subject}`);
 
-    // 1. Extract VERP address from envelope (preferred) or to field
-    let verpAddress = null;
-    for (const addr of toAddresses) {
-      const parsed = parseVerpAddress(addr);
-      if (parsed) {
-        verpAddress = parsed;
-        break;
-      }
+    // 1. Extract tracking IDs — try hidden comment tag in body first, VERP envelope as fallback
+    let trackingIds = null;
+    let trackingSource = null;
+
+    // 1a. Primary: hidden comment tag in HTML or text body (works with Gmail auto-forward)
+    trackingIds = parseLiffyTag(html) || parseLiffyTag(text);
+    if (trackingIds) {
+      trackingSource = 'tag';
+      console.log(`  🏷️ Liffy tag found — campaign: ${trackingIds.campaignShort}, recipient: ${trackingIds.recipientShort}`);
     }
 
-    // Fallback: try the to field directly
-    if (!verpAddress && to) {
-      // to field may contain "Name <email>" or just "email", possibly comma-separated
-      const toFallback = to.split(',').map(a => a.trim());
-      for (const addr of toFallback) {
-        const emailMatch = addr.match(/<([^>]+)>/) || [null, addr];
-        const parsed = parseVerpAddress(emailMatch[1]);
+    // 1b. Fallback: VERP envelope address (legacy, for emails already in flight)
+    if (!trackingIds) {
+      const envelope = typeof req.body.envelope === 'string'
+        ? JSON.parse(req.body.envelope || '{}')
+        : req.body.envelope || {};
+
+      const toAddresses = Array.isArray(envelope?.to)
+        ? envelope.to
+        : [envelope?.to].filter(Boolean);
+
+      for (const addr of toAddresses) {
+        const parsed = parseVerpAddress(addr);
         if (parsed) {
-          verpAddress = parsed;
+          trackingIds = parsed;
+          trackingSource = 'verp';
           break;
         }
       }
+
+      // Try the to field directly
+      if (!trackingIds && to) {
+        const toFallback = to.split(',').map(a => a.trim());
+        for (const addr of toFallback) {
+          const emailMatch = addr.match(/<([^>]+)>/) || [null, addr];
+          const parsed = parseVerpAddress(emailMatch[1]);
+          if (parsed) {
+            trackingIds = parsed;
+            trackingSource = 'verp';
+            break;
+          }
+        }
+      }
+
+      if (trackingIds) {
+        console.log(`  🔗 VERP fallback — campaign: ${trackingIds.campaignShort}, recipient: ${trackingIds.recipientShort}`);
+      }
     }
 
-    if (!verpAddress) {
-      console.log('  ⚠️ No VERP address found in inbound email — skipping');
+    if (!trackingIds) {
+      console.log('  ⚠️ No tracking IDs found (no tag, no VERP) — skipping');
       return res.status(200).send('OK');
     }
-
-    console.log(`  🔗 VERP parsed — campaign: ${verpAddress.campaignShort}, recipient: ${verpAddress.recipientShort}`);
 
     // 2. Filter auto-replies
     if (isAutoReply({ subject, headers, from })) {
@@ -675,24 +548,24 @@ router.post(
       return res.status(200).send('OK');
     }
 
-    // 3. Look up campaign_recipient by VERP (short prefix match, LIMIT 2 for collision detection)
+    // 3. Look up campaign_recipient by short prefix match (LIMIT 2 for collision detection)
     const recipientRes = await db.query(
       `SELECT cr.id, cr.campaign_id, cr.organizer_id, cr.email, cr.status
        FROM campaign_recipients cr
        WHERE LEFT(cr.campaign_id::text, 8) = $1
          AND LEFT(cr.id::text, 8) = $2
        LIMIT 2`,
-      [verpAddress.campaignShort, verpAddress.recipientShort]
+      [trackingIds.campaignShort, trackingIds.recipientShort]
     );
 
     if (recipientRes.rows.length === 0) {
-      console.log(`  ⚠️ No recipient found for VERP — campaign: ${verpAddress.campaignShort}, recipient: ${verpAddress.recipientShort}`);
+      console.log(`  ⚠️ No recipient found — ${trackingSource}: campaign=${trackingIds.campaignShort}, recipient=${trackingIds.recipientShort}`);
       return res.status(200).send('OK');
     }
 
     // Collision guard: if short prefix matches more than one row, refuse to process
     if (recipientRes.rows.length > 1) {
-      console.error(`  ❌ VERP collision detected — short IDs not unique: campaignShort=${verpAddress.campaignShort}, recipientShort=${verpAddress.recipientShort}, matches=${recipientRes.rows.length}`);
+      console.error(`  ❌ Collision detected — short IDs not unique: campaign=${trackingIds.campaignShort}, recipient=${trackingIds.recipientShort}, matches=${recipientRes.rows.length}`);
       return res.status(200).send('OK');
     }
 
@@ -827,15 +700,9 @@ router.post(
       console.warn('  ⚠️ Action Engine reply trigger failed:', aeErr.message);
     }
 
-    // 6c. Forward reply to organizer's inbox (best-effort, never blocks response)
-    await forwardReplyToOrganizer({
-      campaignId: recipient.campaign_id,
-      from,
-      subject,
-      text,
-      html,
-      replyTime,
-    });
+    // 6c. NO forward — salesperson already has the reply in their Gmail inbox
+    // (Reply-To = salesperson's real email, so customer replies go directly to them)
+    console.log(`  ✉️ Reply processed (no forward — salesperson has it via direct Reply-To)`);
 
     return res.status(200).send('OK');
 
@@ -845,6 +712,49 @@ router.post(
   }
 });
 
+
+// ============================================================
+// GMAIL FILTER SETUP INFO (Admin Endpoint)
+// ============================================================
+
+/**
+ * GET /api/webhooks/gmail-filter-info
+ * Returns Gmail filter setup instructions for reply detection.
+ * Salesperson must set up a Gmail filter to forward replies to SendGrid Inbound Parse.
+ */
+router.get('/api/webhooks/gmail-filter-info', (req, res) => {
+  const inboundSecret = process.env.INBOUND_WEBHOOK_SECRET;
+  const parseEmail = 'parse@inbound.liffy.app';
+  const inboundUrl = inboundSecret
+    ? `https://api.liffy.app/api/webhooks/inbound/${inboundSecret}`
+    : '(INBOUND_WEBHOOK_SECRET not configured)';
+
+  res.json({
+    title: 'Gmail Filter Setup for Reply Detection',
+    steps: [
+      '1. Open Gmail → Settings → Forwarding → Add forwarding address',
+      `2. Enter: ${parseEmail}`,
+      '3. Gmail will send a verification email to that address — ask admin to confirm',
+      '4. Go to Gmail → Settings → Filters → Create new filter',
+      '5. In "Has the words" field enter: LIFFY',
+      '6. Click "Create filter" → Check "Forward it to" → Select: ' + parseEmail,
+      '7. Also check "Never send it to Spam" and "Skip the Inbox" (optional)',
+      '8. Click "Create filter"',
+    ],
+    technical: {
+      parse_email: parseEmail,
+      inbound_url: inboundUrl,
+      tracking_method: 'Hidden HTML comment <!--LIFFY:c-{8hex}-r-{8hex}--> in email body',
+      reply_to: 'Salesperson real email (customer replies go directly to Gmail)',
+      forward_from_liffy: false,
+      note: 'Liffy does NOT forward replies. Salesperson already has them via direct Reply-To.',
+    },
+  });
+});
+
+// Log on startup
+console.log('[Reply Detection] Mode: direct Reply-To + hidden tag + Gmail filter forward');
+console.log('[Reply Detection] Salesperson Gmail filter must forward to: parse@inbound.liffy.app');
 
 // ============================================================
 // UNSUBSCRIBE ENDPOINTS

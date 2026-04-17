@@ -221,17 +221,25 @@ async function processSendingCampaigns() {
               campaign.sender_email
             );
 
-            const verpReplyTo = { email: `c-${campaign.id.slice(0,8)}-r-${r.id.slice(0,8)}@reply.liffy.app`, name: campaign.sender_name || 'Reply' };
+            // Reply-To = salesperson's real email (customer replies go directly to their inbox)
+            const replyToAddr = campaign.sender_reply_to || campaign.sender_email;
+
+            // Tracking tag — hidden HTML comment with campaign/recipient IDs
+            const liffyTag = `<!--LIFFY:c-${campaign.id.slice(0,8)}-r-${r.id.slice(0,8)}-->`;
+
+            // Custom headers for reply tracking
+            listUnsubHeaders['X-Liffy-CID'] = campaign.id.slice(0, 8);
+            listUnsubHeaders['X-Liffy-RID'] = r.id.slice(0, 8);
 
             // Send with 429 exponential backoff retry
             await sendWithRetry({
               to: r.email,
               subject: processedSubject,
-              html: complianceResult.html,
+              html: complianceResult.html + liffyTag,
               text: complianceResult.text,
               fromEmail: campaign.sender_email,
               fromName: campaign.sender_name,
-              replyTo: verpReplyTo,
+              replyTo: replyToAddr,
               sendgridApiKey: campaign.sendgrid_api_key,
               headers: listUnsubHeaders
             });

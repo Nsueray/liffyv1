@@ -170,19 +170,26 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
         // C. RFC 8058 List-Unsubscribe headers (one-click unsubscribe in Gmail/Outlook)
         const unsubHeaders = getListUnsubscribeHeaders(r.email, organizer_id, sender.from_email);
 
-        // D. VERP reply-to (short format — first 8 hex chars of each UUID for RFC 5321 compliance)
-        // Object format { email, name } so recipient sees sender name instead of cryptic VERP address
-        const verpReplyTo = { email: `c-${campaign_id.slice(0,8)}-r-${r.id.slice(0,8)}@reply.liffy.app`, name: sender.from_name || 'Reply' };
+        // D. Reply-To = salesperson's real email (customer replies go directly to their inbox)
+        // Hidden comment tag in HTML body enables Liffy to detect replies via Gmail auto-forward
+        const replyToAddr = sender.reply_to || sender.from_email;
+
+        // D2. Tracking tag — hidden HTML comment with campaign/recipient IDs
+        const liffyTag = `<!--LIFFY:c-${campaign_id.slice(0,8)}-r-${r.id.slice(0,8)}-->`;
+
+        // D3. Custom headers for reply tracking (X-Liffy-CID, X-Liffy-RID)
+        unsubHeaders['X-Liffy-CID'] = campaign_id.slice(0, 8);
+        unsubHeaders['X-Liffy-RID'] = r.id.slice(0, 8);
 
         // E. Gönderim (Mailer'a Dinamik Key Gönderiyoruz)
         const mailResp = await sendEmail({
           to: r.email,
           subject: personalizedSubject,
           text: compliance.text,
-          html: compliance.html,
+          html: compliance.html + liffyTag,
           from_name: sender.from_name,
           from_email: sender.from_email,
-          reply_to: verpReplyTo,
+          reply_to: replyToAddr,
           sendgrid_api_key: organizer.sendgrid_api_key, // ÖNEMLİ: Settings'den gelen key
           headers: unsubHeaders
         });
