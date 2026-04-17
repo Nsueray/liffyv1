@@ -61,6 +61,79 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
+// TEMPORARY DEBUG — remove after production diagnosis
+app.get('/api/debug-scope', async (req, res) => {
+  try {
+    const jwt = require('jsonwebtoken');
+    const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
+    const authHeader = req.headers.authorization;
+    if (!authHeader) return res.status(401).json({ error: 'No auth header' });
+    const token = authHeader.replace('Bearer ', '').trim();
+    const payload = jwt.verify(token, JWT_SECRET);
+
+    // What the JWT says
+    const jwtInfo = {
+      user_id: payload.user_id,
+      organizer_id: payload.organizer_id,
+      role: payload.role,
+      email: payload.email,
+      iat: new Date(payload.iat * 1000).toISOString(),
+      exp: new Date(payload.exp * 1000).toISOString(),
+    };
+
+    // What the DB says
+    const userRes = await db.query(
+      `SELECT id, email, role, reports_to, organizer_id FROM users WHERE id = $1`,
+      [payload.user_id]
+    );
+    const dbUser = userRes.rows[0] || null;
+
+    // Recursive CTE test
+    const teamRes = await db.query(
+      `WITH RECURSIVE my_team AS (
+         SELECT id, email, role FROM users WHERE id = $1
+         UNION ALL
+         SELECT u.id, u.email, u.role FROM users u JOIN my_team t ON u.reports_to = t.id
+       )
+       SELECT id, email, role FROM my_team`,
+      [payload.user_id]
+    );
+
+    // getUserContext simulation
+    const { getUserContext, isPrivileged, getHierarchicalScope } = require('./middleware/userScope');
+    const fakeReq = { auth: { user_id: payload.user_id, organizer_id: payload.organizer_id, role: payload.role } };
+    const ctx = getUserContext(fakeReq);
+    const scope = getHierarchicalScope(fakeReq, 'test_col', 1);
+
+    // Quick campaign count test
+    const campRes = await db.query(
+      `SELECT COUNT(*)::int AS cnt FROM campaigns
+       WHERE organizer_id = $1 AND created_by_user_id IN (
+         WITH RECURSIVE my_team AS (
+           SELECT id FROM users WHERE id = $2
+           UNION ALL
+           SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+         )
+         SELECT id FROM my_team
+       )`,
+      [payload.organizer_id, payload.user_id]
+    );
+
+    res.json({
+      jwt: jwtInfo,
+      db_user: dbUser,
+      recursive_team: teamRes.rows,
+      getUserContext: ctx,
+      isPrivileged: isPrivileged(fakeReq),
+      scope_sql_preview: scope.sql.substring(0, 200),
+      scope_params: scope.params,
+      campaign_count_via_cte: campRes.rows[0].cnt,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
+
 // API routes
 app.use('/api/email-templates', emailTemplatesRouter);
 app.use(emailLogsRouter);
