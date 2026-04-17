@@ -146,8 +146,8 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
         // DEBUG: Log recipient data
         console.log("[CampaignSend] Recipient:", r.email, "Name:", r.name, "Meta:", JSON.stringify(r.meta));
       try {
-        // Generate unsubscribe URL for this recipient
-        const unsubscribe_url = getUnsubscribeUrl(r.email, organizer_id);
+        // Generate unsubscribe URL for this recipient (includes campaign/recipient IDs for reply detection)
+        const unsubscribe_url = getUnsubscribeUrl(r.email, organizer_id, campaign_id, r.id);
 
         // A. Kişiselleştirme (Variable Replacement)
         const personalizedSubject = processTemplate(campaign.subject, r);
@@ -163,30 +163,25 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
           text: personalizedText,
           recipientEmail: r.email,
           organizerId: organizer_id,
+          campaignId: campaign_id,
+          recipientId: r.id,
           physicalAddress: organizer.physical_address || '',
           lang: 'en'
         });
 
         // C. RFC 8058 List-Unsubscribe headers (one-click unsubscribe in Gmail/Outlook)
-        const unsubHeaders = getListUnsubscribeHeaders(r.email, organizer_id, sender.from_email);
+        const unsubHeaders = getListUnsubscribeHeaders(r.email, organizer_id, sender.from_email, campaign_id, r.id);
 
         // D. Reply-To = salesperson's real email (customer replies go directly to their inbox)
-        // Hidden comment tag in HTML body enables Liffy to detect replies via Gmail auto-forward
+        // Reply detection relies on unsubscribe URL in quoted body (parsed by inbound handler)
         const replyToAddr = sender.reply_to || sender.from_email;
-
-        // D2. Tracking tag — hidden HTML comment with campaign/recipient IDs
-        const liffyTag = `<!--LIFFY:c-${campaign_id.slice(0,8)}-r-${r.id.slice(0,8)}-->`;
-
-        // D3. Custom headers for reply tracking (X-Liffy-CID, X-Liffy-RID)
-        unsubHeaders['X-Liffy-CID'] = campaign_id.slice(0, 8);
-        unsubHeaders['X-Liffy-RID'] = r.id.slice(0, 8);
 
         // E. Gönderim (Mailer'a Dinamik Key Gönderiyoruz)
         const mailResp = await sendEmail({
           to: r.email,
           subject: personalizedSubject,
           text: compliance.text,
-          html: compliance.html + liffyTag,
+          html: compliance.html,
           from_name: sender.from_name,
           from_email: sender.from_email,
           reply_to: replyToAddr,

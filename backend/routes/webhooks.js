@@ -386,16 +386,67 @@ function parseVerpAddress(address) {
 }
 
 /**
- * Parse hidden LIFFY tracking comment from email body.
- * Format: <!--LIFFY:c-{8hex}-r-{8hex}--> or <!--LIFFY:c-{8hex}-sr-{8hex}-->
- * The comment is injected into outbound emails for reply detection via Gmail auto-forward.
- * Returns { campaignShort, recipientShort } or null if not found.
+ * Detect reply source by parsing the unsubscribe URL from quoted email body.
+ * The unsubscribe link is always present in the original email footer, and
+ * email clients preserve it in the quoted reply body.
+ *
+ * Method 1: Parse unsubscribe link token (most reliable — full UUIDs)
+ * Method 2: From-email matching against campaign_recipients (fallback)
+ *
+ * @param {string} body - Email body (HTML or text)
+ * @param {string} fromEmail - Sender email address
+ * @returns {object|null} - { email, organizerId, campaignId, recipientId } or null
  */
-function parseLiffyTag(body) {
-  if (!body || typeof body !== 'string') return null;
-  const match = body.match(/<!--LIFFY:c-([a-f0-9]{8})-s?r-([a-f0-9]{8})-->/i);
-  if (!match) return null;
-  return { campaignShort: match[1].toLowerCase(), recipientShort: match[2].toLowerCase() };
+async function detectReplySource(body, fromEmail) {
+  // Method 1: Unsubscribe link token (always present in quoted reply)
+  const unsubMatch = (body || '').match(/api\.liffy\.app\/api\/unsubscribe\/([A-Za-z0-9_\-+\/=]+)/);
+  if (unsubMatch) {
+    try {
+      const decoded = verifyUnsubscribeToken(unsubMatch[1]);
+      if (decoded && decoded.campaignId && decoded.recipientId) {
+        console.log('[Inbound] Reply matched via unsubscribe link — campaign:', decoded.campaignId);
+        return decoded;
+      }
+      // Old format token (email:orgId only) — no campaign info, fall through to Method 2
+      if (decoded) {
+        console.log('[Inbound] Old unsubscribe format — falling back to email match');
+      }
+    } catch (e) { /* ignore parse errors */ }
+  }
+
+  // Method 2: From email matching (fallback — matches most recent campaign recipient)
+  if (fromEmail) {
+    // Extract bare email from "Name <email>" format
+    const emailMatch = fromEmail.match(/<([^>]+)>/) || [null, fromEmail];
+    const bareEmail = (emailMatch[1] || '').trim();
+    if (bareEmail) {
+      try {
+        const result = await db.query(`
+          SELECT cr.campaign_id, cr.person_id, cr.id as recipient_id, c.organizer_id, cr.email
+          FROM campaign_recipients cr
+          JOIN campaigns c ON c.id = cr.campaign_id
+          WHERE LOWER(cr.email) = LOWER($1)
+            AND cr.status IN ('sent', 'delivered', 'opened', 'clicked')
+          ORDER BY cr.sent_at DESC NULLS LAST
+          LIMIT 1
+        `, [bareEmail]);
+        if (result.rows.length > 0) {
+          const row = result.rows[0];
+          console.log('[Inbound] Reply matched via email — campaign:', row.campaign_id);
+          return {
+            email: row.email,
+            organizerId: row.organizer_id,
+            campaignId: row.campaign_id,
+            recipientId: row.recipient_id
+          };
+        }
+      } catch (e) {
+        console.warn('[Inbound] Email match query failed:', e.message);
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -464,13 +515,12 @@ function isAutoReply({ subject, headers, from }) {
  *
  * Flow:
  * 1. Validate shared secret
- * 2. Extract tracking IDs: hidden comment tag in body (primary) or VERP envelope (fallback)
+ * 2. Detect reply source: unsubscribe link in quoted body (primary) or from-email match (fallback)
  * 3. Filter auto-replies
- * 4. Look up campaign_recipient by short IDs
- * 5. Record reply as campaign_event (event_type='reply')
- * 6. Record prospect_intent (intent_type='reply')
- * 7. Update status, contact_activities, pipeline auto-stage
- * 8. NO forward — salesperson already has the reply in their inbox (Reply-To = their email)
+ * 4. Record reply as campaign_event (event_type='reply')
+ * 5. Record prospect_intent (intent_type='reply')
+ * 6. Update status, contact_activities, pipeline auto-stage
+ * 7. NO forward — salesperson already has the reply in their inbox (Reply-To = their email)
  */
 router.post(
   '/api/webhooks/inbound/:secret',
@@ -488,84 +538,31 @@ router.post(
 
     console.log(`📨 Inbound email received — from: ${from}, to: ${to}, subject: ${subject}`);
 
-    // 1. Extract tracking IDs — try hidden comment tag in body first, VERP envelope as fallback
-    let trackingIds = null;
-    let trackingSource = null;
-
-    // 1a. Primary: hidden comment tag in HTML or text body (works with Gmail auto-forward)
-    trackingIds = parseLiffyTag(html) || parseLiffyTag(text);
-    if (trackingIds) {
-      trackingSource = 'tag';
-      console.log(`  🏷️ Liffy tag found — campaign: ${trackingIds.campaignShort}, recipient: ${trackingIds.recipientShort}`);
-    }
-
-    // 1b. Fallback: VERP envelope address (legacy, for emails already in flight)
-    if (!trackingIds) {
-      const envelope = typeof req.body.envelope === 'string'
-        ? JSON.parse(req.body.envelope || '{}')
-        : req.body.envelope || {};
-
-      const toAddresses = Array.isArray(envelope?.to)
-        ? envelope.to
-        : [envelope?.to].filter(Boolean);
-
-      for (const addr of toAddresses) {
-        const parsed = parseVerpAddress(addr);
-        if (parsed) {
-          trackingIds = parsed;
-          trackingSource = 'verp';
-          break;
-        }
-      }
-
-      // Try the to field directly
-      if (!trackingIds && to) {
-        const toFallback = to.split(',').map(a => a.trim());
-        for (const addr of toFallback) {
-          const emailMatch = addr.match(/<([^>]+)>/) || [null, addr];
-          const parsed = parseVerpAddress(emailMatch[1]);
-          if (parsed) {
-            trackingIds = parsed;
-            trackingSource = 'verp';
-            break;
-          }
-        }
-      }
-
-      if (trackingIds) {
-        console.log(`  🔗 VERP fallback — campaign: ${trackingIds.campaignShort}, recipient: ${trackingIds.recipientShort}`);
-      }
-    }
-
-    if (!trackingIds) {
-      console.log('  ⚠️ No tracking IDs found (no tag, no VERP) — skipping');
-      return res.status(200).send('OK');
-    }
-
-    // 2. Filter auto-replies
+    // 1. Filter auto-replies first (cheap check, avoids DB queries)
     if (isAutoReply({ subject, headers, from })) {
       console.log(`  🤖 Auto-reply detected — skipping (subject: "${subject}", from: ${from})`);
       return res.status(200).send('OK');
     }
 
-    // 3. Look up campaign_recipient by short prefix match (LIMIT 2 for collision detection)
-    const recipientRes = await db.query(
-      `SELECT cr.id, cr.campaign_id, cr.organizer_id, cr.email, cr.status
-       FROM campaign_recipients cr
-       WHERE LEFT(cr.campaign_id::text, 8) = $1
-         AND LEFT(cr.id::text, 8) = $2
-       LIMIT 2`,
-      [trackingIds.campaignShort, trackingIds.recipientShort]
-    );
+    // 2. Detect reply source — unsubscribe link (primary) or from-email match (fallback)
+    const replySource = await detectReplySource(html || text || '', from);
 
-    if (recipientRes.rows.length === 0) {
-      console.log(`  ⚠️ No recipient found — ${trackingSource}: campaign=${trackingIds.campaignShort}, recipient=${trackingIds.recipientShort}`);
+    if (!replySource) {
+      console.log('  ⚠️ No reply source detected (no unsubscribe link, no email match) — skipping');
       return res.status(200).send('OK');
     }
 
-    // Collision guard: if short prefix matches more than one row, refuse to process
-    if (recipientRes.rows.length > 1) {
-      console.error(`  ❌ Collision detected — short IDs not unique: campaign=${trackingIds.campaignShort}, recipient=${trackingIds.recipientShort}, matches=${recipientRes.rows.length}`);
+    // 3. Look up campaign_recipient by full IDs
+    const recipientRes = await db.query(
+      `SELECT cr.id, cr.campaign_id, cr.organizer_id, cr.email, cr.status
+       FROM campaign_recipients cr
+       WHERE cr.campaign_id = $1 AND cr.id = $2
+       LIMIT 1`,
+      [replySource.campaignId, replySource.recipientId]
+    );
+
+    if (recipientRes.rows.length === 0) {
+      console.log(`  ⚠️ No recipient found — campaign=${replySource.campaignId}, recipient=${replySource.recipientId}`);
       return res.status(200).send('OK');
     }
 
@@ -721,6 +718,10 @@ router.post(
  * GET /api/webhooks/gmail-filter-info
  * Returns Gmail filter setup instructions for reply detection.
  * Salesperson must set up a Gmail filter to forward replies to SendGrid Inbound Parse.
+ *
+ * Reply detection relies on the unsubscribe URL in the quoted reply body.
+ * The filter should match "api.liffy.app/api/unsubscribe" — this link is always
+ * present in the original email footer and preserved by email clients in quoted replies.
  */
 router.get('/api/webhooks/gmail-filter-info', (req, res) => {
   const inboundSecret = process.env.INBOUND_WEBHOOK_SECRET;
@@ -736,7 +737,7 @@ router.get('/api/webhooks/gmail-filter-info', (req, res) => {
       `2. Enter: ${parseEmail}`,
       '3. Gmail will send a verification email to that address — ask admin to confirm',
       '4. Go to Gmail → Settings → Filters → Create new filter',
-      '5. In "Has the words" field enter: LIFFY',
+      '5. In "Has the words" field enter: api.liffy.app/api/unsubscribe',
       '6. Click "Create filter" → Check "Forward it to" → Select: ' + parseEmail,
       '7. Also check "Never send it to Spam" and "Skip the Inbox" (optional)',
       '8. Click "Create filter"',
@@ -744,7 +745,8 @@ router.get('/api/webhooks/gmail-filter-info', (req, res) => {
     technical: {
       parse_email: parseEmail,
       inbound_url: inboundUrl,
-      tracking_method: 'Hidden HTML comment <!--LIFFY:c-{8hex}-r-{8hex}--> in email body',
+      tracking_method: 'Unsubscribe URL token in email footer (contains campaign_id + recipient_id)',
+      fallback_method: 'From-email matching against campaign_recipients (most recent sent)',
       reply_to: 'Salesperson real email (customer replies go directly to Gmail)',
       forward_from_liffy: false,
       note: 'Liffy does NOT forward replies. Salesperson already has them via direct Reply-To.',
@@ -753,8 +755,9 @@ router.get('/api/webhooks/gmail-filter-info', (req, res) => {
 });
 
 // Log on startup
-console.log('[Reply Detection] Mode: direct Reply-To + hidden tag + Gmail filter forward');
-console.log('[Reply Detection] Salesperson Gmail filter must forward to: parse@inbound.liffy.app');
+console.log('[Reply Detection] Mode: direct Reply-To + unsubscribe URL token + Gmail filter forward');
+console.log('[Reply Detection] Gmail filter: "Has the words" = api.liffy.app/api/unsubscribe');
+console.log('[Reply Detection] Forward to: parse@inbound.liffy.app');
 
 // ============================================================
 // UNSUBSCRIBE ENDPOINTS

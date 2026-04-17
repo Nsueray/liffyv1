@@ -201,7 +201,7 @@ async function processSendingCampaigns() {
 
         await Promise.all(chunk.map(async (r) => {
           try {
-            const unsubscribeUrl = getUnsubscribeUrl(r.email, campaign.organizer_id);
+            const unsubscribeUrl = getUnsubscribeUrl(r.email, campaign.organizer_id, campaign.id, r.id);
             const processedSubject = processTemplate(campaign.subject, r);
             let processedHtml = processTemplate(campaign.body_html, r, { unsubscribe_url: unsubscribeUrl });
             processedHtml = convertPlainTextToHtml(processedHtml);
@@ -211,6 +211,8 @@ async function processSendingCampaigns() {
               text: processTemplate(campaign.body_text || "", r, { unsubscribe_url: unsubscribeUrl }),
               recipientEmail: r.email,
               organizerId: campaign.organizer_id,
+              campaignId: campaign.id,
+              recipientId: r.id,
               physicalAddress: campaign.physical_address,
               lang: 'en'
             });
@@ -218,24 +220,20 @@ async function processSendingCampaigns() {
             const listUnsubHeaders = getListUnsubscribeHeaders(
               r.email,
               campaign.organizer_id,
-              campaign.sender_email
+              campaign.sender_email,
+              campaign.id,
+              r.id
             );
 
             // Reply-To = salesperson's real email (customer replies go directly to their inbox)
+            // Reply detection relies on unsubscribe URL in quoted body (parsed by inbound handler)
             const replyToAddr = campaign.sender_reply_to || campaign.sender_email;
-
-            // Tracking tag — hidden HTML comment with campaign/recipient IDs
-            const liffyTag = `<!--LIFFY:c-${campaign.id.slice(0,8)}-r-${r.id.slice(0,8)}-->`;
-
-            // Custom headers for reply tracking
-            listUnsubHeaders['X-Liffy-CID'] = campaign.id.slice(0, 8);
-            listUnsubHeaders['X-Liffy-RID'] = r.id.slice(0, 8);
 
             // Send with 429 exponential backoff retry
             await sendWithRetry({
               to: r.email,
               subject: processedSubject,
-              html: complianceResult.html + liffyTag,
+              html: complianceResult.html,
               text: complianceResult.text,
               fromEmail: campaign.sender_email,
               fromName: campaign.sender_name,
