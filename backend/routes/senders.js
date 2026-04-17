@@ -19,6 +19,7 @@ async function authRequired(req, res, next) {
     }
 
     const payload = jwt.verify(token, JWT_SECRET);
+    payload.user_id = payload.user_id || payload.id; // normalize legacy JWT
     req.auth = {
       user_id: payload.user_id,
       organizer_id: payload.organizer_id,

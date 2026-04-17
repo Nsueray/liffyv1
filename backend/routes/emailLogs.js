@@ -11,6 +11,7 @@ function authRequired(req, res, next) {
   const token = authHeader.replace("Bearer ", "").trim();
   try {
     req.auth = jwt.verify(token, JWT_SECRET);
+    req.auth.user_id = req.auth.user_id || req.auth.id; // normalize legacy JWT
     next();
   } catch (err) {
     return res.status(401).json({ error: "Invalid token" });

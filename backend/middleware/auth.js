@@ -35,6 +35,7 @@ async function authRequired(req, res, next) {
     }
 
     const payload = jwt.verify(token, JWT_SECRET);
+    payload.user_id = payload.user_id || payload.id; // normalize legacy JWT
 
     // Load team_ids for managers (direct reports)
     let teamIds = [];

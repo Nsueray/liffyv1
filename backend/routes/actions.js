@@ -26,6 +26,7 @@ async function authRequired(req, res, next) {
     }
     const token = authHeader.replace("Bearer ", "").trim();
     const payload = jwt.verify(token, JWT_SECRET);
+    payload.user_id = payload.user_id || payload.id; // normalize legacy JWT
     let team_ids = [];
     if (payload.role === 'manager') {
       try {

@@ -192,10 +192,11 @@ router.get('/api/auth/me', async (req, res) => {
 
     // Verify token
     const payload = jwt.verify(token, JWT_SECRET);
+    payload.user_id = payload.user_id || payload.id; // normalize legacy JWT
 
     // Fetch user + organizer
     const result = await db.query(
-      `SELECT 
+      `SELECT
          u.id AS user_id,
          u.email AS user_email,
          u.role AS user_role,

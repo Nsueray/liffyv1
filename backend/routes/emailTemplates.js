@@ -16,6 +16,7 @@ function authRequired(req, res, next) {
   const token = authHeader.replace('Bearer ', '');
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
+    decoded.user_id = decoded.user_id || decoded.id; // normalize legacy JWT
     req.auth = decoded;
     next();
   } catch (err) {
