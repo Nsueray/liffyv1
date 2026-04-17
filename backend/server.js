@@ -55,7 +55,7 @@ app.get('/api/health', async (req, res) => {
     const client = await db.connect();
     await client.query('SELECT 1');
     client.release();
-    res.json({ status: 'ok' });
+    res.json({ status: 'ok', version: '0fe0c73-fix' });
   } catch (error) {
     res.status(503).json({ status: 'error', message: error.message });
   }
