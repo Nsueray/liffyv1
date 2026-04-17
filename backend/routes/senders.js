@@ -69,7 +69,7 @@ router.get('/api/senders', authRequired, async (req, res) => {
       reply_to: row.reply_to,
       is_default: row.is_default,
       is_active: row.is_active,
-      visibility: row.visibility || 'public',
+      visibility: row.visibility || 'shared',
       user_id: row.user_id,
       created_at: row.created_at
     }));
@@ -109,7 +109,7 @@ router.post('/api/senders', authRequired, async (req, res) => {
       );
     }
 
-    const vis = (visibility === 'private') ? 'private' : 'public';
+    const vis = (visibility === 'private') ? 'private' : 'shared';
 
     const insertResult = await db.query(
       `INSERT INTO sender_identities
@@ -141,7 +141,7 @@ router.post('/api/senders', authRequired, async (req, res) => {
         reply_to: row.reply_to,
         is_default: row.is_default,
         is_active: row.is_active,
-        visibility: row.visibility || 'public',
+        visibility: row.visibility || 'shared',
         user_id: row.user_id,
         created_at: row.created_at
       }

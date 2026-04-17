@@ -215,7 +215,7 @@ function getUpwardVisibilityScope(req, ownerColumn, visColumn, startParamIndex) 
   // If the current user appears in that chain → they are above the creator → allowed.
   return {
     sql: `AND (
-      ${visColumn} = 'public'
+      ${visColumn} = 'shared'
       OR ${ownerColumn} = $${p}
       OR $${p} IN (
         WITH RECURSIVE upward AS (

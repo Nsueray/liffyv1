@@ -14,7 +14,7 @@ ALTER TABLE email_templates
 
 -- Visibility: 'public' (default, everyone) or 'private' (creator + upward chain)
 ALTER TABLE email_templates
-  ADD COLUMN IF NOT EXISTS visibility VARCHAR(20) NOT NULL DEFAULT 'public';
+  ADD COLUMN IF NOT EXISTS visibility VARCHAR(20) NOT NULL DEFAULT 'shared';
 
 CREATE INDEX IF NOT EXISTS idx_email_templates_created_by
   ON email_templates(created_by_user_id);
@@ -23,4 +23,4 @@ CREATE INDEX IF NOT EXISTS idx_email_templates_created_by
 
 -- Already has user_id column — just add visibility
 ALTER TABLE sender_identities
-  ADD COLUMN IF NOT EXISTS visibility VARCHAR(20) NOT NULL DEFAULT 'public';
+  ADD COLUMN IF NOT EXISTS visibility VARCHAR(20) NOT NULL DEFAULT 'shared';

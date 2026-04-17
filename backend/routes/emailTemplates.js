@@ -57,7 +57,7 @@ router.post('/', authRequired, async (req, res) => {
     if (!subject || !subject.trim()) return res.status(400).json({ error: 'Subject is required' });
     if (!body_html || !body_html.trim()) return res.status(400).json({ error: 'Body HTML is required' });
 
-    const vis = (visibility === 'private') ? 'private' : 'public';
+    const vis = (visibility === 'private') ? 'private' : 'shared';
 
     const result = await pool.query(
       `INSERT INTO email_templates
@@ -127,7 +127,7 @@ router.put('/:id', authRequired, async (req, res) => {
     }
 
     // Only owner/admin can change visibility
-    const vis = (visibility === 'private' || visibility === 'public') ? visibility : undefined;
+    const vis = (visibility === 'private' || visibility === 'shared') ? visibility : undefined;
     const visSql = vis ? ', visibility = $7' : '';
     const visParams = vis ? [vis] : [];
 
@@ -262,7 +262,7 @@ router.post('/:id/clone', authRequired, async (req, res) => {
     const result = await pool.query(
       `INSERT INTO email_templates
        (organizer_id, created_by_user_id, name, subject, body_html, body_text, visibility, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 'public', NOW())
+       VALUES ($1, $2, $3, $4, $5, $6, 'shared', NOW())
        RETURNING ${TEMPLATE_COLS}`,
       [organizerId, userId, newName, source.subject, source.body_html, source.body_text]
     );
