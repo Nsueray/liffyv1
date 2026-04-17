@@ -70,15 +70,16 @@ app.get('/api/debug-scope', async (req, res) => {
 
     let userId, organizerId, jwtRole, jwtInfo;
 
-    // Mode 1: decode actual JWT from Authorization header
+    // Mode 1: decode actual JWT from Authorization header (verified)
     const authHeader = req.headers.authorization;
-    if (authHeader) {
+    if (authHeader && !req.query.user_id) {
       const token = authHeader.replace('Bearer ', '').trim();
       const payload = jwt.verify(token, JWT_SECRET);
       userId = payload.user_id;
       organizerId = payload.organizer_id;
       jwtRole = payload.role;
       jwtInfo = {
+        mode: 'jwt_verified',
         user_id: payload.user_id,
         organizer_id: payload.organizer_id,
         role: payload.role,
@@ -87,11 +88,20 @@ app.get('/api/debug-scope', async (req, res) => {
         exp: new Date(payload.exp * 1000).toISOString(),
       };
     }
-    // Mode 2: pass user_id as query param (no JWT needed)
+    // Mode 2: pass user_id as query param
     else if (req.query.user_id) {
       userId = req.query.user_id;
       organizerId = req.query.org_id || '63b52d61-ae2c-4dad-b429-48151b1b16d6';
-      jwtInfo = { note: 'No JWT — using query params' };
+      jwtInfo = { mode: 'query_param' };
+      // Also decode JWT without verification if present (to inspect stale tokens)
+      if (authHeader) {
+        try {
+          const token = authHeader.replace('Bearer ', '').trim();
+          const parts = token.split('.');
+          const rawPayload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+          jwtInfo.jwt_unverified_payload = rawPayload;
+        } catch (_) { /* ignore decode errors */ }
+      }
     } else {
       return res.status(400).json({ error: 'Pass Authorization header or ?user_id=...' });
     }
