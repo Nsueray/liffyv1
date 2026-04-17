@@ -1518,7 +1518,106 @@ Sharing control on lists, email_templates, and sender_identities.
 - TODO [Phase 4] comments added to dual-write locations
 
 **Remaining:**
-- Run backfill script in production (--apply)
-- Apply migrations 033-037
 - Remove dual-write to prospects table
 - Archive/drop prospects table
+
+---
+
+## ADR-015 — Hierarchical Permissions (Migrations 038-040)
+
+**Status:** LIVE. All migrations applied in production.
+
+Team-based data isolation using recursive CTE on `users.reports_to` chain.
+
+**4 roles:** owner → admin → manager → sales_rep
+- **owner/admin:** see all data in org (`isPrivileged = true`)
+- **manager:** sees own data + all reports (recursive downward)
+- **sales_rep:** sees only own data
+
+**Key functions** (`backend/middleware/userScope.js`):
+| Function | Purpose |
+|----------|---------|
+| `getUserContext(req)` | Returns userId, organizerId, role, isPrivileged |
+| `isPrivileged(req)` | Returns true for owner/admin |
+| `getHierarchicalScope(req)` | Recursive CTE — returns downward team user IDs |
+| `getVisibilityScope(req, table)` | Parameterized WHERE for campaigns, mining_jobs, persons |
+| `getUpwardVisibilityScope(req)` | Upward chain for templates/senders (sees manager's shared items) |
+| `canAccessRowHierarchical(req, userId)` | Boolean — can current user see this user's row? |
+
+**11 routes updated:** campaigns, emailTemplates, senders, miningJobs, miningResults, campaignRecipients, campaignSend, persons, lists, reports, stats
+
+**Migrations:**
+- 038: `users.reports_to` (UUID FK→users)
+- 039: `users.permissions` (JSONB)
+- 040: `email_templates.visibility`, `email_templates.created_by_user_id`, `sender_identities.visibility`
+
+---
+
+## Zoho Import (54K Records)
+
+**Status:** DONE. One-time bulk import completed 2026-04-15.
+
+Imported ~54,000 records from Zoho CRM into canonical tables (persons + affiliations).
+Industry normalization applied during import. Production DB now has 75K+ persons, 85K+ affiliations.
+
+---
+
+## Company & Industry Filter
+
+**Status:** LIVE.
+
+Added company_name and industry filters to GET /api/persons endpoint.
+- `company` query param: ILIKE search on affiliations.company_name
+- `industry` query param: ILIKE search on affiliations.industry
+- Filters applied via LATERAL JOIN on affiliations
+
+---
+
+## Reply Email Quality (2026-04-17)
+
+**Status:** LIVE.
+
+Improvements to reply detection, forwarding, and display:
+
+**1. Click tracking disabled:**
+- SendGrid `clickTracking: { enable: false }` in mailer.js
+- URLs in email body stay clean (no SendGrid redirect wrapping)
+- Open tracking remains enabled (invisible pixel)
+
+**2. Reply body in timeline:**
+- Timeline query (`timeline.js`) now includes `provider_response` as `meta` for reply events
+- ContactDrawer shows reply body (truncated to 200 chars) with red left border
+- Fallback text "Reply detected — check email for details" when no body stored
+
+**3. Reply body storage increased:**
+- `webhooks.js` stores reply body text up to 2000 chars (was 500)
+- Stored in `campaign_events.provider_response` JSONB (`{ text, from, subject }`)
+
+**4. Forward target fallback:**
+- Priority: explicit `reply_to` → `from_email` (if not noreply) → campaign creator email
+- JOINs `users` table for `creator_email` via `campaigns.created_by_user_id`
+- Prevents replies going to `noreply@liffy.app`
+
+**Files:**
+- `backend/mailer.js` — trackingSettings
+- `backend/routes/webhooks.js` — forward fallback, body storage
+- `backend/routes/timeline.js` — provider_response in query
+- `liffy-ui/components/ContactDrawer.tsx` — reply body display
+
+---
+
+## JWT Auth Fix — id vs user_id Normalization (2026-04-16)
+
+**Status:** LIVE. Critical production bug fix.
+
+**Root cause:** JWT payload contained `id` field but all auth middleware read `user_id`.
+This caused `getUserContext()` to return `userId: null`, breaking all data isolation queries.
+
+**Fix:** Added `payload.user_id = payload.user_id || payload.id;` normalization to all 28 auth middleware instances across the codebase.
+
+**3 patterns fixed:**
+1. Pattern 1 (19 files): `const payload = jwt.verify(...)` → added normalization
+2. Pattern 2 (6 files): `req.auth = jwt.verify(...)` → added `req.auth.user_id = req.auth.user_id || req.auth.id`
+3. Pattern 3 (1 file): `const decoded = jwt.verify(...)` → added normalization
+
+**Files:** All 28 route files + `backend/middleware/auth.js`

@@ -38,20 +38,22 @@ Engagement is stored as events, not scores.
 
 ---
 
-## Database — Current State (31 tables, 37 migrations)
+## Database — Current State (31 tables, 40 migrations)
+
+**Production stats (2026-04-17):** ~75,399 persons, ~85,603 affiliations
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
 |-------|--------|-------|
 | `organizers` | ACTIVE | Multi-tenant root |
-| `users` | ACTIVE | Organizer users |
+| `users` | ACTIVE | Organizer users. `reports_to` (UUID FK→users), `permissions` (JSONB), `role` (owner/admin/manager/sales_rep). Hierarchical team visibility via recursive CTE (ADR-015). |
 | `mining_jobs` | ACTIVE | Scraping job definitions |
 | `mining_results` | ACTIVE | Discovery events (discovery only!) |
 | `mining_job_logs` | ACTIVE | Job execution logs |
 | `campaigns` | ACTIVE | Email campaigns. campaign_type (single/sequence) + sequence_config from 035. |
 | `campaign_recipients` | ACTIVE | Per-recipient tracking. person_id column from 034. |
-| `email_templates` | ACTIVE | Reusable templates with placeholders. visibility + created_by_user_id from 033. |
-| `sender_identities` | ACTIVE | Verified sender emails. visibility from 033. |
+| `email_templates` | ACTIVE | Reusable templates with placeholders. visibility (private/team/shared) + created_by_user_id from 033/040. Upward visibility scope (ADR-015). |
+| `sender_identities` | ACTIVE | Verified sender emails. visibility (private/team/shared) + user_id from 033/040. Upward visibility scope (ADR-015). |
 | `unsubscribes` | ACTIVE | Opt-out records |
 
 ### Canonical Tables (Constitution Migration — Active)
@@ -94,7 +96,7 @@ Phase 4 — Remove legacy tables (5 steps). Full plan in `MIGRATION_PLAN.md`.
 
 **Current phase: Late Phase 3 (approaching Phase 4)**
 
-All migrations (001–032) applied in production. Migrations 033–037 written, pending application.
+All migrations (001–040) applied in production.
 `AGGREGATION_PERSIST=true` set on Render — mining pipeline writes to `persons` + `affiliations`.
 All import paths (CSV upload, import-all, leads/import) dual-write to both legacy and canonical tables.
 Campaign resolve prefers canonical data with legacy fallback.
@@ -156,7 +158,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 
 ---
 
-## Migrations (29 files)
+## Migrations (32 files)
 
 | # | File | Tables |
 |---|------|--------|
@@ -191,6 +193,9 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 | 035 | `035_create_sequences.sql` | `campaign_sequences`, `sequence_recipients`, ALTER `campaigns` (+campaign_type, +sequence_config) |
 | 036 | `036_allow_null_template_id.sql` | ALTER `campaigns` (DROP NOT NULL on template_id for sequence campaigns) |
 | 037 | `037_create_action_items.sql` | `action_items` (6 trigger reasons, priority 1-4, dedup partial unique index) |
+| 038 | `038_add_reports_to.sql` | ALTER `users` (+reports_to UUID FK→users) — ADR-015 hierarchical team structure |
+| 039 | `039_add_user_permissions.sql` | ALTER `users` (+permissions JSONB) — per-user feature permissions (ADR-015) |
+| 040 | `040_template_sender_visibility.sql` | ALTER `email_templates` (+visibility, +created_by_user_id), ALTER `sender_identities` (+visibility) — upward visibility scope (ADR-015) |
 
 ---
 

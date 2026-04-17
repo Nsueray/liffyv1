@@ -68,6 +68,11 @@
 - **Sidebar: Action Center** — "Action" menu item with Zap icon at top position, dynamic open count badge from `/api/actions/summary`, exact pathname match for `/`. (commit: 9d36975 liffy-ui)
 - **Dashboard Stat Fix** — totalSent now uses events.sent (not recipients.sent), open/click/bounce rates use COUNT(DISTINCT email). (commits in liffyv1)
 - **Visibility Columns** — Migration 033 adds sharing (private/team/shared) to lists, email_templates, sender_identities. lists.js enforced with visibilityFilter(). (commit in liffyv1)
+- **ADR-015 Hierarchical Permissions** — Migrations 038-040. Recursive CTE team visibility on `users.reports_to`. 4 roles (owner/admin/manager/sales_rep). 11 routes updated with `getHierarchicalScope` + `getVisibilityScope`. Templates/senders use upward visibility (`getUpwardVisibilityScope`). Admin panel shows reports_to hierarchy.
+- **Reply Body in Timeline** — ContactDrawer now shows reply body text (200 char preview) with red left border. Fallback "Reply detected" text when no body stored. Timeline query includes `provider_response` as meta for reply events.
+- **Click Tracking Disabled** — SendGrid click tracking off (`clickTracking: { enable: false }`), open tracking remains. URLs stay clean in reply threads.
+- **Reply Forward Fallback** — Forward target priority: reply_to → from_email (if not noreply) → campaign creator email. JOINs users table for creator_email. Prevents replies going to noreply@.
+- **JWT Auth Fix** — `payload.user_id = payload.user_id || payload.id` normalization across 28 auth middleware instances. Fixed critical bug where Elif saw 0 data due to JWT `id` vs `user_id` mismatch.
 
 ---
 

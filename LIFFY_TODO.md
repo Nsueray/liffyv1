@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-15*
+*Updated: 2026-04-17*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -64,6 +64,10 @@
 | B13 | Multi-Touch Sequences UI — campaign type selector, sequence builder, step CRUD, analytics | P1 | ✅ DONE |
 | B14 | Action Engine — trigger rules, priority scoring, webhook hooks, action worker | P1 | ✅ DONE |
 | B15 | Action Screen — homepage, priority cards, filter/sort, snooze, history | P1 | ✅ DONE |
+| B16 | ADR-015 Hierarchical Permissions — migrations 038-040, recursive CTE, reports_to, 4 roles, 11 routes, upward visibility | P1 | ✅ DONE |
+| B17 | Zoho Import — 54K records bulk import (persons + affiliations), industry normalization | P1 | ✅ DONE |
+| B18 | Company + Industry Filter — ILIKE search on affiliations via LATERAL JOIN | P1 | ✅ DONE |
+| B19 | Data Transfer — Suer→Elif ownership transfer for templates/senders/campaigns | P1 | ✅ DONE |
 
 ## C. KNOWN ISSUES
 
@@ -132,6 +136,8 @@
 | G9 | Reply forward template sadeleştirme — banner/footer kaldır, truncation kaldır, clean subject | P1 | ✅ DONE |
 | G10 | Replied status overwrite bug fix — open/click event'leri replied/unsubscribed status'u koruyor | P1 | ✅ DONE |
 | G11 | Reply UX — VERP display name (sender name in reply-to) + forward FROM format ("Reply: Name") | P1 | ✅ DONE |
+| G12 | Reply Email Quality — click tracking disabled, reply body in timeline (2000 chars), forward fallback to creator email | P1 | ✅ DONE |
+| G13 | JWT Auth Fix — `id` vs `user_id` normalization across 28 auth middleware instances (critical production bug) | P1 | ✅ DONE |
 
 ### Context
 
