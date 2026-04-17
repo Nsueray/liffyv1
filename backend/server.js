@@ -66,7 +66,7 @@ app.get('/api/debug-scope', async (req, res) => {
   try {
     const jwt = require('jsonwebtoken');
     const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
-    const { getUserContext, isPrivileged, getHierarchicalScope } = require('./middleware/userScope');
+    const { getUserContext, isPrivileged, getHierarchicalScope, getVisibilityScope, getUpwardVisibilityScope } = require('./middleware/userScope');
 
     let userId, organizerId, jwtRole, jwtInfo;
 
@@ -152,6 +152,29 @@ app.get('/api/debug-scope', async (req, res) => {
       [organizerId, userId]
     );
 
+    // ── Simulate EXACT route queries ──────────────────────────────────────
+
+    // Campaigns GET / — exact same logic as routes/campaigns.js
+    const campScope = getHierarchicalScope(fakeReq, 'c.created_by_user_id', 2);
+    const campRouteSQL = `SELECT COUNT(*)::int AS cnt
+       FROM campaigns c
+       WHERE c.organizer_id = $1 ${campScope.sql}`;
+    const campRouteRes = await db.query(campRouteSQL, [organizerId, ...campScope.params]);
+
+    // Lists GET / — exact same logic as routes/lists.js visibilityFilter
+    const listScope = getVisibilityScope(fakeReq, 'created_by_user_id', 'visibility', 2);
+    const listRouteSQL = `SELECT COUNT(*)::int AS cnt
+       FROM lists
+       WHERE organizer_id = $1 ${listScope.sql}`;
+    const listRouteRes = await db.query(listRouteSQL, [organizerId, ...listScope.params]);
+
+    // Templates GET / — exact same logic as routes/emailTemplates.js
+    const tmplScope = getUpwardVisibilityScope(fakeReq, 'created_by_user_id', 'visibility', 2);
+    const tmplRouteSQL = `SELECT COUNT(*)::int AS cnt
+       FROM email_templates
+       WHERE organizer_id = $1 ${tmplScope.sql}`;
+    const tmplRouteRes = await db.query(tmplRouteSQL, [organizerId, ...tmplScope.params]);
+
     res.json({
       jwt: jwtInfo,
       db_user: dbUser,
@@ -163,6 +186,14 @@ app.get('/api/debug-scope', async (req, res) => {
       scope_sql_preview: scope.sql ? scope.sql.substring(0, 300) : '(empty — owner sees all)',
       campaign_count_via_cte: campRes.rows[0].cnt,
       list_count_via_visibility_scope: listRes.rows[0].cnt,
+      // Route-simulated counts (same functions, same param order)
+      route_campaign_count: campRouteRes.rows[0].cnt,
+      route_list_count: listRouteRes.rows[0].cnt,
+      route_template_count: tmplRouteRes.rows[0].cnt,
+      // Debug: show generated SQL
+      campScope_sql: campScope.sql.substring(0, 300),
+      listScope_sql: listScope.sql.substring(0, 300),
+      tmplScope_sql: tmplScope.sql.substring(0, 300),
     });
   } catch (err) {
     res.status(500).json({ error: err.message, stack: err.stack });
