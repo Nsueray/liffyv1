@@ -129,17 +129,24 @@ router.get('/', authRequired, async (req, res) => {
               t.name as template_name,
               l.name as list_name,
               s.from_email as sender_email,
-              s.from_name as sender_name
+              s.from_name as sender_name,
+              u.first_name as creator_first_name,
+              u.last_name as creator_last_name,
+              u.email as creator_email
        FROM campaigns c
        LEFT JOIN email_templates t ON c.template_id = t.id
        LEFT JOIN lists l ON c.list_id = l.id
        LEFT JOIN sender_identities s ON c.sender_id = s.id
+       LEFT JOIN users u ON u.id = c.created_by_user_id
        WHERE c.organizer_id = $1 ${scope.sql}
        ORDER BY c.created_at DESC`,
       [organizerId, ...scope.params]
     );
 
-    res.json(result.rows);
+    res.json(result.rows.map(r => ({
+      ...r,
+      creator_name: [r.creator_first_name, r.creator_last_name].filter(Boolean).join(' ') || null
+    })));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -164,11 +171,15 @@ router.get('/:id', authRequired, async (req, res) => {
               t.body_text,
               l.name as list_name,
               s.from_email as sender_email,
-              s.from_name as sender_name
+              s.from_name as sender_name,
+              u.first_name as creator_first_name,
+              u.last_name as creator_last_name,
+              u.email as creator_email
        FROM campaigns c
        LEFT JOIN email_templates t ON c.template_id = t.id
        LEFT JOIN lists l ON c.list_id = l.id
        LEFT JOIN sender_identities s ON c.sender_id = s.id
+       LEFT JOIN users u ON u.id = c.created_by_user_id
        WHERE c.id = $1 AND c.organizer_id = $2`,
       [campaignId, organizerId]
     );
@@ -177,7 +188,11 @@ router.get('/:id', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'Campaign not found' });
     }
 
-    res.json(result.rows[0]);
+    const r = result.rows[0];
+    res.json({
+      ...r,
+      creator_name: [r.creator_first_name, r.creator_last_name].filter(Boolean).join(' ') || null
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

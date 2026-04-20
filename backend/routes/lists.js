@@ -653,12 +653,14 @@ router.get('/', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
 
     // Query 1: list metadata (with visibility filter)
-    const vis = visibilityFilter(req.auth, 2);
+    const vis = visibilityFilter(req.auth, 2, 'l');
     const listsResult = await db.query(
-      `SELECT id, name, created_at, import_status, import_progress, visibility, created_by_user_id
-       FROM lists
-       WHERE organizer_id = $1 ${vis.clause}
-       ORDER BY created_at DESC`,
+      `SELECT l.id, l.name, l.created_at, l.import_status, l.import_progress, l.visibility, l.created_by_user_id,
+              u.first_name AS creator_first_name, u.last_name AS creator_last_name, u.email AS creator_email
+       FROM lists l
+       LEFT JOIN users u ON u.id = l.created_by_user_id
+       WHERE l.organizer_id = $1 ${vis.clause}
+       ORDER BY l.created_at DESC`,
       [organizerId, ...vis.params]
     );
 
@@ -701,7 +703,9 @@ router.get('/', authRequired, async (req, res) => {
           invalid_count: invalid,
           unverified_count: total - verified - invalid,
           import_status: list.import_status || null,
-          import_progress: list.import_progress || null
+          import_progress: list.import_progress || null,
+          creator_name: [list.creator_first_name, list.creator_last_name].filter(Boolean).join(' ') || null,
+          creator_email: list.creator_email || null
         };
       })
     });

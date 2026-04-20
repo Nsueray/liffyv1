@@ -216,27 +216,27 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
     const offset = (page - 1) * limit;
     const { search, status } = req.query;
 
-    const where = ['organizer_id = $1'];
+    const where = ['j.organizer_id = $1'];
     const params = [organizer_id];
     let idx = 2;
 
     if (status && status !== 'all') {
-      where.push(`status = $${idx++}`);
+      where.push(`j.status = $${idx++}`);
       params.push(status);
     }
 
     if (search) {
       where.push(`(
-        name ILIKE $${idx} OR
-        input ILIKE $${idx} OR
-        CAST(id AS TEXT) ILIKE $${idx}
+        j.name ILIKE $${idx} OR
+        j.input ILIKE $${idx} OR
+        CAST(j.id AS TEXT) ILIKE $${idx}
       )`);
       params.push(`%${search}%`);
       idx++;
     }
 
     // User isolation: hierarchical (self + descendants)
-    const scope = getHierarchicalScope(req, 'created_by_user_id', idx);
+    const scope = getHierarchicalScope(req, 'j.created_by_user_id', idx);
     if (scope.sql) {
       where.push(scope.sql.replace(/^AND /, ''));
       params.push(...scope.params);
@@ -245,12 +245,14 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
 
     // ÖNEMLİ: file_data sütununu seçmiyoruz - performans için
     const jobsRes = await db.query(
-      `SELECT id, organizer_id, type, input, name, strategy, site_profile, config, status,
-              progress, total_found, total_emails_raw, stats, error, created_at, completed_at,
-              manual_required, manual_reason, import_status, import_progress, created_by_user_id
-       FROM mining_jobs
+      `SELECT j.id, j.organizer_id, j.type, j.input, j.name, j.strategy, j.site_profile, j.config, j.status,
+              j.progress, j.total_found, j.total_emails_raw, j.stats, j.error, j.created_at, j.completed_at,
+              j.manual_required, j.manual_reason, j.import_status, j.import_progress, j.created_by_user_id,
+              u.first_name AS creator_first_name, u.last_name AS creator_last_name, u.email AS creator_email
+       FROM mining_jobs j
+       LEFT JOIN users u ON u.id = j.created_by_user_id
        WHERE ${where.join(' AND ')}
-       ORDER BY created_at DESC
+       ORDER BY j.created_at DESC
        LIMIT $${idx} OFFSET $${idx + 1}`,
       [...params, limit, offset]
     );
@@ -271,7 +273,10 @@ router.get('/api/mining/jobs', authRequired, async (req, res) => {
     );
 
     return res.json({
-      jobs: jobsRes.rows,
+      jobs: jobsRes.rows.map(r => ({
+        ...r,
+        creator_name: [r.creator_first_name, r.creator_last_name].filter(Boolean).join(' ') || null
+      })),
       page,
       limit,
       stats: statsRes.rows[0],

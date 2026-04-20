@@ -30,17 +30,22 @@ const TEMPLATE_COLS = `id, name, subject, body_html, body_text, visibility, crea
 router.get('/', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
-    const scope = getUpwardVisibilityScope(req, 'created_by_user_id', 'visibility', 2);
+    const scope = getUpwardVisibilityScope(req, 'e.created_by_user_id', 'e.visibility', 2);
 
     const result = await pool.query(
-      `SELECT ${TEMPLATE_COLS}
-       FROM email_templates
-       WHERE organizer_id = $1 ${scope.sql}
-       ORDER BY created_at DESC`,
+      `SELECT e.id, e.name, e.subject, e.body_html, e.body_text, e.visibility, e.created_by_user_id, e.created_at,
+              u.first_name AS creator_first_name, u.last_name AS creator_last_name, u.email AS creator_email
+       FROM email_templates e
+       LEFT JOIN users u ON u.id = e.created_by_user_id
+       WHERE e.organizer_id = $1 ${scope.sql}
+       ORDER BY e.created_at DESC`,
       [organizerId, ...scope.params]
     );
 
-    res.json({ templates: result.rows });
+    res.json({ templates: result.rows.map(r => ({
+      ...r,
+      creator_name: [r.creator_first_name, r.creator_last_name].filter(Boolean).join(' ') || null
+    })) });
   } catch (error) {
     console.error('Error fetching email templates:', error);
     res.status(500).json({ error: 'Failed to fetch templates' });
