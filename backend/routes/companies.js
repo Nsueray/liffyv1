@@ -86,7 +86,7 @@ router.get('/', authRequired, async (req, res) => {
         MAX(a.company_name) as company_name,
         MAX(a.industry) as industry,
         COUNT(DISTINCT a.person_id) as contact_count,
-        COUNT(DISTINCT CASE WHEN p.email_status = 'valid' THEN a.person_id END) as verified_count,
+        COUNT(DISTINCT CASE WHEN p.verification_status = 'valid' THEN a.person_id END) as verified_count,
         MAX(a.country_code) as country,
         MAX(a.created_at) as last_added
       FROM affiliations a
@@ -139,8 +139,8 @@ router.get('/:companyName/contacts', authRequired, async (req, res) => {
         p.email,
         p.first_name,
         p.last_name,
-        p.phone,
-        p.email_status,
+        a.phone,
+        p.verification_status as email_status,
         p.created_at as person_created_at,
         a.company_name,
         a.position as job_title,
