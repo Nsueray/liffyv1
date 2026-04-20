@@ -39,6 +39,7 @@ const actionsRouter = require('./routes/actions');
 const timelineRouter = require('./routes/timeline');
 const contextRouter = require('./routes/context');
 const waitingRouter = require('./routes/waiting');
+const companiesRouter = require('./routes/companies');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -96,6 +97,7 @@ app.use('/api/actions', actionsRouter);
 app.use('/api/timeline', timelineRouter);
 app.use('/api/context', contextRouter);
 app.use('/api/waiting', waitingRouter);
+app.use('/api/companies', companiesRouter);
 app.use(webhooksRouter);
 app.use(statsRouter);
 
