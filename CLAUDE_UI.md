@@ -86,6 +86,9 @@
 - **Sequence Worker Daily Limit Fix** — `sequenceWorker.js` `getRemainingDailyLimit()` was counting ALL organizer sent events against one user's limit. Fixed: scoped per-user via `JOIN campaigns c ON c.id = ce.campaign_id ... AND c.created_by_user_id = $1`.
 - **Reply Signature Parsing** — `signatureParser.js` utility auto-enriches affiliations when reply webhook fires. 3 extraction strategies: (1) structured signature block (name/title/company/phone below `--` separator), (2) inline phone regex in body, (3) vCard-style `TEL:` / `TITLE:` fields. Updates affiliations with phone/position. Title regex fix: `[\\w /&-]` (no `\\s` which matches newlines).
 - **Data Cleanup Migration 042** — Email domain company names → NULL (~887 rows matching `@` pattern), industry typo normalization (Otomotiv→Automotive, Lojistik→Logistics, Gıda→Food & Beverage, etc.).
+- **Reply Timeline Expand/Collapse** — ContactDrawer reply events now show From + Subject header (10px muted), 200-char preview with "Show full reply" / "Show less" toggle (orange-500). Each reply has independent expand state via `expandedReplies: Set<number>`. State resets on timeline refresh (fetchAll + addNote). Fallback "Reply detected" preserved for missing meta.text.
+- **Sender Identity Edit/Delete** — Settings page sender table now has Edit + Delete buttons and Campaigns count column. Edit modal: from_name, reply_to (optional), visibility radio (Public/Private). from_email shown disabled with explanation. Delete modal: confirm dialog with orange campaign usage warning ("This sender has been used in X campaigns"). Backend: `PUT /api/senders/:id` + `campaign_count` in GET response.
+- **Senders 500 Bug Fix** — GET /api/senders returned 500 because campaign_count query used `sender_identity_id` (doesn't exist) instead of `sender_id`. Same column-name assumption pattern as Companies 500 bug.
 
 ---
 

@@ -1918,3 +1918,54 @@ Automatically extracts phone number, job title, and company from email reply sig
 
 2. **Industry typo normalization**
    - Turkish → English standardization: Otomotiv→Automotive, Lojistik→Logistics, Gıda→Food & Beverage, İnşaat→Construction, Tekstil→Textile, Mobilya→Furniture, Enerji→Energy, Kimya→Chemicals, Makine→Machinery, Madencilik→Mining
+
+---
+
+## Sender Identity Edit/Delete (2026-04-20)
+
+**Status:** LIVE.
+
+### Backend (`routes/senders.js`)
+
+**PUT /api/senders/:id** — Update sender identity:
+- Editable fields: `from_name`, `reply_to`, `visibility`, `label`
+- `from_email` is NOT editable (requires SendGrid re-verification)
+- Ownership check via `canAccessRowHierarchical()`
+
+**GET /api/senders** — now includes `campaign_count` per sender:
+```sql
+SELECT sender_id, COUNT(*)::int AS campaign_count
+FROM campaigns WHERE organizer_id = $1 AND sender_id IS NOT NULL
+GROUP BY sender_id
+```
+
+**DELETE /api/senders/:id** — unchanged (soft delete: `is_active = false`).
+
+### Frontend (`settings/page.tsx`)
+
+- Sender table: added "Campaigns" count column + "Actions" column with Edit/Delete buttons
+- **Edit modal:** from_name input, reply_to input (optional), visibility radio (Public/Private). from_email shown as disabled input with explanation text.
+- **Delete modal:** confirm dialog showing sender name + email. Orange warning banner if `campaign_count > 0`: "This sender has been used in X campaigns."
+
+### Senders 500 Bug
+
+**Error:** GET /api/senders returning 500 after campaign_count feature was added.
+**Root cause:** Query used `sender_identity_id` but the actual column on `campaigns` table is `sender_id`.
+**Fix:** Changed to `sender_id` in 3 places (SELECT, WHERE, GROUP BY).
+**Pattern:** Same column-name assumption bug as Companies 500 (5th occurrence). Added mandatory schema verification rule to CLAUDE.md.
+
+---
+
+## Reply Timeline Expand/Collapse (2026-04-20)
+
+**Status:** LIVE.
+
+Enhanced reply event rendering in ContactDrawer timeline.
+
+**Changes (`components/ContactDrawer.tsx`):**
+
+1. **Reply header** — Shows `From: email@example.com` and subject line above body text (10px muted gray, truncated)
+2. **Expand/collapse** — Default 200-char preview, "Show full reply" toggle for longer texts (up to 2000 chars from DB)
+3. **Independent state** — `expandedReplies: Set<number>` tracks expanded replies by timeline index
+4. **Reset on refresh** — `setExpandedReplies(new Set())` called in both `fetchAll` and `addNote` to prevent stale index references
+5. **Fallback preserved** — "Reply detected — check email for details" when `meta.text` is missing

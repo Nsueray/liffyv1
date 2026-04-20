@@ -195,6 +195,9 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 35. ~~Data Cleanup Migration 042~~ ✅ DONE — Email domain company names → NULL (~887 rows), industry typo normalization (Otomotiv→Automotive, etc.).
 36. ~~Admin Bug Fixes (3x)~~ ✅ DONE — (1) Sidebar admin visibility for manager role, (2) VALID_ROLES mismatch `user`→`sales_rep` causing silent PATCH failures, (3) sequenceWorker daily limit scoped per-user via `created_by_user_id` JOIN.
 37. ~~Companies 500 Fix~~ ✅ DONE — 5 column name errors fixed via production DB verification (`country`→`country_code`, `source_url`→`website`, `email_status`→`verification_status`, `p.phone`→`a.phone`).
+38. ~~Sender Identity Edit/Delete~~ ✅ DONE — PUT /api/senders/:id (from_name, reply_to, visibility editable; from_email locked). Settings page Edit modal + Delete confirm dialog with campaign usage warning. GET /api/senders returns campaign_count.
+39. ~~Senders 500 Fix~~ ✅ DONE — campaign_count query used `sender_identity_id` but correct column is `sender_id`. Same column-name assumption bug pattern.
+40. ~~Reply Timeline Expand/Collapse~~ ✅ DONE — ContactDrawer reply events show From + Subject header, 200→full text toggle, expandedReplies Set state with reset on timeline refresh.
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for detailed task tracking.
 
@@ -218,6 +221,25 @@ No partial snippets, no "rest stays the same" shortcuts.
 
 ---
 
+## Recurring Mistakes — MANDATORY Rules
+
+### Column Name Assumption Bug (5+ occurrences!)
+
+Claude Code repeatedly writes SQL queries with **assumed column names** instead of verifying against the actual DB schema. This causes 500 errors every time.
+
+**Examples:**
+- `companies.js`: `country` → `country_code`, `source_url` → `website`
+- `companies.js`: `p.email_status` → `p.verification_status`, `p.phone` → `a.phone`
+- `senders.js`: `sender_identity_id` → `sender_id`
+
+**MANDATORY RULE:** Before writing ANY new query or endpoint, run:
+```sql
+SELECT column_name FROM information_schema.columns WHERE table_name = 'TABLE_NAME' ORDER BY ordinal_position;
+```
+This is NOT optional. Every new SQL query MUST be verified against the schema first.
+
+---
+
 ## What NOT To Do
 
 - Do NOT refactor the mining engine unless explicitly asked
@@ -225,6 +247,7 @@ No partial snippets, no "rest stays the same" shortcuts.
 - Do NOT delete legacy tables — they stay until Phase 4
 - Do NOT assume tables exist that aren't listed in [CLAUDE_DB.md](./CLAUDE_DB.md)
 - Do NOT create new tables without checking CLAUDE_DB.md first
+- Do NOT assume column names — always verify with `information_schema.columns`
 
 ---
 

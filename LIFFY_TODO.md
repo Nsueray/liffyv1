@@ -235,3 +235,6 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | K14 | Admin bug fixes — sidebar manager visibility, VALID_ROLES fix, sequenceWorker daily limit scoping | P1 | ✅ DONE |
 | K15 | Companies 500 fix — 5 column name errors (country_code, website, verification_status, a.phone) | P1 | ✅ DONE |
 | K16 | Lead Mining merge — Source Discovery + Mining Jobs → single /mining page with tabs | P1 | ✅ DONE |
+| K17 | Reply Timeline expand/collapse — From/Subject header + Show full reply toggle | P1 | ✅ DONE |
+| K18 | Sender Identity Edit/Delete — PUT endpoint + Settings UI (Edit modal, Delete confirm, campaign_count) | P1 | ✅ DONE |
+| K19 | Senders 500 fix — sender_identity_id → sender_id column name | P1 | ✅ DONE |
