@@ -38,7 +38,7 @@ router.get('/', authRequired, async (req, res) => {
     }
 
     if (country) {
-      where.push(`a.country ILIKE $${paramIdx}`);
+      where.push(`a.country_code ILIKE $${paramIdx}`);
       params.push(`%${country}%`);
       paramIdx++;
     }
@@ -87,7 +87,7 @@ router.get('/', authRequired, async (req, res) => {
         MAX(a.industry) as industry,
         COUNT(DISTINCT a.person_id) as contact_count,
         COUNT(DISTINCT CASE WHEN p.email_status = 'valid' THEN a.person_id END) as verified_count,
-        MAX(a.country) as country,
+        MAX(a.country_code) as country,
         MAX(a.created_at) as last_added
       FROM affiliations a
       JOIN persons p ON p.id = a.person_id AND p.organizer_id = a.organizer_id
@@ -145,8 +145,8 @@ router.get('/:companyName/contacts', authRequired, async (req, res) => {
         a.company_name,
         a.position as job_title,
         a.industry,
-        a.country,
-        a.source_url,
+        a.country_code as country,
+        a.website as source_url,
         a.created_at as affiliation_created_at
       FROM affiliations a
       JOIN persons p ON p.id = a.person_id AND p.organizer_id = a.organizer_id
