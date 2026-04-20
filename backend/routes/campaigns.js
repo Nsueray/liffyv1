@@ -216,6 +216,18 @@ router.delete('/:id', authRequired, async (req, res) => {
       });
     }
 
+    // Delete child rows before campaign to avoid ON DELETE SET NULL
+    // triggering unique constraint violations on prospect_intents
+    await db.query(
+      `DELETE FROM prospect_intents WHERE campaign_id = $1 AND organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
+    await db.query(
+      `DELETE FROM action_items WHERE campaign_id = $1 AND organizer_id = $2`,
+      [campaignId, organizerId]
+    );
+
     await db.query(
       `DELETE FROM campaign_recipients WHERE campaign_id = $1 AND organizer_id = $2`,
       [campaignId, organizerId]
