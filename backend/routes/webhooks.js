@@ -258,14 +258,17 @@ async function recordCampaignEvent(recipient, email, eventType, eventTime, rawEv
   if (!canonicalType) return;
 
   try {
-    // Best-effort person_id lookup from canonical persons table
-    let personId = null;
-    const personRes = await db.query(
-      `SELECT id FROM persons WHERE organizer_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
-      [recipient.organizer_id, email]
-    );
-    if (personRes.rows.length > 0) {
-      personId = personRes.rows[0].id;
+    // Use pre-resolved person_id if available (inbound handler sets it),
+    // otherwise do best-effort lookup from canonical persons table
+    let personId = recipient.person_id || null;
+    if (!personId) {
+      const personRes = await db.query(
+        `SELECT id FROM persons WHERE organizer_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+        [recipient.organizer_id, email]
+      );
+      if (personRes.rows.length > 0) {
+        personId = personRes.rows[0].id;
+      }
     }
 
     await db.query(`
@@ -651,7 +654,32 @@ router.post(
 
     console.log(`  ✅ Reply matched — ${recipient.email} → campaign ${recipient.campaign_id}`);
 
-    // 4. Record reply as campaign_event
+    // 3a. Resolve person_id ONCE — used by all downstream operations
+    // (campaign_events, prospect_intents, contact_activities, Action Engine)
+    let personId = null;
+    let personPipelineStageId = null;
+    try {
+      const personRes = await db.query(
+        `SELECT id, pipeline_stage_id FROM persons
+          WHERE organizer_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+        [recipient.organizer_id, recipient.email]
+      );
+      if (personRes.rows.length > 0) {
+        personId = personRes.rows[0].id;
+        personPipelineStageId = personRes.rows[0].pipeline_stage_id;
+      }
+    } catch (personErr) {
+      console.warn(`  ⚠️ Person lookup failed for ${recipient.email}:`, personErr.message);
+    }
+
+    if (!personId) {
+      console.warn(`  ⚠️ No person found for ${recipient.email} (organizer: ${recipient.organizer_id}) — some features may not trigger`);
+    }
+
+    // Attach person_id to recipient object so recordCampaignEvent can use it
+    recipient.person_id = personId;
+
+    // 4. Record reply as campaign_event (with person_id)
     const rawEvent = {
       from,
       to,
@@ -673,25 +701,18 @@ router.post(
       console.warn(`  ⚠️ Failed to update recipient status to replied:`, statusErr.message);
     }
 
-    console.log(`  📝 Reply recorded for ${recipient.email} (campaign: ${recipient.campaign_id})`);
+    console.log(`  📝 Reply recorded for ${recipient.email} (campaign: ${recipient.campaign_id}, person: ${personId || 'NULL'})`);
 
-    // Best-effort contact_activities hook — resolve person_id via email + organizer
-    try {
-      const personRes = await db.query(
-        `SELECT id, pipeline_stage_id FROM persons
-          WHERE organizer_id = $1 AND LOWER(email) = LOWER($2)
-          LIMIT 1`,
-        [recipient.organizer_id, recipient.email]
-      );
-      if (personRes.rows.length > 0) {
-        const person = personRes.rows[0];
+    // Best-effort contact_activities + pipeline auto-stage (requires person_id)
+    if (personId) {
+      try {
         await db.query(
           `INSERT INTO contact_activities
              (organizer_id, person_id, activity_type, description, meta, occurred_at)
            VALUES ($1, $2, 'email_replied', $3, $4, $5)`,
           [
             recipient.organizer_id,
-            person.id,
+            personId,
             (subject || '').substring(0, 200),
             JSON.stringify({ campaign_id: recipient.campaign_id, from, subject }),
             replyTime,
@@ -701,17 +722,17 @@ router.post(
         // Auto-stage: if person is unassigned, New, or Contacted → move to Interested
         try {
           let currentStageName = null;
-          if (person.pipeline_stage_id) {
+          if (personPipelineStageId) {
             const curRes = await db.query(
               `SELECT name FROM pipeline_stages
                 WHERE id = $1 AND organizer_id = $2 LIMIT 1`,
-              [person.pipeline_stage_id, recipient.organizer_id]
+              [personPipelineStageId, recipient.organizer_id]
             );
             currentStageName = curRes.rows[0] ? curRes.rows[0].name : null;
           }
 
           const shouldAutoMove =
-            !person.pipeline_stage_id ||
+            !personPipelineStageId ||
             currentStageName === 'New' ||
             currentStageName === 'Contacted';
 
@@ -727,7 +748,7 @@ router.post(
                 `UPDATE persons
                     SET pipeline_stage_id = $1, pipeline_entered_at = NOW()
                   WHERE id = $2 AND organizer_id = $3`,
-                [interestedId, person.id, recipient.organizer_id]
+                [interestedId, personId, recipient.organizer_id]
               );
               await db.query(
                 `INSERT INTO contact_activities
@@ -735,7 +756,7 @@ router.post(
                  VALUES ($1, $2, 'status_change', 'Auto-moved to Interested (reply received)', $3)`,
                 [
                   recipient.organizer_id,
-                  person.id,
+                  personId,
                   JSON.stringify({
                     from_stage: currentStageName,
                     to_stage: 'Interested',
@@ -750,9 +771,9 @@ router.post(
         } catch (stageErr) {
           console.warn('  ⚠️ Auto-stage failed:', stageErr.message);
         }
+      } catch (activityErr) {
+        console.warn('  ⚠️ contact_activities insert failed:', activityErr.message);
       }
-    } catch (activityErr) {
-      console.warn('  ⚠️ contact_activities insert failed:', activityErr.message);
     }
 
     // 6a. Sequence hook: stop sequence for replied recipient (best-effort)
@@ -763,18 +784,20 @@ router.post(
     }
 
     // 6b. Action Engine: evaluate reply trigger (best-effort)
-    try {
-      if (actionEngine) {
-        const aePersonRes = await db.query(
-          `SELECT id FROM persons WHERE organizer_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
-          [recipient.organizer_id, recipient.email]
-        );
-        if (aePersonRes.rows.length > 0) {
-          await actionEngine.evaluateForPerson(aePersonRes.rows[0].id, recipient.organizer_id, 'reply_received');
+    if (personId) {
+      try {
+        if (actionEngine) {
+          console.log(`  🎯 Action Engine: evaluating reply_received for person ${personId}`);
+          await actionEngine.evaluateForPerson(personId, recipient.organizer_id, 'reply_received');
+          console.log(`  ✅ Action Engine: reply_received trigger evaluated`);
+        } else {
+          console.warn('  ⚠️ Action Engine module not loaded — reply_received trigger skipped');
         }
+      } catch (aeErr) {
+        console.warn('  ⚠️ Action Engine reply trigger failed:', aeErr.message);
       }
-    } catch (aeErr) {
-      console.warn('  ⚠️ Action Engine reply trigger failed:', aeErr.message);
+    } else {
+      console.warn(`  ⚠️ Action Engine skipped — no person_id for ${recipient.email}`);
     }
 
     // 6c. NO forward — salesperson already has the reply in their Gmail inbox
