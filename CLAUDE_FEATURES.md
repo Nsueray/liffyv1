@@ -265,7 +265,7 @@ SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → 
 
 ## Reply Detection — Full Journey (v1→v4)
 
-**Status:** LIVE (v4 — plus addressing). Production-stable since 2026-04-20.
+**Status:** LIVE (v4 — plus addressing). Production-stable since 2026-04-20. DNS fix: `parse@reply.liffy.app` (not `parse@inbound.liffy.app` — inbound.liffy.app has no MX record).
 
 ### The Journey — 4 iterations, each solving a real failure
 
@@ -360,7 +360,7 @@ Previously had 4 independent lookups — if any returned NULL, downstream silent
 
 1. admin.google.com → Apps → Google Workspace → Gmail → Compliance → Content Compliance
 2. Add rule: "Liffy Reply Detection"
-3. **Inbound** checked
+3. **Inbound** checked, **Internal - Receiving** checked (same-domain replies)
 4. Expression: **Advanced content match**, **Full headers**, **Contains text**, `+c-`
 5. Also deliver to: `parse@reply.liffy.app`
 6. Save
@@ -1720,6 +1720,8 @@ Transferred ownership of templates, sender identities, and campaigns from Suer t
 **Blueprint Section 6 (Action Engine):** ✅ DONE — 6 triggers, priority scoring, 15-min reconciliation worker. Reply_received has no dedup (every reply = new P1 action item, migration 041).
 **Blueprint Section 8 (Action Screen):** ✅ DONE — homepage with priority cards, filter/sort, snooze, history.
 **Blueprint Principle 2 (Zero Context Switching):** Reply Detection v4 delivers natural email threads — customer replies go to salesperson's real inbox via plus-addressed Reply-To.
+**Owner/Creator Info:** ✅ DONE — "By" column on all listing pages (campaigns, lists, templates, mining jobs). LEFT JOIN users on 4 GET endpoints.
+**Campaign Delete Fix:** ✅ DONE — explicit delete of prospect_intents + action_items before campaign (ON DELETE SET NULL + uq_prospect_intent trap).
 **engaged_hot rule tightened:** 93→2 action items after strict combination rules (2+ opens on different days, click + qualifying context).
 **Pipeline sidebar removed:** Pipeline accessible via top nav only.
 
@@ -1733,3 +1735,72 @@ Enhanced contacts page with company and industry filtering:
 - **Company autocomplete:** ILIKE search on `affiliations.company_name` via LATERAL JOIN
 - **Industry dropdown:** ILIKE search on `affiliations.industry` (populated from Zoho import normalization)
 - Both filters work alongside existing search, verification status, and exclude_invalid filters
+
+---
+
+## Owner/Creator Info on Listing Pages (2026-04-21)
+
+**Status:** LIVE.
+
+Added "By" column to all 4 listing pages and "by {name}" to campaign detail header.
+
+**Backend changes (4 endpoints):**
+
+| Endpoint | File | Change |
+|----------|------|--------|
+| `GET /api/campaigns` | `campaigns.js` | LEFT JOIN users, `creator_name` in response |
+| `GET /api/campaigns/:id` | `campaigns.js` | LEFT JOIN users, `creator_name` in response |
+| `GET /api/lists` | `lists.js` | LEFT JOIN users (alias `l`), `creator_name` + `creator_email` |
+| `GET /api/email-templates` | `emailTemplates.js` | LEFT JOIN users (alias `e`), `creator_name` in response |
+| `GET /api/mining/jobs` | `miningJobs.js` | LEFT JOIN users (alias `j`), all WHERE clauses prefixed, `creator_name` |
+
+**Frontend changes (5 pages):**
+
+| Page | Change |
+|------|--------|
+| `/campaigns` | "By" column between Scheduled and Created |
+| `/campaigns/[id]` | "by {name}" next to status in header |
+| `/lists` | "By" column between Unverified and Created |
+| `/templates` | "By" column between Visibility and Created |
+| `/mining/jobs` | "By" column between Emails and Created |
+
+**Design:** `text-xs text-gray-500`, NULL shows "—".
+
+**creator_name computation:** `[first_name, last_name].filter(Boolean).join(' ') || null`
+
+---
+
+## Campaign Delete Bug Fix (2026-04-21)
+
+**Status:** LIVE.
+
+**Error:** `"duplicate key value violates unique constraint uq_prospect_intent"` when deleting a campaign.
+
+**Root cause chain:**
+1. `prospect_intents.campaign_id` has `ON DELETE SET NULL` (migration 017)
+2. When campaign is deleted, PostgreSQL sets `campaign_id` to NULL
+3. Unique index `uq_prospect_intent` uses `COALESCE(campaign_id::text, '')` (migration 021)
+4. If same person already has another intent with NULL campaign_id and same intent_type → unique violation
+
+**Fix:** Explicitly delete child rows BEFORE the campaign:
+```
+1. DELETE FROM prospect_intents WHERE campaign_id = $1
+2. DELETE FROM action_items WHERE campaign_id = $1
+3. DELETE FROM campaign_recipients WHERE campaign_id = $1
+4. DELETE FROM campaigns WHERE id = $1
+```
+
+`campaign_events` and `campaign_sequences`/`sequence_recipients` have `ON DELETE CASCADE`, so PostgreSQL handles them automatically.
+
+**FK reference summary for campaigns:**
+
+| Table | FK | ON DELETE |
+|-------|-----|-----------|
+| `campaign_events` | `campaign_id NOT NULL` | CASCADE |
+| `campaign_sequences` | `campaign_id NOT NULL` | CASCADE |
+| `sequence_recipients` | `campaign_id NOT NULL` | CASCADE |
+| `campaign_recipients` | `campaign_id NOT NULL` | CASCADE |
+| `prospect_intents` | `campaign_id` (nullable) | SET NULL |
+| `action_items` | `campaign_id` (nullable) | SET NULL |
+
+**Lesson:** Nullable FKs with `ON DELETE SET NULL` + unique constraints using `COALESCE(nullable, '')` create a trap. Always check unique indexes when using SET NULL.

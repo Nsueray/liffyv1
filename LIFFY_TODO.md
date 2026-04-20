@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-20*
+*Updated: 2026-04-21*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -219,11 +219,14 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 
 | # | Task | Priority | Status |
 |---|------|----------|--------|
-| K1 | Bengü kullanıma alınacak — reply detection çalışıyor, isolation çalışıyor | P1 | TODO |
+| K1 | Bengü kullanıma alınacak — reply detection çalışıyor, isolation çalışıyor, role=sales_rep | P1 | ✅ DONE |
 | K2 | Company entity — affiliations'tan company view sayfası | P2 | TODO |
 | K3 | Gmail API OAuth — Phase 2 reply detection, auto-forward replace | P2 | FUTURE |
 | K4 | WhatsApp Channel — campaign gönderim kanalı | P3 | FUTURE |
 | K5 | Overview Screen — ELIZA shared DB, fuar/etkinlik genel görünümü | P3 | FUTURE |
 | K6 | Source Discovery + Mining Jobs merge — tek ekranda birleştir | P2 | TODO |
-| K7 | Campaign/List'te owner bilgisi UI'da göster | P3 | TODO |
+| K7 | Campaign/List'te owner bilgisi UI'da göster — "By" column + campaign detail header | P3 | ✅ DONE |
 | K8 | Inbox / email takip — Phase 6 conversation layer | P2 | FUTURE |
+| K9 | Campaign delete bug fix — ON DELETE SET NULL + uq_prospect_intent çakışması | P1 | ✅ DONE |
+| K10 | Migration 041 production'da uygulandı — reply_received dedup index exclude | P1 | ✅ DONE |
+| K11 | Bengü role update — user → sales_rep | P1 | ✅ DONE |

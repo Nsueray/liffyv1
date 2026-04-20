@@ -40,7 +40,7 @@ Engagement is stored as events, not scores.
 
 ## Database — Current State (31 tables, 41 migrations)
 
-**Production stats (2026-04-20):** ~75,399 persons, ~85,603 affiliations. 3 users: Suer (owner), Elif (manager, reports_to: Suer), Bengü (sales_rep, reports_to: Elif).
+**Production stats (2026-04-21):** ~75,399 persons, ~85,603 affiliations. 3 users: Suer (owner), Elif (manager, reports_to: Suer), Bengü (sales_rep, reports_to: Elif). Migration 041 applied.
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -96,7 +96,7 @@ Phase 4 — Remove legacy tables (5 steps). Full plan in `MIGRATION_PLAN.md`.
 
 **Current phase: Late Phase 3 (approaching Phase 4)**
 
-All migrations (001–040) applied in production. Migration 041 written, not yet applied.
+All migrations (001–041) applied in production.
 `AGGREGATION_PERSIST=true` set on Render — mining pipeline writes to `persons` + `affiliations`.
 All import paths (CSV upload, import-all, leads/import) dual-write to both legacy and canonical tables.
 Campaign resolve prefers canonical data with legacy fallback.
@@ -228,7 +228,9 @@ organizers ──── persons ──── affiliations
 
 campaigns ──┬── campaign_recipients ──── campaign_events
             ├── campaign_sequences
-            └── sequence_recipients
+            ├── sequence_recipients
+            ├── prospect_intents (campaign_id, ON DELETE SET NULL)
+            └── action_items (campaign_id, ON DELETE SET NULL)
 
 users ──┬── action_items (via assigned_to)
        └── users (via reports_to — recursive hierarchy, ADR-015)

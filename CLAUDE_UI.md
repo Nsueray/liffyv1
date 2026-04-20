@@ -77,6 +77,8 @@
 - **Lists created_by_user_id Fix** — 4 list creation paths (CSV import, import-all, leads import, URL miner) now set `created_by_user_id` + `visibility='shared'`. Fixes bug where Elif couldn't see her own lists.
 - **Data Ownership Transfer** — Templates, senders, campaigns transferred from Suer to Elif via SQL UPDATE. One-time fix for pre-isolation resources.
 - **Contacts Page Filters** — Company autocomplete (ILIKE on affiliations.company_name) + industry dropdown via LATERAL JOIN. Works with existing search/verification filters.
+- **Owner/Creator Info on Listing Pages** — "By" column on campaigns, lists, templates, mining jobs tables. Backend: LEFT JOIN users on 4 GET endpoints (campaigns.js, lists.js, emailTemplates.js, miningJobs.js), returns `creator_name`. Campaign detail header shows "by {name}" next to created date. Style: `text-xs text-gray-500`, NULL → "—".
+- **Campaign Delete Bug Fix** — "duplicate key value violates unique constraint uq_prospect_intent" when deleting a campaign. Root cause: `prospect_intents.campaign_id` has `ON DELETE SET NULL` — setting to NULL clashes with `uq_prospect_intent` index using `COALESCE(campaign_id::text, '')`. Fix: explicitly delete `prospect_intents` and `action_items` before deleting campaign.
 
 ---
 

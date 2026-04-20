@@ -184,6 +184,8 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 27. ~~Reply Detection v2→v4~~ ✅ DONE — Plus-addressed Reply-To (`sender+c-{8hex}-r-{8hex}@domain.com`), Gmail Content Compliance header match `+c-` → forward to `parse@reply.liffy.app`, 3 detection methods (plus address → unsubscribe URL token → email match), Action Engine P1 trigger, person_id consolidated (single lookup)
 28. ~~Lists created_by_user_id Fix~~ ✅ DONE — 4 list creation paths missing created_by_user_id → NULL → invisible to non-owner users
 29. ~~Action Engine Reply Dedup Fix~~ ✅ DONE — every reply creates new P1 action item (no dedup for reply_received), migration 041
+30. ~~Owner/Creator Info on UI~~ ✅ DONE — "By" column on campaigns, lists, templates, mining jobs tables. LEFT JOIN users, creator_name. Campaign detail shows "by {name}" in header.
+31. ~~Campaign Delete Bug Fix~~ ✅ DONE — ON DELETE SET NULL on prospect_intents caused uq_prospect_intent violation. Explicit delete of prospect_intents + action_items before campaign.
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for detailed task tracking.
 
