@@ -403,6 +403,35 @@ router.get('/export', authRequired, async (req, res) => {
   }
 });
 
+// GET /api/persons/:id/campaigns — campaign history for this person
+router.get('/:id/campaigns', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const personId = req.params.id;
+
+    const result = await db.query(
+      `SELECT c.id, c.name, c.status, c.created_at,
+         COUNT(CASE WHEN ce.event_type = 'sent' THEN 1 END)::int AS sent,
+         COUNT(CASE WHEN ce.event_type = 'delivered' THEN 1 END)::int AS delivered,
+         COUNT(CASE WHEN ce.event_type = 'open' THEN 1 END)::int AS opens,
+         COUNT(CASE WHEN ce.event_type = 'click' THEN 1 END)::int AS clicks,
+         COUNT(CASE WHEN ce.event_type = 'reply' THEN 1 END)::int AS replies,
+         COUNT(CASE WHEN ce.event_type = 'bounce' THEN 1 END)::int AS bounces
+       FROM campaign_events ce
+       JOIN campaigns c ON c.id = ce.campaign_id
+       WHERE ce.person_id = $1 AND ce.organizer_id = $2
+       GROUP BY c.id, c.name, c.status, c.created_at
+       ORDER BY c.created_at DESC`,
+      [personId, organizerId]
+    );
+
+    res.json({ campaigns: result.rows });
+  } catch (err) {
+    console.error('GET /api/persons/:id/campaigns error:', err);
+    res.status(500).json({ error: 'Failed to fetch campaign history' });
+  }
+});
+
 // GET /api/persons/:id — Single person detail with all affiliations
 router.get('/:id', authRequired, async (req, res) => {
   try {
