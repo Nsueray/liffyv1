@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-21*
+*Updated: 2026-04-20*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -220,13 +220,18 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | # | Task | Priority | Status |
 |---|------|----------|--------|
 | K1 | Bengü kullanıma alınacak — reply detection çalışıyor, isolation çalışıyor, role=sales_rep | P1 | ✅ DONE |
-| K2 | Company entity — affiliations'tan company view sayfası | P2 | TODO |
+| K2 | Company entity — affiliations'tan company view sayfası | P2 | ✅ DONE |
 | K3 | Gmail API OAuth — Phase 2 reply detection, auto-forward replace | P2 | FUTURE |
 | K4 | WhatsApp Channel — campaign gönderim kanalı | P3 | FUTURE |
 | K5 | Overview Screen — ELIZA shared DB, fuar/etkinlik genel görünümü | P3 | FUTURE |
-| K6 | Source Discovery + Mining Jobs merge — tek ekranda birleştir | P2 | TODO |
+| K6 | Source Discovery + Mining Jobs merge — tek ekranda birleştir | P2 | ✅ DONE |
 | K7 | Campaign/List'te owner bilgisi UI'da göster — "By" column + campaign detail header | P3 | ✅ DONE |
 | K8 | Inbox / email takip — Phase 6 conversation layer | P2 | FUTURE |
 | K9 | Campaign delete bug fix — ON DELETE SET NULL + uq_prospect_intent çakışması | P1 | ✅ DONE |
 | K10 | Migration 041 production'da uygulandı — reply_received dedup index exclude | P1 | ✅ DONE |
 | K11 | Bengü role update — user → sales_rep | P1 | ✅ DONE |
+| K12 | Reply Signature Parsing — signatureParser.js + webhooks.js enrichment | P1 | ✅ DONE |
+| K13 | Data Cleanup Migration 042 — email domain company names + industry typos | P1 | ✅ DONE |
+| K14 | Admin bug fixes — sidebar manager visibility, VALID_ROLES fix, sequenceWorker daily limit scoping | P1 | ✅ DONE |
+| K15 | Companies 500 fix — 5 column name errors (country_code, website, verification_status, a.phone) | P1 | ✅ DONE |
+| K16 | Lead Mining merge — Source Discovery + Mining Jobs → single /mining page with tabs | P1 | ✅ DONE |

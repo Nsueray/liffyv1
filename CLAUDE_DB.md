@@ -38,9 +38,9 @@ Engagement is stored as events, not scores.
 
 ---
 
-## Database — Current State (31 tables, 41 migrations)
+## Database — Current State (31 tables, 42 migrations)
 
-**Production stats (2026-04-21):** ~75,399 persons, ~85,603 affiliations. 3 users: Suer (owner), Elif (manager, reports_to: Suer), Bengü (sales_rep, reports_to: Elif). Migration 041 applied.
+**Production stats (2026-04-20):** ~75,399 persons, ~85,603 affiliations. 3 users: Suer (owner), Elif (manager, reports_to: Suer), Bengü (sales_rep, reports_to: Elif). Migration 042 applied.
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -96,7 +96,7 @@ Phase 4 — Remove legacy tables (5 steps). Full plan in `MIGRATION_PLAN.md`.
 
 **Current phase: Late Phase 3 (approaching Phase 4)**
 
-All migrations (001–041) applied in production.
+All migrations (001–042) applied in production.
 `AGGREGATION_PERSIST=true` set on Render — mining pipeline writes to `persons` + `affiliations`.
 All import paths (CSV upload, import-all, leads/import) dual-write to both legacy and canonical tables.
 Campaign resolve prefers canonical data with legacy fallback.
@@ -158,7 +158,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 
 ---
 
-## Migrations (33 files)
+## Migrations (34 files)
 
 | # | File | Tables |
 |---|------|--------|
@@ -197,6 +197,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 | 039 | `039_add_user_permissions.sql` | ALTER `users` (+permissions JSONB) — per-user feature permissions (ADR-015) |
 | 040 | `040_template_sender_visibility.sql` | ALTER `email_templates` (+visibility, +created_by_user_id), ALTER `sender_identities` (+visibility) — upward visibility scope (ADR-015) |
 | 041 | `041_allow_multiple_reply_actions.sql` | DROP + recreate `idx_action_items_dedup` excluding `reply_received` — every reply creates new P1 action item |
+| 042 | `042_cleanup_company_industry.sql` | Data cleanup: email domain company_name → NULL (~887 rows), industry typo normalization (Otomotiv→Automotive, Lojistik→Logistics, etc.) |
 
 ---
 

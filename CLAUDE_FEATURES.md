@@ -1804,3 +1804,117 @@ Added "By" column to all 4 listing pages and "by {name}" to campaign detail head
 | `action_items` | `campaign_id` (nullable) | SET NULL |
 
 **Lesson:** Nullable FKs with `ON DELETE SET NULL` + unique constraints using `COALESCE(nullable, '')` create a trap. Always check unique indexes when using SET NULL.
+
+---
+
+## Lead Mining Page — Source Discovery + Mining Jobs Merge (2026-04-20)
+
+**Status:** LIVE.
+
+Combined two separate pages (Source Discovery and Mining Jobs) into a single `/mining` page with two tabs.
+
+**Frontend changes:**
+- Created `/mining/page.tsx` — unified page with `tab` query param (`discover` / `jobs`)
+- Tab 1 "Discover": URL input + mining mode selector + launch job (previously `/mining/discover`)
+- Tab 2 "Jobs": mining jobs table with status, results, strategy, etc. (previously `/mining/jobs`)
+- `useSearchParams()` required `<Suspense>` wrapper for Next.js 16 static prerendering
+- Sidebar: removed separate Mining Jobs + Source Discovery items, added single "Lead Mining" (Pickaxe icon)
+
+---
+
+## Company Entity Page (2026-04-20)
+
+**Status:** LIVE.
+
+Aggregated company view from `affiliations` table — lets users see all unique companies and drill into their contacts.
+
+**Backend:** `backend/routes/companies.js` (new file, mounted at `/api/companies` in server.js)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /api/companies` | Aggregated companies with contact_count, verified_count, industry, country, last_added. Filters: search, industry, country, min_contacts. Sort + pagination. |
+| `GET /api/companies/:companyName/contacts` | All persons affiliated with a company. Returns person details + affiliation data. |
+
+**Key SQL pattern:**
+```sql
+SELECT LOWER(TRIM(a.company_name)) as company_key,
+  MAX(a.company_name) as company_name,
+  COUNT(DISTINCT a.person_id) as contact_count,
+  COUNT(DISTINCT CASE WHEN p.verification_status = 'valid' THEN a.person_id END) as verified_count
+FROM affiliations a
+JOIN persons p ON p.id = a.person_id AND p.organizer_id = a.organizer_id
+WHERE a.organizer_id = $1
+GROUP BY LOWER(TRIM(a.company_name))
+```
+
+**Column name lessons learned (5 errors fixed):**
+- `affiliations.country` → `affiliations.country_code`
+- `affiliations.source_url` → `affiliations.website`
+- `persons.email_status` → `persons.verification_status`
+- `persons.phone` → `affiliations.phone` (phone is on affiliations, not persons)
+
+**Frontend:** `/companies/page.tsx` with stats cards, search, industry dropdown, country filter, company table, contact drawer.
+
+---
+
+## Reply Email Signature Parsing (2026-04-20)
+
+**Status:** LIVE.
+
+Automatically extracts phone number, job title, and company from email reply signatures and enriches the sender's affiliation record.
+
+**File:** `backend/utils/signatureParser.js`
+
+**3 extraction strategies (tried in order):**
+
+1. **Structured signature block** — finds `--` or `___` separator, parses lines below for name/title/company/phone
+2. **Inline phone regex** — scans entire body for phone patterns (`+XX XXX...`, `(XXX) XXX-XXXX`, etc.)
+3. **vCard-style fields** — looks for `TEL:`, `TITLE:`, `ORG:` patterns
+
+**Functions:**
+- `parseEmailSignature(bodyText)` → `{ phone, title, company, raw_signature }`
+- `enrichPersonFromSignature(organizerId, email, signatureData)` → updates `affiliations` (phone, position)
+
+**Integration:** Called in `webhooks.js` after reply is recorded and Action Engine fires (step 6c). Best-effort — errors logged but never block reply processing.
+
+**Title regex fix:** Changed character class from `[\\w\\s/&-]` to `[\\w /&-]` (space instead of `\\s`) + `m` flag. Original `\\s` matched newlines, causing title to span across lines.
+
+---
+
+## Admin Bug Fixes — VALID_ROLES & Daily Limit Scoping (2026-04-20)
+
+**Status:** LIVE.
+
+### Bug 1: Admin sidebar not showing for manager role
+
+**Root cause:** Sidebar `adminOnly` filter checked `role === 'owner' || role === 'admin'` — managers excluded.
+**Fix:** Added `|| role === 'manager'` to sidebar filter + admin page auth guard.
+
+### Bug 2: Permissions UI save not working (VALID_ROLES mismatch)
+
+**Root cause:** `userManagement.js` had `VALID_ROLES = ['owner', 'admin', 'manager', 'user']` but the actual system role is `sales_rep`, not `user`. When an admin edited ANY field of a sales_rep user (e.g., daily_email_limit), the PATCH request included the user's current role (`sales_rep`), which failed validation against the incorrect VALID_ROLES array. The entire PATCH was rejected — the daily_email_limit change was silently lost.
+
+**Fix:** Changed to `VALID_ROLES = ['owner', 'admin', 'manager', 'sales_rep']`. Also cleaned up frontend role dropdowns (removed `staff`/`user` options).
+
+### Bug 3: Sequence Worker daily limit counting ALL organizer events
+
+**Root cause:** `sequenceWorker.js` `getRemainingDailyLimit()` counted all sent events for the entire organizer, not per-user. If Elif sent 100 emails, Bengü's limit was also reduced by 100.
+
+**Fix:** Added `JOIN campaigns c ON c.id = ce.campaign_id ... AND c.created_by_user_id = $1` to scope the count per campaign owner.
+
+---
+
+## Data Cleanup Migration 042 (2026-04-20)
+
+**Status:** Applied in production.
+
+**File:** `backend/migrations/042_cleanup_company_industry.sql`
+
+**Two operations:**
+
+1. **Email domain company names → NULL** (~887 rows)
+   - Pattern: `company_name LIKE '%@%'` — matches email addresses stored as company names
+   - These came from early mining runs where email addresses were incorrectly parsed as company names
+
+2. **Industry typo normalization**
+   - Turkish → English standardization: Otomotiv→Automotive, Lojistik→Logistics, Gıda→Food & Beverage, İnşaat→Construction, Tekstil→Textile, Mobilya→Furniture, Enerji→Energy, Kimya→Chemicals, Makine→Machinery, Madencilik→Mining

@@ -91,6 +91,8 @@ Cross-organizer email uniqueness does NOT exist.
 | Leads | Contacts without intent |
 | Prospects | Contacts with intent |
 | Mining Results | Discovery events |
+| Lead Mining | Combined Source Discovery + Mining Jobs (tabs) |
+| Companies | Aggregated company view from affiliations |
 | Lists | Campaign targeting snapshots |
 | Pipeline | Kanban board of contacts across stages |
 | Tasks | Follow-up tasks assigned to current user |
@@ -186,6 +188,12 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 29. ~~Action Engine Reply Dedup Fix~~ ✅ DONE — every reply creates new P1 action item (no dedup for reply_received), migration 041
 30. ~~Owner/Creator Info on UI~~ ✅ DONE — "By" column on campaigns, lists, templates, mining jobs tables. LEFT JOIN users, creator_name. Campaign detail shows "by {name}" in header.
 31. ~~Campaign Delete Bug Fix~~ ✅ DONE — ON DELETE SET NULL on prospect_intents caused uq_prospect_intent violation. Explicit delete of prospect_intents + action_items before campaign.
+32. ~~Lead Mining Page~~ ✅ DONE — Source Discovery + Mining Jobs merged into single `/mining` page with Discover/Jobs tabs. Sidebar updated (Pickaxe icon). Next.js 16 `<Suspense>` wrapper for `useSearchParams()`.
+33. ~~Company Entity Page~~ ✅ DONE — `/companies` page with aggregated company view from affiliations. Backend `GET /api/companies` + `GET /api/companies/:name/contacts`. Sidebar (Building2 icon). Stats cards + search + industry/country filters.
+34. ~~Reply Signature Parsing~~ ✅ DONE — `signatureParser.js` utility extracts phone/title/company from reply email signatures. 3 strategies (structured block, inline phone, vCard-style). Auto-enriches affiliations on reply webhook.
+35. ~~Data Cleanup Migration 042~~ ✅ DONE — Email domain company names → NULL (~887 rows), industry typo normalization (Otomotiv→Automotive, etc.).
+36. ~~Admin Bug Fixes (3x)~~ ✅ DONE — (1) Sidebar admin visibility for manager role, (2) VALID_ROLES mismatch `user`→`sales_rep` causing silent PATCH failures, (3) sequenceWorker daily limit scoped per-user via `created_by_user_id` JOIN.
+37. ~~Companies 500 Fix~~ ✅ DONE — 5 column name errors fixed via production DB verification (`country`→`country_code`, `source_url`→`website`, `email_status`→`verification_status`, `p.phone`→`a.phone`).
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for detailed task tracking.
 
