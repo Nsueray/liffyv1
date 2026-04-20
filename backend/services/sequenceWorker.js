@@ -28,10 +28,13 @@ async function getRemainingDailyLimit(userId) {
   const limit = parseInt(limitRes.rows[0].daily_email_limit, 10);
 
   const sentRes = await db.query(
-    `SELECT COUNT(*) AS count FROM campaign_events
-     WHERE event_type = 'sent'
-       AND occurred_at >= CURRENT_DATE
-       AND organizer_id IN (SELECT organizer_id FROM users WHERE id = $1)`,
+    `SELECT COUNT(*)::int AS count
+       FROM campaign_events ce
+       JOIN campaigns c ON c.id = ce.campaign_id
+      WHERE ce.event_type = 'sent'
+        AND ce.occurred_at >= CURRENT_DATE
+        AND ce.organizer_id = (SELECT organizer_id FROM users WHERE id = $1)
+        AND c.created_by_user_id = $1`,
     [userId]
   );
   const sentToday = parseInt(sentRes.rows[0].count, 10);

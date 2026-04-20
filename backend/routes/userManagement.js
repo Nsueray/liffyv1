@@ -23,7 +23,7 @@ const { isPrivileged, getUserContext } = require('../middleware/userScope');
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (v) => typeof v === 'string' && UUID_REGEX.test(v);
 
-const VALID_ROLES = ['owner', 'admin', 'manager', 'user'];
+const VALID_ROLES = ['owner', 'admin', 'manager', 'sales_rep'];
 
 // -----------------------------------------------------------------------------
 // Guard: only owner/admin can use these endpoints
