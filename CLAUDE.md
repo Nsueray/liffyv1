@@ -1,5 +1,6 @@
 # CLAUDE.md — Liffy Project Instructions (Constitution-Aligned)
 
+> **Quick start:** [CLAUDE_QUICKSTART.md](./CLAUDE_QUICKSTART.md) (new chat reference)
 > **Split docs:** [CLAUDE_DB.md](./CLAUDE_DB.md) (database & domain model), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md) (feature documentation), [CLAUDE_UI.md](./CLAUDE_UI.md) (UI build progress)
 > **Guides:** [MINER_GUIDE.md](./MINER_GUIDE.md) (miner development), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) (refactor plan)
 > **Tracking:** [LIFFY_TODO.md](./LIFFY_TODO.md) (master todo list)
