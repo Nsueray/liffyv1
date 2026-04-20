@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-18*
+*Updated: 2026-04-20*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -139,34 +139,36 @@
 | G11 | Reply UX — VERP display name (sender name in reply-to) + forward FROM format ("Reply: Name") | P1 | ✅ DONE |
 | G12 | Reply Email Quality — click tracking disabled, reply body in timeline (2000 chars), forward fallback to creator email | P1 | ✅ DONE |
 | G13 | JWT Auth Fix — `id` vs `user_id` normalization across 28 auth middleware instances (critical production bug) | P1 | ✅ DONE |
-| G14 | Reply Detection v2 — VERP→Gmail migration: salesperson's real Reply-To + hidden HTML tag + Gmail auto-forward. Forward removed. | P1 | ✅ DONE |
+| G14 | Reply Detection v2→v4 — VERP→hidden tag→unsubscribe token→plus addressing. Final: `sender+c-xxx-r-xxx@domain.com`, Gmail Content Compliance header match, 3 detection methods, person_id consolidated. | P1 | ✅ DONE |
+| G15 | Action Engine reply trigger fix — person_id resolved once, 4 redundant lookups eliminated, recordCampaignEvent uses pre-resolved person_id | P1 | ✅ DONE |
+| G16 | Action Engine reply dedup removed — every reply creates new P1 action item, migration 041, insertActionItem (no ON CONFLICT), reconcile skips reply_received | P1 | ✅ DONE |
 
 ### Context
 
-**Current state (Reply Detection v2):**
+**Current state (Reply Detection v4 — Plus Addressing):**
 - ✅ Click tracking works (campaign_events, event_type='click')
 - ✅ Open tracking works (campaign_events, event_type='open')
-- ✅ Reply detection v2 LIVE — hidden tag + Gmail auto-forward (replaces VERP)
-- ✅ Reply-To = salesperson's real email (natural Gmail thread)
-- ✅ Hidden HTML comment tag: `<!--LIFFY:c-{8hex}-r-{8hex}-->` in email body
-- ✅ Custom headers: X-Liffy-CID, X-Liffy-RID on outbound emails
-- ✅ Inbound Parse: `parseLiffyTag()` (primary) + VERP envelope (fallback for in-flight)
+- ✅ Reply detection v4 LIVE — plus-addressed Reply-To + Gmail Content Compliance header match
+- ✅ Reply-To = `sender+c-{8hex}-r-{8hex}@domain.com` (natural Gmail thread, +tag ignored)
+- ✅ 3 detection methods: plus address (primary) → unsubscribe URL token (fallback) → email match (last resort)
 - ✅ Forward REMOVED — salesperson has reply in Gmail, LİFFY only records + triggers Action Engine
-- ✅ DNS + SendGrid config DONE — parse@inbound.liffy.app Inbound Parse URL
+- ✅ person_id resolved ONCE in inbound handler — used by all downstream operations
+- ✅ Action Engine: every reply = new P1 action item (no dedup, migration 041)
+- ✅ DNS: reply.liffy.app MX → mx.sendgrid.net. inbound.liffy.app has NO MX (unused)
 - ✅ Unsubscribe tracking UI — /campaigns/unsubscribes page with stats, search, source filter, campaign attribution
 
-**Reply detection approach:** Hidden HTML comment tag + Gmail auto-forward
-- Tag format: `<!--LIFFY:c-{8 hex}-r-{8 hex}-->` (invisible in rendered email)
+**Reply detection approach:** Plus-addressed Reply-To + Gmail Content Compliance
+- Reply-To: `sender+c-{campaignId8}-r-{recipientId8}@domain.com`
 - Endpoint: `POST /api/webhooks/inbound/:secret` (multer multipart middleware)
-- Detection: parseLiffyTag() from body (primary), parseVerpAddress() from envelope (fallback)
+- Detection: parsePlusAddress() from To header (primary), detectReplySource() from body (fallback), email match (last resort)
 - Auto-reply filter: RFC 3834 headers, OOO subjects, mailer-daemon from patterns
 - No forward — salesperson gets reply directly via Reply-To
 
-**Gmail filter required:** Admin must configure Gmail Content Compliance rule:
-- Condition: Body contains `LIFFY:c-`
-- Action: Also deliver to `parse@inbound.liffy.app`
+**Gmail Content Compliance required:** Admin must configure:
+- Inbound, Advanced content match, **Full headers**, Contains text, `+c-`
+- Also deliver to: `parse@reply.liffy.app`
 
-**Live:** Reply detection v2 is fully operational. Gmail filter pending admin setup.
+**Live:** Reply detection v4 is fully operational.
 
 **Unsubscribe:**
 - ✅ SendGrid handles unsubscribe links in emails
@@ -212,3 +214,16 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | J3 | Reply composer — UI'dan prospect'e reply yazıp gönder (send-on-behalf via SendGrid) | P2 | FUTURE |
 | J4 | Inbox page — tüm reply'ları tek sayfada göster, conversation navigate | P2 | FUTURE |
 | J5 | Email threading headers — Message-ID, In-Reply-To, References (RFC 5322 threading) | P3 | FUTURE |
+
+## K. PENDING / NEXT UP
+
+| # | Task | Priority | Status |
+|---|------|----------|--------|
+| K1 | Bengü kullanıma alınacak — reply detection çalışıyor, isolation çalışıyor | P1 | TODO |
+| K2 | Company entity — affiliations'tan company view sayfası | P2 | TODO |
+| K3 | Gmail API OAuth — Phase 2 reply detection, auto-forward replace | P2 | FUTURE |
+| K4 | WhatsApp Channel — campaign gönderim kanalı | P3 | FUTURE |
+| K5 | Overview Screen — ELIZA shared DB, fuar/etkinlik genel görünümü | P3 | FUTURE |
+| K6 | Source Discovery + Mining Jobs merge — tek ekranda birleştir | P2 | TODO |
+| K7 | Campaign/List'te owner bilgisi UI'da göster | P3 | TODO |
+| K8 | Inbox / email takip — Phase 6 conversation layer | P2 | FUTURE |

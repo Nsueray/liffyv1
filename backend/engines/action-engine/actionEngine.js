@@ -31,8 +31,8 @@ async function evaluateForPerson(personId, organizerId, triggerHint) {
     } else if (triggerHint === 'engaged_hot') {
       await checkEngagedHot(personId, organizerId);
     } else {
-      // Full evaluation
-      await checkReplyReceived(personId, organizerId);
+      // Full evaluation (reconcile) — reply_received is real-time only (no dedup),
+      // so skip it here to avoid creating duplicate items on every 15-min cycle.
       await checkSequenceExhausted(personId, organizerId);
       await checkEngagedHot(personId, organizerId);
       // T3 + T4 are stubs
@@ -44,6 +44,9 @@ async function evaluateForPerson(personId, organizerId, triggerHint) {
 
 // ---------------------------------------------------------------------------
 // T1: reply_received — Priority 1
+// NO DEDUP: every reply creates a new action item.
+// Salesperson marks done/dismiss; new reply → new action item appears.
+// Only called from real-time path (triggerHint='reply_received'), NOT from reconcile.
 // ---------------------------------------------------------------------------
 async function checkReplyReceived(personId, organizerId) {
   // Find most recent reply event for this person
@@ -67,7 +70,7 @@ async function checkReplyReceived(personId, organizerId) {
     ? `Reply received: "${reply.reason.substring(0, 80)}"`
     : `Reply received from campaign "${reply.campaign_name || 'unknown'}"`;
 
-  await upsertActionItem({
+  await insertActionItem({
     organizerId,
     assignedTo,
     personId,
@@ -331,8 +334,23 @@ async function reconcile(organizerId) {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Insert a new action item without dedup (used for reply_received).
+ * Every call creates a new row — no ON CONFLICT.
+ */
+async function insertActionItem({ organizerId, assignedTo, personId, campaignId, triggerReason, triggerDetail, priority, priorityLabel, lastActivityAt, engagementScore }) {
+  await db.query(
+    `INSERT INTO action_items
+       (organizer_id, assigned_to, person_id, campaign_id, trigger_reason, trigger_detail,
+        priority, priority_label, status, last_activity_at, engagement_score)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open', $9, $10)`,
+    [organizerId, assignedTo, personId, campaignId || null, triggerReason, triggerDetail,
+     priority, priorityLabel, lastActivityAt || new Date().toISOString(), engagementScore || 0]
+  );
+}
+
 async function upsertActionItem({ organizerId, assignedTo, personId, campaignId, triggerReason, triggerDetail, priority, priorityLabel, lastActivityAt, engagementScore }) {
-  // Uses the unique partial index idx_action_items_dedup for conflict resolution
+  // Uses the unique partial index idx_action_items_dedup for conflict resolution (excludes reply_received)
   await db.query(
     `INSERT INTO action_items
        (organizer_id, assigned_to, person_id, campaign_id, trigger_reason, trigger_detail,

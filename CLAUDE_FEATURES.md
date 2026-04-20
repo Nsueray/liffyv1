@@ -263,70 +263,150 @@ SendGrid POST → campaign_recipients (UPDATE) → campaign_events (INSERT) → 
 
 ---
 
-## Reply Detection — Full Pipeline (Hybrid VERP + SendGrid Inbound Parse)
+## Reply Detection — Full Journey (v1→v4)
 
-**Status:** LIVE. All stages implemented. DNS, SendGrid Inbound Parse, and env vars configured.
+**Status:** LIVE (v4 — plus addressing). Production-stable since 2026-04-20.
 
-**Architecture:** Hybrid VERP + SendGrid Inbound Parse
-- **VERP format (short):** `c-{8 hex}-r-{8 hex}@reply.liffy.app` (first 8 chars of each UUID, RFC 5321 safe — 22 char local-part)
-- **Inbound Parse:** SendGrid receives reply at VERP address → POSTs multipart/form-data to `/api/webhooks/inbound/:secret`
-- **Result:** Reply recorded as `campaign_event` (event_type='reply') + `prospect_intent` (intent_type='reply') + forwarded to organizer
+### The Journey — 4 iterations, each solving a real failure
 
-**Endpoint:** `POST /api/webhooks/inbound/:secret` (`backend/routes/webhooks.js`)
+#### v1: VERP-based system (DEPRECATED)
+- Reply-To: `c-{8hex}-r-{8hex}@reply.liffy.app` (VERP address)
+- Customer replied to garip `@reply.liffy.app` address → unnatural
+- LİFFY forwarded reply to salesperson: wrapper HTML, campaign metadata, tracking pixel, broken signature
+- AI consultation (ChatGPT + Gemini): "VERP Reply-To breaks natural human conversation; mature platforms use mailbox integration"
+- **Verdict:** Customer experience terrible, forward formatting broken
 
-**Flow:**
+#### v2: Hidden HTML comment + Gmail auto-forward (FAILED)
+- Reply-To changed to salesperson's real email (e.g. `elif@elan-expo.com`)
+- Hidden HTML comment in body: `<!--LIFFY:c-{8hex}-r-{8hex}-->`
+- Gmail Content Compliance rule to match body text and forward
+- **Problem:** Gmail strips HTML comments from email body. Tag disappears before Content Compliance can scan it.
+- Alternative tried: `<span style="display:none">` — spam risk, abandoned
+- **Verdict:** Gmail comment stripping killed this approach
+
+#### v3: Unsubscribe URL token enrichment (PARTIAL)
+- Moved tracking data into unsubscribe URL token (HMAC-signed, base64url)
+- Token format: `email:orgId:campaignId:recipientId:timestamp:signature` (6-part, backward compatible with old 4-part)
+- Gmail Content Compliance rule to match `api.liffy.app/api/unsubscribe` in body
+- **Problem:** Gmail Content Compliance doesn't scan quoted/blockquote text. When customer replies, the unsubscribe link is inside the quoted original message, which Content Compliance ignores.
+- **Verdict:** Body-based matching fundamentally unreliable in Gmail replies
+
+#### v4: Plus addressing (FINAL — LIVE)
+- Reply-To: `sender+c-{8hex}-r-{8hex}@domain.com` (plus-addressed real email)
+- Gmail's `+tag` standard: `elif+c-abc12345-r-def67890@elan-expo.com` delivers to `elif@elan-expo.com`
+- Customer sees normal email thread, Gmail ignores the `+tag` part
+- Content Compliance: Advanced content match, **Full headers**, contains `+c-`
+- Headers are always available (not in quoted body) → reliable matching
+- **Verdict:** Works! Production-stable. ✅
+
+### Final Architecture (v4)
+
 ```
-Inbound email → validate URL path secret → validate envelope domain (@reply.liffy.app)
-  → multer parses multipart body → parse VERP from envelope/to
-  → filter auto-replies → lookup campaign_recipient by VERP (LEFT prefix match, LIMIT 2)
-  → collision guard (>1 match = skip) → recordCampaignEvent(reply) → recordProspectIntent(reply)
-  → forwardReplyToOrganizer (wrapper email)
+Outbound (3 send paths):
+  Reply-To = sender+c-{campaignId8}-r-{recipientId8}@domain.com
+  Unsubscribe URL token includes campaignId + recipientId (backward compatible)
+  Click tracking OFF, open tracking ON
+
+Customer replies:
+  → Goes to salesperson's Gmail inbox (natural thread, +tag ignored)
+  → Gmail Content Compliance: headers match "+c-" → also deliver to parse@reply.liffy.app
+  → SendGrid Inbound Parse → POST /api/webhooks/inbound/:secret
+
+Inbound handler (3 detection methods, priority order):
+  Method 0: parsePlusAddress(toAddress) — most reliable, parses +tag from To header
+  Method 1: detectReplySource(body) — unsubscribe URL token from quoted body (fallback)
+  Method 2: from-email DB match — campaign_recipients WHERE email = fromEmail (last resort)
+
+  → campaign_events INSERT (event_type='reply', person_id resolved ONCE)
+  → campaign_recipients UPDATE (status='replied')
+  → prospect_intents INSERT
+  → contact_activities INSERT
+  → pipeline auto-stage (→ Interested)
+  → Action Engine: evaluateForPerson(personId, orgId, 'reply_received') → P1 action item
+  → NO forward — salesperson already has reply in Gmail
 ```
 
-**Security:**
-- Secret embedded in URL path: `https://api.liffy.app/api/webhooks/inbound/{INBOUND_WEBHOOK_SECRET}`
-- Envelope domain validation: only `@reply.liffy.app` addresses accepted
-- If `INBOUND_WEBHOOK_SECRET` env var not set, ALL requests rejected (strict mode)
+### 3 Send Paths (all in sync)
 
-**VERP generation** (campaignSend.js + worker.js):
-- Both send paths generate VERP reply-to: `{ email: "c-{8hex}-r-{8hex}@reply.liffy.app", name: sender.from_name }`
-- Object format with display name — recipient sees "Elif AY" instead of cryptic VERP address (commit: aa1ce0f)
-- Overrides `sender_identity.reply_to` — all campaign emails use VERP reply-to
+| File | Reply-To | Unsubscribe |
+|------|----------|-------------|
+| `campaignSend.js` | `buildPlusReplyTo(replyToBase, campaign_id, r.id)` | `getUnsubscribeUrl(email, orgId, campaignId, recipientId)` |
+| `worker.js` | `buildPlusReplyTo(replyToBase, campaign.id, r.id)` | Same |
+| `sequenceService.js` | `buildPlusReplyTo(replyToBase, campaign_id, id)` | Same |
 
-**VERP parser** (`parseVerpAddress()`):
-- Regex: `/^c-([a-f0-9]{8})-r-([a-f0-9]{8})@reply\.liffy\.app$/i`
-- Returns `{ campaignShort, recipientShort }` — 8-char hex prefixes
-- Checks envelope.to first (preferred), falls back to to field
+### Plus Address Parser (`parsePlusAddress`)
 
-**DB lookup** (short prefix match):
-```sql
-WHERE LEFT(cr.campaign_id::text, 8) = $1 AND LEFT(cr.id::text, 8) = $2 LIMIT 2
+```javascript
+// Parses: "Elif AY <elif+c-abc12345-r-def67890@elan-expo.com>"
+// Returns: { campaignShort: 'abc12345', recipientShort: 'def67890' }
+// Regex: /\+c-([a-f0-9]{8})-r-([a-f0-9]{8})@/i
 ```
-- `LIMIT 2` enables collision detection without full table scan
-- If >1 match: logs collision, refuses to process (safety guard)
 
-**Reply forwarding** (`forwardReplyToOrganizer()`):
-- Wrapper email sent FROM `"Reply: {sender_name}" <notify@liffy.app>` TO organizer (commit: aa1ce0f)
-- Forward target: `sender_identity.reply_to || sender_identity.from_email`
-- Reply-to set to original sender email — organizer can reply directly
-- Uses organizer's own SendGrid API key (multi-tenant safe)
-- Mail loop prevention: FROM address has no VERP match → auto-replies die
+### Unsubscribe URL Token (v3 enrichment, still active)
 
-**Auto-reply filter** (`isAutoReply()`):
-- **Headers:** RFC 3834 `Auto-Submitted` (not "no"), `X-Auto-Response-Suppress`, `Precedence: bulk/junk/auto_reply`
-- **Subject:** "out of office", "automatic reply", "auto-reply", "delivery failure", OOO, etc.
-- **From:** mailer-daemon, noreply, no-reply, postmaster, mail-daemon
+Token format: `base64url(email:orgId:campaignId:recipientId:timestamp:hmacSig)`
+- 6-part format, backward compatible with old 4-part tokens
+- `verifyUnsubscribeToken()` handles both formats
+- Used as Method 1 fallback in reply detection
 
-**Multipart parsing:** `multer` middleware (`upload.none()`) on inbound route — SendGrid Inbound Parse sends multipart/form-data, not JSON.
+### person_id Consolidation (Action Engine fix)
 
-**Env vars:**
+Inbound handler resolves `person_id` ONCE after recipient match, attaches to `recipient.person_id`.
+Used by: `recordCampaignEvent()`, `contact_activities`, pipeline auto-stage, Action Engine.
+Previously had 4 independent lookups — if any returned NULL, downstream silently failed.
+`recordCampaignEvent()` prefers pre-resolved `recipient.person_id`, falls back to its own lookup for non-inbound callers (SendGrid webhooks).
+
+### Gmail Admin Setup (per organization, one-time)
+
+1. admin.google.com → Apps → Google Workspace → Gmail → Compliance → Content Compliance
+2. Add rule: "Liffy Reply Detection"
+3. **Inbound** checked
+4. Expression: **Advanced content match**, **Full headers**, **Contains text**, `+c-`
+5. Also deliver to: `parse@reply.liffy.app`
+6. Save
+
+**Alternative (Google Workspace Content Compliance regex):**
+Pattern: `\+c-[a-f0-9]{8}-r-[a-f0-9]{8}@` on Full headers
+
+### DNS & SendGrid Config
+
+| Domain | Record | Value | Purpose |
+|--------|--------|-------|---------|
+| `reply.liffy.app` | MX | `mx.sendgrid.net` | Inbound Parse receives forwarded replies |
+| `inbound.liffy.app` | — | NO MX record | Not used (legacy reference, ignore) |
+
+SendGrid Inbound Parse URL: `https://api.liffy.app/api/webhooks/inbound/{INBOUND_WEBHOOK_SECRET}`
+
+### Important Details
+
+- Click tracking **disabled** (`clickTracking: { enable: false }` in mailer.js) — reply threads stay clean
+- Open tracking **enabled** (analytics)
+- Reply forward **removed** — `forwardReplyToOrganizer()` deleted. Salesperson has reply in Gmail natively.
+- Reply body stored in `campaign_events.provider_response` (JSONB, 2000 chars)
+- ContactDrawer shows reply body preview (200 chars) with red left border
+- Auto-reply filter: RFC 3834 headers, OOO subjects, mailer-daemon from patterns
+
+### Env Vars
+
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `INBOUND_WEBHOOK_SECRET` | Yes | Secret in URL path for inbound webhook auth |
-| `FORWARD_FROM_EMAIL` | No | FROM address for forwarded replies (default: `notify@liffy.app`) |
-| `FORWARD_FROM_NAME` | No | FROM name for forwarded replies (default: `Liffy Reply Notification`) |
 
-**Commits:** e1e05f8 (Stage 1), 03e7a0d (VERP + forwarding + collision guard), 878a28a (URL path secret), bf88167 (multer multipart fix), aa1ce0f (VERP display name + forward FROM)
+### Phase 2 Plan (Future)
+- Gmail API OAuth integration (replaces Content Compliance auto-forward)
+- Native inbox sync, no admin filter setup needed
+- Merges with Blueprint Phase 6 (Conversations/Inbox)
+
+### Key Commits
+- e1e05f8 (v1 VERP), 03e7a0d (VERP forwarding), 5d317fe (v2 hidden tag), 36fb0ed (v3 unsubscribe URL token), 5e59855 (v4 plus addressing), f2cc7b4 (person_id consolidation)
+
+### Files
+- `backend/utils/unsubscribeHelper.js` — `buildPlusReplyTo()`, `generateUnsubscribeToken()`, `verifyUnsubscribeToken()`, `processEmailCompliance()`
+- `backend/routes/webhooks.js` — `parsePlusAddress()`, `detectReplySource()`, inbound handler, gmail-filter-info endpoint
+- `backend/routes/campaignSend.js` — plus-addressed Reply-To
+- `backend/worker.js` — plus-addressed Reply-To
+- `backend/services/sequenceService.js` — plus-addressed Reply-To
+- `backend/mailer.js` — click tracking disabled
 
 ---
 
@@ -1428,17 +1508,19 @@ The Action Engine evaluates trigger rules and creates prioritized follow-up item
 - Reply = +10 points
 - 7-day inactive = -2 penalty
 
-**Deduplication:** Partial unique index `(organizer_id, person_id, trigger_reason) WHERE status IN ('open', 'in_progress')` prevents duplicate items. Upsert via ON CONFLICT updates existing.
+**Deduplication:**
+- **reply_received:** NO dedup. Every reply creates a new P1 action item. Uses `insertActionItem()` (plain INSERT). Salesperson marks done/dismiss; new reply → new item appears. Migration 041 excludes `reply_received` from the dedup index.
+- **All other triggers:** Partial unique index `(organizer_id, person_id, trigger_reason) WHERE status IN ('open', 'in_progress') AND trigger_reason != 'reply_received'` prevents duplicates. Uses `upsertActionItem()` with ON CONFLICT.
 
 **Reconciliation (every 15 min):**
 1. Resurface snoozed items past snoozed_until
-2. Evaluate all persons with campaign activity in last 7 days
+2. Evaluate all persons with campaign activity in last 7 days (**reply_received skipped** — real-time only)
 3. Check completed sequences without action items
 4. Bulk-update engagement scores on open items
 
 **Webhook hooks (best-effort, never breaks webhook flow):**
 - SendGrid events: reply → reply_received, open/click → engaged_hot
-- Inbound reply: → reply_received
+- Inbound reply: → reply_received (P1, no dedup)
 - Sequence completion: → sequence_exhausted
 
 **Files:**
@@ -1534,6 +1616,8 @@ Team-based data isolation using recursive CTE on `users.reports_to` chain.
 - **manager:** sees own data + all reports (recursive downward)
 - **sales_rep:** sees only own data
 
+**Current team:** Suer (owner) → Elif (manager, reports_to: Suer) → Bengü (sales_rep, reports_to: Elif)
+
 **Key functions** (`backend/middleware/userScope.js`):
 | Function | Purpose |
 |----------|---------|
@@ -1545,6 +1629,14 @@ Team-based data isolation using recursive CTE on `users.reports_to` chain.
 | `canAccessRowHierarchical(req, userId)` | Boolean — can current user see this user's row? |
 
 **11 routes updated:** campaigns, emailTemplates, senders, miningJobs, miningResults, campaignRecipients, campaignSend, persons, lists, reports, stats
+
+**Visibility defaults:**
+- Lists: `private` (creator sees, must share explicitly)
+- Templates/Senders: `shared` (upward visibility — sees own + manager's chain)
+
+**Data transfer:** Suer→Elif ownership transfer done for templates/senders/campaigns (pre-isolation resources)
+
+**JWT Auth Fix:** `payload.user_id = payload.user_id || payload.id` normalization across 28 auth middleware instances. Fixed critical bug where Elif saw 0 data due to JWT `id` vs `user_id` mismatch.
 
 **Migrations:**
 - 038: `users.reports_to` (UUID FK→users)
@@ -1558,7 +1650,8 @@ Team-based data isolation using recursive CTE on `users.reports_to` chain.
 **Status:** DONE. One-time bulk import completed 2026-04-15.
 
 Imported ~54,000 records from Zoho CRM into canonical tables (persons + affiliations).
-Industry normalization applied during import. Production DB now has 75K+ persons, 85K+ affiliations.
+Industry normalization: 20 canonical sectors mapped from raw Zoho industry values.
+Production DB: 75,399 persons, 85,603 affiliations.
 
 ---
 
@@ -1573,83 +1666,9 @@ Added company_name and industry filters to GET /api/persons endpoint.
 
 ---
 
-## Reply Detection Architecture v2 (2026-04-18)
+## Reply Detection Architecture — v4 Plus Addressing (2026-04-20)
 
-**Status:** LIVE. Replaces VERP-based reply detection (v1).
-
-### Why the change
-AI consensus (ChatGPT + Gemini): "VERP Reply-To breaks natural human conversation; mature platforms (Outreach, SalesLoft, Apollo) use mailbox integration." Customer saw garip `@reply.liffy.app` address, broken signature formatting, campaign metadata in body. Blueprint Principle 2: "Zero Context Switching" — natural email thread.
-
-### Old system (v1 — VERP-based, DEPRECATED)
-- Reply-To: `c-{8hex}-r-{8hex}@reply.liffy.app` (VERP address)
-- Customer replies → goes to reply.liffy.app → SendGrid Inbound Parse → LİFFY detects
-- LİFFY forwards reply to salesperson: `From: "Reply: Name" <notify@liffy.app>`
-- Forward had campaign metadata, wrapper HTML, tracking pixel, broken formatting
-
-### New system (v2 — Gmail Auto-Forward)
-- Reply-To: salesperson's real email (e.g. `elif@elan-expo.com`)
-- Body contains invisible HTML comment: `<!--LIFFY:c-{8hex}-r-{8hex}-->`
-- Custom headers: `X-Liffy-CID`, `X-Liffy-RID` (additional tracking)
-- Customer replies → goes to salesperson's Gmail inbox (natural thread)
-- Gmail auto-forward rule → `parse@inbound.liffy.app`
-- Inbound Parse → `parseLiffyTag()` from body (primary) or VERP envelope (fallback for in-flight emails)
-- Records: `campaign_events` INSERT + `prospect_intents` INSERT + `contact_activities` INSERT + pipeline auto-stage
-- Action Engine: `reply_received` trigger evaluated
-- **NO forward** — salesperson already has the reply in Gmail
-
-### Outbound email changes (3 send paths)
-| File | Old Reply-To | New Reply-To | Tag |
-|------|-------------|-------------|-----|
-| `campaignSend.js` | VERP `c-xxx-r-xxx@reply.liffy.app` | `sender.reply_to \|\| sender.from_email` | `<!--LIFFY:c-{8hex}-r-{8hex}-->` appended to HTML |
-| `worker.js` | VERP (same) | `campaign.sender_reply_to \|\| campaign.sender_email` | Same tag |
-| `sequenceService.js` | VERP `c-xxx-sr-xxx@reply.liffy.app` | `campaign.sender_reply_to \|\| campaign.from_email` | Tag with `sr-` prefix |
-
-### Inbound parse changes (`webhooks.js`)
-1. **Primary:** `parseLiffyTag(html || text)` — regex `<!--LIFFY:c-([a-f0-9]{8})-s?r-([a-f0-9]{8})-->`
-2. **Fallback:** `parseVerpAddress()` from envelope (for emails already in flight before v2)
-3. **Forward removed:** `forwardReplyToOrganizer()` deleted (~100 lines)
-
-### Gmail filter setup (admin must configure)
-**Google Workspace (recommended):**
-Admin Console → Gmail → Compliance → Content Compliance
-- Condition: Body contains `LIFFY:c-`
-- Action: Also deliver to `parse@inbound.liffy.app`
-
-**Per-user Gmail:**
-- Settings → Filters → Create new filter
-- Has the words: `LIFFY:c-`
-- Forward to: `parse@inbound.liffy.app` + Keep in inbox
-
-### Admin info endpoint
-`GET /api/webhooks/gmail-filter-info` — returns Gmail filter setup instructions + technical details.
-Startup log: `[Reply Detection] Mode: direct Reply-To + hidden tag + Gmail filter forward`
-
-### Deleted code
-- `forwardReplyToOrganizer()` — ~100 lines (forward email builder + sender)
-- `stripQuotedHistory()` — ~40 lines (multi-language quote stripping)
-- `buildReplyForwardHtml()` — HTML template for forward wrapper
-- `extractEmail()` / `extractName()` — helper functions for forward
-- `sendEmail` import in webhooks.js — no longer needed
-
-### Reply body still available
-- Timeline query includes `provider_response` as `meta` for reply events
-- ContactDrawer shows reply body preview (200 chars) with red left border
-- Reply body stored up to 2000 chars in `campaign_events.provider_response` JSONB
-- Click tracking disabled (`clickTracking: { enable: false }` in mailer.js), open tracking remains
-
-### Phase 2 plan
-- Gmail API OAuth integration (replaces auto-forward rule)
-- Native inbox sync, no filter needed
-- Merges with Blueprint Phase 6 (Conversations/Inbox)
-
-**Files:**
-- `backend/routes/campaignSend.js` — Reply-To + hidden tag + custom headers
-- `backend/worker.js` — same changes
-- `backend/services/sequenceService.js` — same changes
-- `backend/routes/webhooks.js` — parseLiffyTag(), inbound handler, admin endpoint
-- `backend/mailer.js` — click tracking disabled
-- `backend/routes/timeline.js` — provider_response in query
-- `liffy-ui/components/ContactDrawer.tsx` — reply body display
+See "Reply Detection — Full Journey (v1→v4)" section above for the complete architecture, all 4 iterations, setup instructions, and file references. This section kept as a pointer to avoid duplication.
 
 ---
 
@@ -1696,11 +1715,13 @@ Transferred ownership of templates, sender identities, and campaigns from Suer t
 
 ---
 
-## Blueprint Implementation Progress (2026-04-17)
+## Blueprint Implementation Progress (2026-04-20)
 
-**Blueprint Section 6 (Action Engine):** ✅ DONE — 6 triggers, priority scoring, 15-min reconciliation worker.
+**Blueprint Section 6 (Action Engine):** ✅ DONE — 6 triggers, priority scoring, 15-min reconciliation worker. Reply_received has no dedup (every reply = new P1 action item, migration 041).
 **Blueprint Section 8 (Action Screen):** ✅ DONE — homepage with priority cards, filter/sort, snooze, history.
-**Blueprint Principle 2 (Zero Context Switching):** Reply Detection v2 delivers natural email threads — customer replies go to salesperson's real inbox.
+**Blueprint Principle 2 (Zero Context Switching):** Reply Detection v4 delivers natural email threads — customer replies go to salesperson's real inbox via plus-addressed Reply-To.
+**engaged_hot rule tightened:** 93→2 action items after strict combination rules (2+ opens on different days, click + qualifying context).
+**Pipeline sidebar removed:** Pipeline accessible via top nav only.
 
 ---
 

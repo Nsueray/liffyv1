@@ -38,9 +38,9 @@ Engagement is stored as events, not scores.
 
 ---
 
-## Database — Current State (31 tables, 40 migrations)
+## Database — Current State (31 tables, 41 migrations)
 
-**Production stats (2026-04-18):** ~75,399 persons, ~85,603 affiliations. 3 users: Suer (owner), Elif (manager, reports_to: Suer), Bengü (sales_rep, reports_to: Elif).
+**Production stats (2026-04-20):** ~75,399 persons, ~85,603 affiliations. 3 users: Suer (owner), Elif (manager, reports_to: Suer), Bengü (sales_rep, reports_to: Elif).
 
 ### Core Tables (Active, Protected)
 | Table | Status | Notes |
@@ -72,7 +72,7 @@ Engagement is stored as events, not scores.
 | `pipeline_stages` | ACTIVE | 031 | Configurable sales pipeline stages (name, sort_order, color, is_won, is_lost). |
 | `campaign_sequences` | ACTIVE | 035 | Multi-touch sequence step definitions (template, delay, condition per step). |
 | `sequence_recipients` | ACTIVE | 035 | Per-recipient sequence tracking (current_step, status, next_send_at). |
-| `action_items` | ACTIVE | 037 | Trigger-based follow-up items with priority scoring (P1-P4). 6 triggers. |
+| `action_items` | ACTIVE | 037, 041 | Trigger-based follow-up items with priority scoring (P1-P4). 6 triggers. reply_received has no dedup (every reply = new item). |
 
 ### Legacy Tables (Exist but transitional)
 | Table | Status | Notes |
@@ -96,7 +96,7 @@ Phase 4 — Remove legacy tables (5 steps). Full plan in `MIGRATION_PLAN.md`.
 
 **Current phase: Late Phase 3 (approaching Phase 4)**
 
-All migrations (001–040) applied in production.
+All migrations (001–040) applied in production. Migration 041 written, not yet applied.
 `AGGREGATION_PERSIST=true` set on Render — mining pipeline writes to `persons` + `affiliations`.
 All import paths (CSV upload, import-all, leads/import) dual-write to both legacy and canonical tables.
 Campaign resolve prefers canonical data with legacy fallback.
@@ -158,7 +158,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 
 ---
 
-## Migrations (32 files)
+## Migrations (33 files)
 
 | # | File | Tables |
 |---|------|--------|
@@ -196,6 +196,7 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 | 038 | `038_add_reports_to.sql` | ALTER `users` (+reports_to UUID FK→users) — ADR-015 hierarchical team structure |
 | 039 | `039_add_user_permissions.sql` | ALTER `users` (+permissions JSONB) — per-user feature permissions (ADR-015) |
 | 040 | `040_template_sender_visibility.sql` | ALTER `email_templates` (+visibility, +created_by_user_id), ALTER `sender_identities` (+visibility) — upward visibility scope (ADR-015) |
+| 041 | `041_allow_multiple_reply_actions.sql` | DROP + recreate `idx_action_items_dedup` excluding `reply_received` — every reply creates new P1 action item |
 
 ---
 
