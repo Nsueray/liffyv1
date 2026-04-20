@@ -11,7 +11,8 @@ const { processTemplate, convertPlainTextToHtml } = require('../utils/templatePr
 const {
   processEmailCompliance,
   getUnsubscribeUrl,
-  getListUnsubscribeHeaders
+  getListUnsubscribeHeaders,
+  buildPlusReplyTo
 } = require('../utils/unsubscribeHelper');
 
 // ---------------------------------------------------------------------------
@@ -218,9 +219,10 @@ async function processSequenceStep(seqRecipient) {
   // 7) Headers
   const unsubHeaders = getListUnsubscribeHeaders(email, organizer_id, campaign.from_email, campaign_id, id);
 
-  // 8) Reply-To = salesperson's real email (customer replies go directly to their inbox)
-  // Reply detection relies on unsubscribe URL in quoted body (parsed by inbound handler)
-  const replyToAddr = campaign.sender_reply_to || campaign.from_email;
+  // 8) Reply-To = salesperson's email with plus addressing for reply detection
+  // Plus tag encodes campaign/recipient IDs: elif+c-abc12345-r-def67890@elan-expo.com
+  const replyToBase = campaign.sender_reply_to || campaign.from_email;
+  const replyToAddr = buildPlusReplyTo(replyToBase, campaign_id, id);
 
   // 9) Send via SendGrid
   const mailResult = await sendEmail({

@@ -386,19 +386,99 @@ function parseVerpAddress(address) {
 }
 
 /**
- * Detect reply source by parsing the unsubscribe URL from quoted email body.
- * The unsubscribe link is always present in the original email footer, and
- * email clients preserve it in the quoted reply body.
+ * Parse plus-addressed email for campaign/recipient IDs.
+ * Format: local+c-{8hex}-r-{8hex}@domain.com
+ * Gmail ignores the +tag, so elif+c-abc12345-r-def67890@elan-expo.com → elif@elan-expo.com
  *
- * Method 1: Parse unsubscribe link token (most reliable — full UUIDs)
+ * @param {string} address - Email address (may be "Name <email>" format)
+ * @returns {object|null} - { campaignShort, recipientShort } or null
+ */
+function parsePlusAddress(address) {
+  if (!address || typeof address !== 'string') return null;
+  // Handle comma-separated addresses and "Name <email>" format
+  const addresses = address.split(',');
+  for (const addr of addresses) {
+    const emailMatch = addr.match(/<([^>]+)>/) || [null, addr.trim()];
+    const email = (emailMatch[1] || '').trim();
+    const match = email.match(/\+c-([a-f0-9]{8})-r-([a-f0-9]{8})@/i);
+    if (match) {
+      return { campaignShort: match[1].toLowerCase(), recipientShort: match[2].toLowerCase() };
+    }
+  }
+  return null;
+}
+
+/**
+ * Detect reply source from an inbound email.
+ * Tries multiple methods in order of reliability:
+ *
+ * Method 0: Plus addressing in To header (most reliable — present in envelope/header)
+ * Method 1: Unsubscribe link token in quoted body (full UUIDs, if body preserved)
  * Method 2: From-email matching against campaign_recipients (fallback)
  *
  * @param {string} body - Email body (HTML or text)
  * @param {string} fromEmail - Sender email address
+ * @param {string} toAddress - To header (may contain plus-addressed email)
  * @returns {object|null} - { email, organizerId, campaignId, recipientId } or null
  */
-async function detectReplySource(body, fromEmail) {
-  // Method 1: Unsubscribe link token (always present in quoted reply)
+async function detectReplySource(body, fromEmail, toAddress) {
+  // Method 0: Plus addressing in To header (e.g. elif+c-abc12345-r-def67890@elan-expo.com)
+  const plusIds = parsePlusAddress(toAddress);
+  if (plusIds) {
+    try {
+      // Look up campaign_recipient by short prefix match
+      const crRes = await db.query(
+        `SELECT cr.id, cr.campaign_id, cr.organizer_id, cr.email
+         FROM campaign_recipients cr
+         WHERE LEFT(cr.campaign_id::text, 8) = $1
+           AND LEFT(cr.id::text, 8) = $2
+         LIMIT 1`,
+        [plusIds.campaignShort, plusIds.recipientShort]
+      );
+      if (crRes.rows.length > 0) {
+        const row = crRes.rows[0];
+        console.log(`[Inbound] Reply matched via plus addressing — campaign: ${row.campaign_id}`);
+        return {
+          email: row.email,
+          organizerId: row.organizer_id,
+          campaignId: row.campaign_id,
+          recipientId: row.id
+        };
+      }
+
+      // Try sequence_recipients if not found in campaign_recipients
+      const srRes = await db.query(
+        `SELECT sr.id, sr.campaign_id, sr.organizer_id, sr.email
+         FROM sequence_recipients sr
+         WHERE LEFT(sr.campaign_id::text, 8) = $1
+           AND LEFT(sr.id::text, 8) = $2
+         LIMIT 1`,
+        [plusIds.campaignShort, plusIds.recipientShort]
+      );
+      if (srRes.rows.length > 0) {
+        const row = srRes.rows[0];
+        console.log(`[Inbound] Reply matched via plus addressing (sequence) — campaign: ${row.campaign_id}`);
+        // Find matching campaign_recipient by email for event recording
+        const crFallback = await db.query(
+          `SELECT id FROM campaign_recipients
+           WHERE campaign_id = $1 AND LOWER(email) = LOWER($2) LIMIT 1`,
+          [row.campaign_id, row.email]
+        );
+        return {
+          email: row.email,
+          organizerId: row.organizer_id,
+          campaignId: row.campaign_id,
+          recipientId: crFallback.rows.length > 0 ? crFallback.rows[0].id : row.id
+        };
+      }
+
+      console.log(`[Inbound] Plus addressing found but no recipient match — campaign=${plusIds.campaignShort}, recipient=${plusIds.recipientShort}`);
+    } catch (e) {
+      console.warn('[Inbound] Plus addressing lookup failed:', e.message);
+    }
+  }
+
+  // Method 1: Unsubscribe link token in quoted body (full UUIDs)
   const unsubMatch = (body || '').match(/api\.liffy\.app\/api\/unsubscribe\/([A-Za-z0-9_\-+\/=]+)/);
   if (unsubMatch) {
     try {
@@ -515,8 +595,8 @@ function isAutoReply({ subject, headers, from }) {
  *
  * Flow:
  * 1. Validate shared secret
- * 2. Detect reply source: unsubscribe link in quoted body (primary) or from-email match (fallback)
- * 3. Filter auto-replies
+ * 2. Filter auto-replies
+ * 3. Detect reply source: plus addressing in To (primary), unsubscribe URL token (secondary), from-email match (fallback)
  * 4. Record reply as campaign_event (event_type='reply')
  * 5. Record prospect_intent (intent_type='reply')
  * 6. Update status, contact_activities, pipeline auto-stage
@@ -544,8 +624,8 @@ router.post(
       return res.status(200).send('OK');
     }
 
-    // 2. Detect reply source — unsubscribe link (primary) or from-email match (fallback)
-    const replySource = await detectReplySource(html || text || '', from);
+    // 2. Detect reply source — plus addressing (primary), unsubscribe link, or from-email match
+    const replySource = await detectReplySource(html || text || '', from, to);
 
     if (!replySource) {
       console.log('  ⚠️ No reply source detected (no unsubscribe link, no email match) — skipping');
@@ -719,9 +799,8 @@ router.post(
  * Returns Gmail filter setup instructions for reply detection.
  * Salesperson must set up a Gmail filter to forward replies to SendGrid Inbound Parse.
  *
- * Reply detection relies on the unsubscribe URL in the quoted reply body.
- * The filter should match "api.liffy.app/api/unsubscribe" — this link is always
- * present in the original email footer and preserved by email clients in quoted replies.
+ * Reply detection uses plus addressing: Reply-To = elif+c-{8hex}-r-{8hex}@elan-expo.com
+ * Gmail filter matches "deliveredto:(+c-)" to catch all plus-addressed replies.
  */
 router.get('/api/webhooks/gmail-filter-info', (req, res) => {
   const inboundSecret = process.env.INBOUND_WEBHOOK_SECRET;
@@ -731,32 +810,45 @@ router.get('/api/webhooks/gmail-filter-info', (req, res) => {
     : '(INBOUND_WEBHOOK_SECRET not configured)';
 
   res.json({
-    title: 'Gmail Filter Setup for Reply Detection',
+    title: 'Gmail Filter Setup for Reply Detection (Plus Addressing)',
     steps: [
       '1. Open Gmail → Settings → Forwarding → Add forwarding address',
       `2. Enter: ${parseEmail}`,
       '3. Gmail will send a verification email to that address — ask admin to confirm',
       '4. Go to Gmail → Settings → Filters → Create new filter',
-      '5. In "Has the words" field enter: api.liffy.app/api/unsubscribe',
+      '5. In "Has the words" field enter: deliveredto:(+c-)',
       '6. Click "Create filter" → Check "Forward it to" → Select: ' + parseEmail,
-      '7. Also check "Never send it to Spam" and "Skip the Inbox" (optional)',
+      '7. Also check "Never send it to Spam" and keep "Skip the Inbox" UNCHECKED (keep in inbox)',
       '8. Click "Create filter"',
     ],
+    alternative_workspace: {
+      description: 'For Google Workspace admins — Content Compliance rule',
+      steps: [
+        '1. Admin Console → Apps → Google Workspace → Gmail → Compliance → Content Compliance',
+        '2. Add rule: Inbound messages',
+        '3. Expression: envelope recipient matches \\+c-[a-f0-9]{8}-r-[a-f0-9]{8}@',
+        `4. Action: Also deliver to ${parseEmail}`,
+      ],
+    },
     technical: {
       parse_email: parseEmail,
       inbound_url: inboundUrl,
-      tracking_method: 'Unsubscribe URL token in email footer (contains campaign_id + recipient_id)',
-      fallback_method: 'From-email matching against campaign_recipients (most recent sent)',
-      reply_to: 'Salesperson real email (customer replies go directly to Gmail)',
+      tracking_method: 'Plus addressing in Reply-To (e.g. elif+c-abc12345-r-def67890@elan-expo.com)',
+      fallback_methods: [
+        'Unsubscribe URL token in quoted body (contains campaign_id + recipient_id)',
+        'From-email matching against campaign_recipients (most recent sent)',
+      ],
+      reply_to: 'Salesperson email with plus tag (customer sees normal email thread)',
       forward_from_liffy: false,
-      note: 'Liffy does NOT forward replies. Salesperson already has them via direct Reply-To.',
+      note: 'Liffy does NOT forward replies. Salesperson already has them via direct Reply-To. Gmail ignores the +tag — email delivers to the salesperson inbox normally.',
     },
   });
 });
 
 // Log on startup
-console.log('[Reply Detection] Mode: direct Reply-To + unsubscribe URL token + Gmail filter forward');
-console.log('[Reply Detection] Gmail filter: "Has the words" = api.liffy.app/api/unsubscribe');
+console.log('[Reply Detection] Mode: plus addressing Reply-To + Gmail filter forward');
+console.log('[Reply Detection] Reply-To format: user+c-{8hex}-r-{8hex}@domain.com');
+console.log('[Reply Detection] Gmail filter: "Has the words" = deliveredto:(+c-)');
 console.log('[Reply Detection] Forward to: parse@inbound.liffy.app');
 
 // ============================================================

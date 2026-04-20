@@ -10,7 +10,8 @@ const {
   getUnsubscribeUrl,
   getListUnsubscribeHeaders,
   processEmailCompliance,
-  validatePhysicalAddress
+  validatePhysicalAddress,
+  buildPlusReplyTo
 } = require("./utils/unsubscribeHelper");
 
 // ============================================================
@@ -225,9 +226,10 @@ async function processSendingCampaigns() {
               r.id
             );
 
-            // Reply-To = salesperson's real email (customer replies go directly to their inbox)
-            // Reply detection relies on unsubscribe URL in quoted body (parsed by inbound handler)
-            const replyToAddr = campaign.sender_reply_to || campaign.sender_email;
+            // Reply-To = salesperson's email with plus addressing for reply detection
+            // Plus tag encodes campaign/recipient IDs: elif+c-abc12345-r-def67890@elan-expo.com
+            const replyToBase = campaign.sender_reply_to || campaign.sender_email;
+            const replyToAddr = buildPlusReplyTo(replyToBase, campaign.id, r.id);
 
             // Send with 429 exponential backoff retry
             await sendWithRetry({

@@ -3,7 +3,7 @@ const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
 const { sendEmail } = require('../mailer');
-const { getUnsubscribeUrl, processEmailCompliance, getListUnsubscribeHeaders } = require('../utils/unsubscribeHelper');
+const { getUnsubscribeUrl, processEmailCompliance, getListUnsubscribeHeaders, buildPlusReplyTo } = require('../utils/unsubscribeHelper');
 const { processTemplate, convertPlainTextToHtml } = require('../utils/templateProcessor');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
@@ -172,9 +172,11 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
         // C. RFC 8058 List-Unsubscribe headers (one-click unsubscribe in Gmail/Outlook)
         const unsubHeaders = getListUnsubscribeHeaders(r.email, organizer_id, sender.from_email, campaign_id, r.id);
 
-        // D. Reply-To = salesperson's real email (customer replies go directly to their inbox)
-        // Reply detection relies on unsubscribe URL in quoted body (parsed by inbound handler)
-        const replyToAddr = sender.reply_to || sender.from_email;
+        // D. Reply-To = salesperson's email with plus addressing for reply detection
+        // Plus tag encodes campaign/recipient IDs: elif+c-abc12345-r-def67890@elan-expo.com
+        // Gmail ignores the +tag part, customer sees normal email thread
+        const replyToBase = sender.reply_to || sender.from_email;
+        const replyToAddr = buildPlusReplyTo(replyToBase, campaign_id, r.id);
 
         // E. Gönderim (Mailer'a Dinamik Key Gönderiyoruz)
         const mailResp = await sendEmail({

@@ -142,6 +142,29 @@ function getUnsubscribeMailto(fromEmail) {
 }
 
 // ============================================================
+// PLUS ADDRESSING (Reply Detection)
+// ============================================================
+
+/**
+ * Build a plus-addressed Reply-To for reply detection.
+ * Gmail + addressing: elif+tag@domain.com → elif@domain.com (tag ignored by Gmail).
+ * The tag encodes campaign/recipient IDs so inbound handler can match replies.
+ *
+ * @param {string} replyToEmail - Base Reply-To email (e.g. elif@elan-expo.com)
+ * @param {string} campaignId - Campaign UUID
+ * @param {string} recipientId - Recipient UUID (campaign_recipients.id or sequence_recipients.id)
+ * @returns {string} - Plus-addressed email (e.g. elif+c-abc12345-r-def67890@elan-expo.com)
+ */
+function buildPlusReplyTo(replyToEmail, campaignId, recipientId) {
+  if (!replyToEmail || !campaignId || !recipientId) return replyToEmail;
+  const atIdx = replyToEmail.indexOf('@');
+  if (atIdx < 0) return replyToEmail;
+  const localPart = replyToEmail.substring(0, atIdx);
+  const domain = replyToEmail.substring(atIdx + 1);
+  return `${localPart}+c-${campaignId.slice(0, 8)}-r-${recipientId.slice(0, 8)}@${domain}`;
+}
+
+// ============================================================
 // LIST-UNSUBSCRIBE HEADERS (RFC 8058)
 // ============================================================
 
@@ -379,6 +402,7 @@ module.exports = {
   // URL generation
   getUnsubscribeUrl,
   getUnsubscribeMailto,
+  buildPlusReplyTo,
   
   // Headers
   getListUnsubscribeHeaders,
