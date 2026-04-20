@@ -129,4 +129,61 @@ router.get('/', authRequired, async (req, res) => {
   }
 });
 
+// GET /api/unsubscribes/check?email=xxx
+router.get('/check', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const email = (req.query.email || '').trim().toLowerCase();
+
+    if (!email) {
+      return res.json({ unsubscribed: false });
+    }
+
+    const result = await db.query(
+      `SELECT id, created_at FROM unsubscribes
+       WHERE organizer_id = $1 AND LOWER(email) = $2 LIMIT 1`,
+      [organizerId, email]
+    );
+
+    res.json({
+      unsubscribed: result.rows.length > 0,
+      unsubscribed_at: result.rows[0]?.created_at || null
+    });
+  } catch (err) {
+    console.error('GET /api/unsubscribes/check error:', err);
+    res.status(500).json({ error: 'Failed to check unsubscribe status' });
+  }
+});
+
+// POST /api/unsubscribes — manual unsubscribe
+router.post('/', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const { email, reason } = req.body || {};
+
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ error: 'Valid email is required' });
+    }
+
+    const src = reason || 'user_request';
+
+    const result = await db.query(
+      `INSERT INTO unsubscribes (id, organizer_id, email, reason, source)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4)
+       ON CONFLICT (organizer_id, email) DO NOTHING
+       RETURNING id`,
+      [organizerId, email.trim().toLowerCase(), src, src]
+    );
+
+    if (result.rows.length > 0) {
+      res.status(201).json({ success: true, id: result.rows[0].id });
+    } else {
+      res.json({ success: true, already_unsubscribed: true });
+    }
+  } catch (err) {
+    console.error('POST /api/unsubscribes error:', err);
+    res.status(500).json({ error: 'Failed to unsubscribe' });
+  }
+});
+
 module.exports = router;
