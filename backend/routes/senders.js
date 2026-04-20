@@ -62,13 +62,13 @@ router.get('/api/senders', authRequired, async (req, res) => {
 
     // Get campaign usage counts per sender
     const usageRes = await db.query(
-      `SELECT sender_identity_id, COUNT(*)::int AS campaign_count
+      `SELECT sender_id, COUNT(*)::int AS campaign_count
        FROM campaigns
-       WHERE organizer_id = $1 AND sender_identity_id IS NOT NULL
-       GROUP BY sender_identity_id`,
+       WHERE organizer_id = $1 AND sender_id IS NOT NULL
+       GROUP BY sender_id`,
       [organizer_id]
     );
-    const usageMap = Object.fromEntries(usageRes.rows.map(r => [r.sender_identity_id, r.campaign_count]));
+    const usageMap = Object.fromEntries(usageRes.rows.map(r => [r.sender_id, r.campaign_count]));
 
     // Map to expected format for frontend
     const identities = result.rows.map(row => ({
