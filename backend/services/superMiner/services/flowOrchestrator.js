@@ -732,46 +732,66 @@ class FlowOrchestrator {
                 console.log('[FlowOrchestrator] labelValueMiner not available:', err.message);
             }
 
-            // ---- inlineContactMiner ----
+            // ---- inlineContactMiner (no browser — uses cached HTML) ----
             try {
                 const { runInlineContactMiner } = require('../../urlMiners/inlineContactMiner');
-                const { chromium } = require('playwright');
 
                 this.miners.inlineContactMiner = {
                     name: 'inlineContactMiner',
                     mine: async (job) => {
                         console.log(`[inlineContactMiner] Starting for: ${job.input}`);
-                        let browser = null;
-                        try {
-                            browser = await chromium.launch(getLaunchOptions());
-                            const context = await browser.newContext(getContextOptions());
-                            const page = await context.newPage();
-                            const rawCards = await runInlineContactMiner(page, job.input, job.config || {});
-                            await browser.close();
-                            browser = null;
 
-                            const contacts = rawCards.map(card => ({
-                                company_name: card.company_name,
-                                email: card.email || null,
-                                phone: card.phone,
-                                website: card.website,
-                                country: card.country,
-                                city: card.city || null,
-                                address: card.address,
-                                contact_name: card.contact_name || null,
-                                job_title: card.job_title || null
-                            }));
-                            const emails = rawCards
-                                .map(c => c.email)
-                                .filter(e => e && typeof e === 'string' && e.includes('@') && e.length > 5);
-
-                            console.log(`[inlineContactMiner] Result: ${contacts.length} contacts, ${emails.length} emails`);
-
-                            return this.normalizeResult({ contacts, emails }, 'inlineContactMiner');
-                        } catch (err) {
-                            if (browser) await browser.close().catch(() => {});
-                            throw err;
+                        // Get HTML from cache (prior miners already fetched it)
+                        let html = null;
+                        const htmlCache = getHtmlCache();
+                        if (htmlCache) {
+                            const cached = await htmlCache.get(job.input);
+                            if (cached && cached.html) {
+                                html = cached.html;
+                                console.log(`[inlineContactMiner] Using cached HTML (${(html.length / 1024).toFixed(1)}KB)`);
+                            }
                         }
+
+                        // Fallback: simple HTTP fetch (no Playwright needed)
+                        if (!html) {
+                            try {
+                                const resp = await fetch(job.input, {
+                                    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LiffyBot/1.0)' },
+                                    signal: AbortSignal.timeout(15000),
+                                });
+                                if (resp.ok) {
+                                    html = await resp.text();
+                                    console.log(`[inlineContactMiner] Fetched HTML via HTTP (${(html.length / 1024).toFixed(1)}KB)`);
+                                }
+                            } catch (fetchErr) {
+                                console.warn(`[inlineContactMiner] HTTP fetch failed: ${fetchErr.message}`);
+                            }
+                        }
+
+                        if (!html) {
+                            return this.normalizeResult({ contacts: [], emails: [] }, 'inlineContactMiner');
+                        }
+
+                        const rawCards = await runInlineContactMiner(html, job.input, job.config || {});
+
+                        const contacts = rawCards.map(card => ({
+                            company_name: card.company_name,
+                            email: card.email || null,
+                            phone: card.phone,
+                            website: card.website,
+                            country: card.country,
+                            city: card.city || null,
+                            address: card.address,
+                            contact_name: card.contact_name || null,
+                            job_title: card.job_title || null
+                        }));
+                        const emails = rawCards
+                            .map(c => c.email)
+                            .filter(e => e && typeof e === 'string' && e.includes('@') && e.length > 5);
+
+                        console.log(`[inlineContactMiner] Result: ${contacts.length} contacts, ${emails.length} emails`);
+
+                        return this.normalizeResult({ contacts, emails }, 'inlineContactMiner');
                     }
                 };
                 console.log('[FlowOrchestrator] inlineContactMiner loaded ✅');

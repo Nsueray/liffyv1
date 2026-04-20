@@ -97,27 +97,23 @@ const URL_RE = /(?:https?:\/\/|www\.)[a-zA-Z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/gi;
 const TITLE_PREFIXES = /^(mr\.?|mrs\.?|ms\.?|dr\.?|prof\.?|ing\.?|bay|bayan|sayın)\s+/i;
 
 /**
- * Main entry point — follows the miner contract.
+ * Main entry point — accepts raw HTML (no Playwright navigation needed).
  *
- * @param {import('playwright').Page} page - Playwright page (browser managed by orchestrator)
- * @param {string} url - Target URL
- * @param {object} config - Optional config (delay_ms, etc.)
+ * This miner does NOT navigate — it receives pre-fetched HTML from the
+ * orchestrator wrapper (via HtmlCache or prior miner's page.content()).
+ * This avoids duplicate HTTP requests that trigger site-level blocking.
+ *
+ * @param {string} html - Pre-fetched HTML content
+ * @param {string} url - Source URL (for source_url field in results)
+ * @param {object} config - Optional config
  * @returns {Array<object>} Array of raw contact cards
  */
-async function runInlineContactMiner(page, url, config = {}) {
-  const waitMs = config.delay_ms || 2000;
+async function runInlineContactMiner(html, url, config = {}) {
+  if (!html || html.length < 100) {
+    console.log('[inlineContactMiner] No HTML content provided or too short');
+    return [];
+  }
 
-  // 1) Navigate
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await page.waitForLoadState('networkidle').catch(() => {});
-  await page.waitForTimeout(waitMs);
-
-  // Scroll to load lazy content
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-  await page.waitForTimeout(500);
-
-  // 2) Get full HTML
-  const html = await page.content();
   const $ = cheerio.load(html);
 
   // 3) Extract all emails from page
@@ -216,7 +212,17 @@ function extractCardFromContext($, loc) {
   }
 
   const containerHtml = $(container).html() || '';
-  const containerText = $(container).text() || '';
+  // Convert <br> to newlines before extracting text (cheerio .text() doesn't)
+  const containerText = $(container).html()
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/?(p|div|li|tr|td|th|dt|dd)[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/  +/g, ' ')
+    .trim();
 
   // Parse labeled fields from the container text
   const fields = parseLabeledFields(containerText);
