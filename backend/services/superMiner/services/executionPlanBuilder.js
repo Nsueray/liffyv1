@@ -21,6 +21,7 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
   // No additional pagination wrapper needed from flowOrchestrator.
   if (resolvedInputType === 'directory') {
     addStep('directoryMiner', 'legacy', 'Business directory extraction');
+    addStep('inlineContactMiner', 'legacy', 'Inline contact fallback (emails from page content)');
     if (resolvedMiningMode === 'ai') {
       addStep('aiMiner', 'legacy', 'AI enrichment for directory');
     }
@@ -31,6 +32,7 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
   // Does NOT handle its own pagination (ownPagination: false).
   if (resolvedInputType === 'member_table') {
     addStep('memberTableMiner', 'legacy', 'HTML table member/exhibitor extraction');
+    addStep('inlineContactMiner', 'legacy', 'Inline contact fallback (emails from page content)');
     if (resolvedMiningMode === 'ai') {
       addStep('aiMiner', 'legacy', 'AI enrichment for member table');
     }
@@ -93,6 +95,7 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
   // Does NOT handle its own pagination (ownPagination: false).
   if (resolvedInputType === 'label_value') {
     addStep('labelValueMiner', 'legacy', 'Label-value directory extraction');
+    addStep('inlineContactMiner', 'legacy', 'Inline contact fallback (emails from page content)');
     if (resolvedMiningMode === 'ai') {
       addStep('aiMiner', 'legacy', 'AI enrichment for label-value directory');
     }
@@ -127,6 +130,7 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
   if (resolvedInputType === 'website') {
     // Website sources prioritize fast table extraction.
     addStep('playwrightTableMiner', 'legacy', 'Primary website tables');
+    addStep('inlineContactMiner', 'legacy', 'Inline contact fallback (emails from page content)');
 
     if (resolvedMiningMode === 'ai') {
       addStep('aiMiner', 'legacy', 'AI enrichment');
@@ -138,6 +142,7 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
   if (resolvedInputType === 'table') {
     // Table inputs reuse the table miner as the fastest baseline.
     addStep('playwrightTableMiner', 'legacy', 'Primary table extraction');
+    addStep('inlineContactMiner', 'legacy', 'Inline contact fallback (emails from page content)');
 
     if (resolvedMiningMode === 'ai') {
       addStep('aiMiner', 'legacy', 'AI enrichment');
@@ -148,6 +153,7 @@ const buildExecutionPlan = ({ inputType, miningMode, analysis } = {}) => {
 
   // Unknown input types fall back to a general miner.
   addStep('playwrightMiner', 'legacy', 'General fallback');
+  addStep('inlineContactMiner', 'legacy', 'Inline contact fallback (emails from page content)');
 
   if (resolvedMiningMode === 'ai') {
     addStep('aiMiner', 'legacy', 'AI enrichment');

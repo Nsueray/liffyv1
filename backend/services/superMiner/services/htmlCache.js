@@ -133,13 +133,25 @@ class HtmlCache {
         if (!html || html.length < 500) {
             return { poisoned: true, reason: 'Content too short' };
         }
-        
+
         const lowerHtml = html.toLowerCase();
-        
-        // Check for block indicators
+
+        // Check for block indicators — only flag if page is small (likely a block page)
+        // or if the indicator appears in <title> or <h1> (structural block signal).
+        // Full content pages (>10KB) that mention "rate limit" in body text are NOT poisoned.
+        const isShortPage = html.length < 10000;
+        const titleMatch = lowerHtml.match(/<title[^>]*>(.*?)<\/title>/);
+        const titleText = titleMatch ? titleMatch[1] : '';
+        const h1Match = lowerHtml.match(/<h1[^>]*>(.*?)<\/h1>/);
+        const h1Text = h1Match ? h1Match[1] : '';
+        const headSignal = titleText + ' ' + h1Text;
+
         for (const indicator of BLOCK_INDICATORS) {
-            if (lowerHtml.includes(indicator)) {
+            if (isShortPage && lowerHtml.includes(indicator)) {
                 return { poisoned: true, reason: `Contains block indicator: ${indicator}` };
+            }
+            if (!isShortPage && headSignal.includes(indicator)) {
+                return { poisoned: true, reason: `Title/H1 contains block indicator: ${indicator}` };
             }
         }
         
