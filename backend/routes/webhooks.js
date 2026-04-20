@@ -30,6 +30,9 @@ try {
   console.warn('[Webhooks] actionEngine not available:', e.message);
 }
 
+// Signature parser for reply enrichment (best-effort)
+const { parseEmailSignature, enrichPersonFromSignature } = require('../utils/signatureParser');
+
 // ============================================================
 // SENDGRID WEBHOOK
 // ============================================================
@@ -800,7 +803,19 @@ router.post(
       console.warn(`  ⚠️ Action Engine skipped — no person_id for ${recipient.email}`);
     }
 
-    // 6c. NO forward — salesperson already has the reply in their Gmail inbox
+    // 6c. Signature enrichment — parse reply body for phone, title, company (best-effort)
+    if (personId) {
+      try {
+        const signatureData = parseEmailSignature(text || html || '');
+        if (signatureData) {
+          await enrichPersonFromSignature(personId, recipient.organizer_id, signatureData);
+        }
+      } catch (sigErr) {
+        console.warn('  ⚠️ Signature enrichment failed:', sigErr.message);
+      }
+    }
+
+    // 6d. NO forward — salesperson already has the reply in their Gmail inbox
     // (Reply-To = salesperson's real email, so customer replies go directly to them)
     console.log(`  ✉️ Reply processed (no forward — salesperson has it via direct Reply-To)`);
 

@@ -143,7 +143,7 @@ router.get('/:companyName/contacts', authRequired, async (req, res) => {
         p.email_status,
         p.created_at as person_created_at,
         a.company_name,
-        a.job_title,
+        a.position as job_title,
         a.industry,
         a.country,
         a.source_url,
