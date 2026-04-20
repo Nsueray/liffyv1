@@ -202,6 +202,18 @@ async function processSendingCampaigns() {
 
         await Promise.all(chunk.map(async (r) => {
           try {
+            // Atomic claim: prevent duplicate sends from concurrent workers/redeploys
+            const claim = await client.query(
+              `UPDATE campaign_recipients SET status = 'sending'
+               WHERE id = $1 AND status = 'pending'
+               RETURNING id`,
+              [r.id]
+            );
+            if (claim.rows.length === 0) {
+              console.log(`⏭️ Skipping ${r.email} — already claimed by another process`);
+              return;
+            }
+
             const unsubscribeUrl = getUnsubscribeUrl(r.email, campaign.organizer_id, campaign.id, r.id);
             const processedSubject = processTemplate(campaign.subject, r);
             let processedHtml = processTemplate(campaign.body_html, r, { unsubscribe_url: unsubscribeUrl });

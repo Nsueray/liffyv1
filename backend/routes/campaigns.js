@@ -152,6 +152,42 @@ router.get('/', authRequired, async (req, res) => {
   }
 });
 
+// GET /api/campaigns/email-usage — current user's daily email usage & limit
+router.get('/email-usage', authRequired, async (req, res) => {
+  try {
+    const { userId, organizerId } = getUserContext(req);
+
+    const limitRes = await db.query(
+      `SELECT daily_email_limit FROM users WHERE id = $1`,
+      [userId]
+    );
+    const dailyLimit = limitRes.rows.length
+      ? parseInt(limitRes.rows[0].daily_email_limit, 10) || 0
+      : 0;
+
+    const sentRes = await db.query(
+      `SELECT COUNT(*)::int AS sent_today
+         FROM campaign_events ce
+         JOIN campaigns c ON c.id = ce.campaign_id
+        WHERE ce.organizer_id = $1
+          AND c.created_by_user_id = $2
+          AND ce.event_type = 'sent'
+          AND ce.occurred_at >= CURRENT_DATE`,
+      [organizerId, userId]
+    );
+    const sentToday = parseInt(sentRes.rows[0].sent_today, 10) || 0;
+
+    res.json({
+      daily_limit: dailyLimit,
+      sent_today: sentToday,
+      remaining: Math.max(0, dailyLimit - sentToday),
+    });
+  } catch (err) {
+    console.error('GET /api/campaigns/email-usage error:', err);
+    res.status(500).json({ error: 'Failed to fetch email usage' });
+  }
+});
+
 // GET /api/campaigns/:id
 router.get('/:id', authRequired, async (req, res) => {
   try {

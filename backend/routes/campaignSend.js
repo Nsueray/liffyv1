@@ -143,9 +143,19 @@ router.post('/api/campaigns/:id/send-batch', authRequired, async (req, res) => {
     let failCount = 0;
 
     for (const r of recipients) {
-        // DEBUG: Log recipient data
-        console.log("[CampaignSend] Recipient:", r.email, "Name:", r.name, "Meta:", JSON.stringify(r.meta));
       try {
+        // Atomic claim: prevent duplicate sends from concurrent workers/API calls
+        const claim = await client.query(
+          `UPDATE campaign_recipients SET status = 'sending'
+           WHERE id = $1 AND status = 'pending'
+           RETURNING id`,
+          [r.id]
+        );
+        if (claim.rows.length === 0) {
+          console.log(`[CampaignSend] Skipping ${r.email} — already claimed`);
+          continue;
+        }
+
         // Generate unsubscribe URL for this recipient (includes campaign/recipient IDs for reply detection)
         const unsubscribe_url = getUnsubscribeUrl(r.email, organizer_id, campaign_id, r.id);
 
