@@ -108,6 +108,17 @@ async function initializeSequence(campaignId, organizerId) {
 async function processSequenceStep(seqRecipient) {
   const { id, campaign_id, organizer_id, email, current_step, meta } = seqRecipient;
 
+  // 0) Atomic CAS claim: prevent duplicate sends from concurrent workers/redeploys
+  const claim = await db.query(
+    `UPDATE sequence_recipients SET status = 'sending', updated_at = NOW()
+     WHERE id = $1 AND status = 'active'
+     RETURNING id`,
+    [id]
+  );
+  if (claim.rows.length === 0) {
+    return { action: 'skipped', reason: 'already_claimed' };
+  }
+
   // 1) Get step definition
   const stepRes = await db.query(
     `SELECT cs.*, t.subject, t.body_html, t.body_text
@@ -239,6 +250,11 @@ async function processSequenceStep(seqRecipient) {
 
   if (!mailResult.success) {
     console.error(`[Sequence] Send failed for ${email} step ${current_step}:`, mailResult.error);
+    // Restore to active so it can be retried on next poll
+    await db.query(
+      `UPDATE sequence_recipients SET status = 'active', updated_at = NOW() WHERE id = $1`,
+      [id]
+    );
     return { action: 'error', reason: mailResult.error };
   }
 
@@ -276,7 +292,7 @@ async function processSequenceStep(seqRecipient) {
     const next = nextStepRes.rows[0];
     await db.query(
       `UPDATE sequence_recipients
-       SET current_step = $2, last_sent_step = $3, last_sent_at = NOW(),
+       SET status = 'active', current_step = $2, last_sent_step = $3, last_sent_at = NOW(),
            next_send_at = NOW() + ($4 || ' days')::INTERVAL, updated_at = NOW()
        WHERE id = $1`,
       [id, next.sequence_order, current_step, next.delay_days]
