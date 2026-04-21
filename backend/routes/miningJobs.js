@@ -379,6 +379,41 @@ router.get('/api/mining/jobs/:id', authRequired, validateJobId, async (req, res)
       return res.status(403).json({ error: 'Forbidden' });
     }
 
+    // Lazy-compute single-domain warning for completed jobs
+    if (job.status === 'completed' && job.total_found > 0 && !job.stats?.single_domain_checked) {
+      try {
+        const domainRes = await db.query(
+          `SELECT domain, cnt FROM (
+             SELECT LOWER(SPLIT_PART(email, '@', 2)) AS domain, COUNT(*) AS cnt
+             FROM mining_results, LATERAL unnest(emails) AS email
+             WHERE job_id = $1 AND emails IS NOT NULL AND array_length(emails, 1) > 0
+             GROUP BY 1
+           ) sub ORDER BY cnt DESC LIMIT 5`,
+          [job_id]
+        );
+        const totalEmails = domainRes.rows.reduce((s, r) => s + parseInt(r.cnt), 0);
+        const topDomain = domainRes.rows[0];
+        const domainWarning = {};
+        if (topDomain && totalEmails >= 3) {
+          const pct = Math.round((parseInt(topDomain.cnt) / totalEmails) * 100);
+          if (pct >= 80) {
+            domainWarning.single_domain_warning = true;
+            domainWarning.dominant_domain = topDomain.domain;
+            domainWarning.domain_percentage = pct;
+          }
+        }
+        domainWarning.single_domain_checked = true;
+        // Persist to stats JSONB so we don't recompute
+        await db.query(
+          `UPDATE mining_jobs SET stats = COALESCE(stats, '{}'::jsonb) || $1::jsonb WHERE id = $2`,
+          [JSON.stringify(domainWarning), job_id]
+        );
+        job.stats = { ...(job.stats || {}), ...domainWarning };
+      } catch (domErr) {
+        console.error(`[miningJobs] Domain analysis error: ${domErr.message}`);
+      }
+    }
+
     return res.json({ job });
   } catch (err) {
     console.error('GET /mining/jobs/:id error:', err);
