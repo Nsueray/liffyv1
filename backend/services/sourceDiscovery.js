@@ -1,11 +1,11 @@
 /**
- * Source Discovery Engine v1.0
+ * Source Discovery Engine v2.0
  *
- * Uses Claude API with web_search tool to find B2B data sources
- * (association member lists, industry directories, fair exhibitor pages)
- * based on fair name, industry, and target countries.
+ * Uses Claude API with web_search tool to find B2B data sources.
+ * v2: Source-type-aware search with query templates per source type.
  *
- * Input:  { fair_name, industry, target_countries: [], organizer_id }
+ * Input:  { keyword, industry, target_countries: [], source_type?, organizer_id }
+ *         (backward compat: fair_name accepted as alias for keyword)
  * Output: { sources: [{ url, source_type, estimated_companies, has_email_on_page, language, notes }] }
  */
 
@@ -13,39 +13,124 @@ const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-haiku-4-5-20251001';
 const TIMEOUT_MS = 60000;
 
+// Source type → search focus mapping
+const SOURCE_TYPE_PROMPTS = {
+  trade_fair: {
+    searchFocus: 'exhibitor lists and directories from trade fairs and exhibitions',
+    searchPriority: [
+      'Exhibitor list pages from trade fairs and exhibitions (e.g. /exhibitors, /katilimcilar, /exposants, /aussteller)',
+      'PDF exhibitor catalogs from trade fairs',
+      'Past edition exhibitor archives',
+    ],
+  },
+  association: {
+    searchFocus: 'member lists and directories from industry associations, federations, and unions',
+    searchPriority: [
+      'Direct member directory pages (e.g. /members, /uyeler, /annuaire, /mitglieder, /soci)',
+      'PDF membership lists from industry associations',
+      'Annual reports with member listings',
+    ],
+  },
+  chamber: {
+    searchFocus: 'member directories from chambers of commerce and industry',
+    searchPriority: [
+      'Chamber of commerce member search pages and directories',
+      'Chamber member listing pages (e.g. /members, /uyeler)',
+      'PDF member directories from chambers',
+    ],
+  },
+  business_directory: {
+    searchFocus: 'business directory and supplier portal listings',
+    searchPriority: [
+      'Europages or Kompass directory pages filtered by industry+country',
+      'Industry-specific supplier directories and portals',
+      'B2B marketplace company listing pages',
+    ],
+  },
+  company_listing: {
+    searchFocus: 'company catalog pages, blog listings, and WordPress directory pages',
+    searchPriority: [
+      'Company listing pages from WordPress sites or blog posts',
+      'Industry catalog pages with company contacts',
+      'Portal pages aggregating company information',
+    ],
+  },
+  trade_portal: {
+    searchFocus: 'trade portals with supplier and manufacturer databases',
+    searchPriority: [
+      'Alibaba, TradeFord, ExportHub supplier pages filtered by industry+country',
+      'Trade portal manufacturer directories',
+      'Export/import platform supplier listings',
+    ],
+  },
+  government_trade: {
+    searchFocus: 'government trade databases, ministry directories, and official exporter lists',
+    searchPriority: [
+      'Government trade ministry export databases',
+      'Trade attaché published company lists',
+      'Official exporter/importer registries (e.g. TOBB, trade.gov)',
+    ],
+  },
+  custom_search: {
+    searchFocus: 'any pages containing company lists, contact information, or business directories',
+    searchPriority: [
+      'Pages with visible email addresses and company names',
+      'Structured lists or tables with business contact data',
+      'PDF documents containing company directories',
+    ],
+  },
+};
+
 /**
- * Discover data sources for a trade fair
+ * Discover data sources (v2 — source-type-aware)
  *
  * @param {Object} params
- * @param {string} params.fair_name - Trade fair name
- * @param {string} params.industry - Industry/sector
+ * @param {string} params.keyword - Search keyword (or params.fair_name for backward compat)
+ * @param {string} params.industry - Industry/sector (optional for custom_search)
  * @param {string[]} params.target_countries - Target countries
+ * @param {string} params.source_type - Source type (trade_fair, association, etc.)
  * @param {string} params.organizer_id - Organizer ID (for logging)
  * @returns {Promise<Object>} { sources: [...] }
  */
-async function discoverSources({ fair_name, industry, target_countries = [], organizer_id }) {
+async function discoverSources({ keyword, fair_name, industry, target_countries = [], source_type, organizer_id }) {
+  // Backward compat: fair_name → keyword
+  const searchKeyword = (keyword || fair_name || '').trim();
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     console.error('[sourceDiscovery] ANTHROPIC_API_KEY not configured');
     return { sources: [], error: 'ANTHROPIC_API_KEY not configured' };
   }
 
-  console.log(`[sourceDiscovery] Starting discovery: fair="${fair_name}", industry="${industry}", countries="${target_countries.join(', ')}"`);
+  const resolvedSourceType = source_type || 'trade_fair';
+  const sourceConfig = SOURCE_TYPE_PROMPTS[resolvedSourceType] || SOURCE_TYPE_PROMPTS.custom_search;
 
-  const systemPrompt = 'You are a B2B data sourcing expert for trade fair organizers. Your job is to find SPECIFIC URLs that directly contain lists of company names, emails, or contact information — not homepages, not news pages, not about pages.\n\nCRITICAL RULES:\n- Every URL must point directly to a page that LISTS companies/members, not a homepage\n- Prefer pages where email addresses are visible on the page itself\n- PDF files with member lists are highly valuable — include them\n- Do NOT return: homepages, news articles, blog posts, event pages, about pages\n- Verify each URL exists by searching before including it\n- If you find a site but cannot find the specific member list page, skip it entirely';
+  console.log(`[sourceDiscovery] Starting discovery: keyword="${searchKeyword}", industry="${industry || ''}", source_type="${resolvedSourceType}", countries="${target_countries.join(', ')}"`);
 
-  const userPrompt = `Find 15-20 SPECIFIC URLs containing company/member lists for this trade fair:
+  const systemPrompt = `You are a B2B data sourcing expert. Your job is to find SPECIFIC URLs that directly contain lists of company names, emails, or contact information — not homepages, not news pages, not about pages.
 
-Fair: ${fair_name}
-Industry: ${industry}
-Target countries: ${target_countries.join(', ')}
+CRITICAL RULES:
+- Every URL must point directly to a page that LISTS companies/members, not a homepage
+- Prefer pages where email addresses are visible on the page itself
+- PDF files with member lists are highly valuable — include them
+- Do NOT return: homepages, news articles, blog posts, event pages, about pages
+- Verify each URL exists by searching before including it
+- If you find a site but cannot find the specific member list page, skip it entirely
+
+You are specifically searching for: ${sourceConfig.searchFocus}`;
+
+  const countryLine = target_countries.length > 0 ? `Target countries: ${target_countries.join(', ')}` : '';
+  const industryLine = industry ? `Industry: ${industry}` : '';
+
+  const userPrompt = `Find 15-20 SPECIFIC URLs containing company/member lists:
+
+Search keywords: ${searchKeyword}
+${industryLine}
+${countryLine}
 
 Search priority order:
-1. PDF membership lists from industry associations (e.g. 'site:uniclima.fr filetype:pdf members')
-2. Direct member directory pages (e.g. '/members', '/uyeler', '/annuaire', '/mitglieder', '/soci')
-3. Exhibitor list pages from related trade fairs (e.g. '/exhibitors', '/katilimcilar', '/exposants')
-4. Europages or Kompass directory pages filtered by industry+country
-5. Chamber of commerce member search pages
+${sourceConfig.searchPriority.map((p, i) => `${i + 1}. ${p}`).join('\n')}
+${resolvedSourceType !== 'trade_fair' ? '' : `4. Europages or Kompass directory pages filtered by industry+country
+5. Chamber of commerce member search pages`}
 
 For EACH result you MUST search and verify the URL exists before including it.
 

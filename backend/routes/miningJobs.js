@@ -206,6 +206,68 @@ router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req,
 });
 
 /**
+ * POST /api/mining/batch-create
+ * Create multiple mining jobs at once (Source Discovery v2)
+ * Body: { urls: [{ url, name? }] }
+ */
+router.post('/api/mining/batch-create', authRequired, async (req, res) => {
+  try {
+    const organizer_id = req.auth.organizer_id;
+    const user_id = req.auth.user_id;
+    const { urls } = req.body;
+
+    if (!Array.isArray(urls) || urls.length === 0) {
+      return res.status(400).json({ error: 'urls array is required and must not be empty' });
+    }
+
+    if (urls.length > 50) {
+      return res.status(400).json({ error: 'Maximum 50 URLs per batch' });
+    }
+
+    const jobs = [];
+    const errors = [];
+
+    for (const item of urls) {
+      const url = typeof item === 'string' ? item : item?.url;
+      if (!url || typeof url !== 'string' || !url.trim()) {
+        errors.push({ url: url || null, error: 'Invalid URL' });
+        continue;
+      }
+
+      const jobName = (typeof item === 'object' && item.name)
+        ? item.name
+        : `Discovery — ${(() => { try { return new URL(url).hostname; } catch { return url.slice(0, 40); } })()}`;
+
+      try {
+        const result = await db.query(
+          `INSERT INTO mining_jobs
+           (organizer_id, type, input, name, strategy, config, status, created_by_user_id)
+           VALUES ($1, 'url', $2, $3, 'auto', $4, 'pending', $5)
+           RETURNING id, type, input, name, status, created_at`,
+          [organizer_id, url.trim(), jobName, { mining_mode: 'full' }, user_id]
+        );
+        jobs.push(result.rows[0]);
+      } catch (err) {
+        console.error(`[batch-create] Error creating job for ${url}:`, err.message);
+        errors.push({ url, error: err.message });
+      }
+    }
+
+    console.log(`[batch-create] Created ${jobs.length} jobs, ${errors.length} errors for organizer ${organizer_id}`);
+
+    return res.json({
+      jobs,
+      created: jobs.length,
+      failed: errors.length,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (err) {
+    console.error('POST /mining/batch-create error:', err);
+    return res.status(500).json({ error: 'Failed to create mining jobs', details: err.message });
+  }
+});
+
+/**
  * GET /api/mining/jobs
  */
 router.get('/api/mining/jobs', authRequired, async (req, res) => {

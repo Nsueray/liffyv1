@@ -47,20 +47,20 @@ function authRequired(req, res, next) {
  */
 router.post('/', authRequired, async (req, res) => {
   try {
-    const { fair_name, industry, target_countries } = req.body;
+    const { fair_name, keyword, industry, target_countries, source_type } = req.body;
     const organizer_id = req.auth.organizer_id;
 
-    // Validation
-    if (!fair_name || typeof fair_name !== 'string' || fair_name.trim().length === 0) {
-      return res.status(400).json({ error: 'fair_name is required' });
+    // v2: keyword is primary, fair_name is backward compat
+    const searchKeyword = (keyword || fair_name || '').trim();
+
+    // Validation — keyword OR fair_name required (unless custom_url)
+    if (!searchKeyword) {
+      return res.status(400).json({ error: 'keyword (or fair_name) is required' });
     }
-    if (!industry || typeof industry !== 'string' || industry.trim().length === 0) {
-      return res.status(400).json({ error: 'industry is required' });
+    if (searchKeyword.length > 300) {
+      return res.status(400).json({ error: 'keyword must be under 300 characters' });
     }
-    if (fair_name.length > 200) {
-      return res.status(400).json({ error: 'fair_name must be under 200 characters' });
-    }
-    if (industry.length > 200) {
+    if (industry && industry.length > 200) {
       return res.status(400).json({ error: 'industry must be under 200 characters' });
     }
 
@@ -72,12 +72,13 @@ router.post('/', authRequired, async (req, res) => {
       countries = target_countries.split(',').map(c => c.trim()).filter(Boolean);
     }
 
-    console.log(`[sourceDiscovery] POST /api/source-discovery — fair="${fair_name}", industry="${industry}", countries=${countries.length}, organizer=${organizer_id}`);
+    console.log(`[sourceDiscovery] POST /api/source-discovery — keyword="${searchKeyword}", source_type="${source_type || 'trade_fair'}", industry="${industry || ''}", countries=${countries.length}, organizer=${organizer_id}`);
 
     const result = await discoverSources({
-      fair_name: fair_name.trim(),
-      industry: industry.trim(),
+      keyword: searchKeyword,
+      industry: (industry || '').trim(),
       target_countries: countries,
+      source_type: source_type || undefined,
       organizer_id
     });
 
