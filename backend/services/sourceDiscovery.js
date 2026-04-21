@@ -104,7 +104,14 @@ async function discoverSources({ keyword, fair_name, industry, target_countries 
   const resolvedSourceType = source_type || 'trade_fair';
   const sourceConfig = SOURCE_TYPE_PROMPTS[resolvedSourceType] || SOURCE_TYPE_PROMPTS.custom_search;
 
-  console.log(`[sourceDiscovery] Starting discovery: keyword="${searchKeyword}", industry="${industry || ''}", source_type="${resolvedSourceType}", countries="${target_countries.join(', ')}"`);
+  // Build search description from available inputs
+  const searchParts = [];
+  if (searchKeyword) searchParts.push(searchKeyword);
+  if (industry) searchParts.push(industry);
+  if (target_countries.length > 0) searchParts.push(target_countries.join(', '));
+  const searchDescription = searchParts.join(' — ') || resolvedSourceType;
+
+  console.log(`[sourceDiscovery] Starting discovery: keyword="${searchKeyword}", industry="${industry || ''}", source_type="${resolvedSourceType}", countries="${target_countries.join(', ')}", description="${searchDescription}"`);
 
   const systemPrompt = `You are a B2B data sourcing expert. Your job is to find SPECIFIC URLs that directly contain lists of company names, emails, or contact information — not homepages, not news pages, not about pages.
 
@@ -120,10 +127,11 @@ You are specifically searching for: ${sourceConfig.searchFocus}`;
 
   const countryLine = target_countries.length > 0 ? `Target countries: ${target_countries.join(', ')}` : '';
   const industryLine = industry ? `Industry: ${industry}` : '';
+  const keywordLine = searchKeyword ? `Search keywords: ${searchKeyword}` : '';
 
   const userPrompt = `Find 15-20 SPECIFIC URLs containing company/member lists:
 
-Search keywords: ${searchKeyword}
+${keywordLine}
 ${industryLine}
 ${countryLine}
 
@@ -143,6 +151,10 @@ Return JSON array with these fields per result:
 - notes: one sentence explaining exactly what this page contains
 
 Return JSON array only. No markdown, no explanation, no code fences.`;
+
+  console.log(`[sourceDiscovery] User prompt (first 500 chars): ${userPrompt.slice(0, 500)}`);
+  console.log(`[sourceDiscovery] System prompt (first 300 chars): ${systemPrompt.slice(0, 300)}`);
+
 
   try {
     const controller = new AbortController();
@@ -175,6 +187,10 @@ Return JSON array only. No markdown, no explanation, no code fences.`;
 
     const data = await response.json();
 
+    // Debug: log response structure
+    const contentTypes = (data.content || []).map(b => b.type);
+    console.log(`[sourceDiscovery] API response: stop_reason="${data.stop_reason}", content_blocks=${contentTypes.length}, types=[${contentTypes.join(', ')}]`);
+
     // Extract text content from response
     let textContent = '';
     if (data.content && Array.isArray(data.content)) {
@@ -186,9 +202,12 @@ Return JSON array only. No markdown, no explanation, no code fences.`;
     }
 
     if (!textContent) {
-      console.log('[sourceDiscovery] No text content in response');
+      console.log('[sourceDiscovery] No text content in response. Full content blocks:');
+      console.log(JSON.stringify(data.content?.map(b => ({ type: b.type, text: b.text?.slice(0, 200) })), null, 2));
       return { sources: [] };
     }
+
+    console.log(`[sourceDiscovery] Text content length: ${textContent.length}, first 500 chars: ${textContent.slice(0, 500)}`);
 
     // Parse JSON from response
     const sources = parseSourcesFromText(textContent);
@@ -213,16 +232,26 @@ function parseSourcesFromText(text) {
   // Try direct parse first
   try {
     const parsed = JSON.parse(text.trim());
-    if (Array.isArray(parsed)) return validateSources(parsed);
-  } catch (e) {}
+    if (Array.isArray(parsed)) {
+      console.log(`[sourceDiscovery] Parsed via direct JSON: ${parsed.length} items`);
+      return validateSources(parsed);
+    }
+  } catch (e) {
+    console.log(`[sourceDiscovery] Direct parse failed: ${e.message}`);
+  }
 
   // Try extracting JSON from code fences
   const codeFenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
   if (codeFenceMatch) {
     try {
       const parsed = JSON.parse(codeFenceMatch[1].trim());
-      if (Array.isArray(parsed)) return validateSources(parsed);
-    } catch (e) {}
+      if (Array.isArray(parsed)) {
+        console.log(`[sourceDiscovery] Parsed via code fence: ${parsed.length} items`);
+        return validateSources(parsed);
+      }
+    } catch (e) {
+      console.log(`[sourceDiscovery] Code fence parse failed: ${e.message}`);
+    }
   }
 
   // Try finding JSON array in text
@@ -230,11 +259,16 @@ function parseSourcesFromText(text) {
   if (arrayMatch) {
     try {
       const parsed = JSON.parse(arrayMatch[0]);
-      if (Array.isArray(parsed)) return validateSources(parsed);
-    } catch (e) {}
+      if (Array.isArray(parsed)) {
+        console.log(`[sourceDiscovery] Parsed via regex extraction: ${parsed.length} items`);
+        return validateSources(parsed);
+      }
+    } catch (e) {
+      console.log(`[sourceDiscovery] Regex extraction parse failed: ${e.message}`);
+    }
   }
 
-  console.log('[sourceDiscovery] Could not parse sources from response');
+  console.log(`[sourceDiscovery] Could not parse sources from response. Text (last 500 chars): ${text.slice(-500)}`);
   return [];
 }
 

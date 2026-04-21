@@ -53,9 +53,14 @@ router.post('/', authRequired, async (req, res) => {
     // v2: keyword is primary, fair_name is backward compat
     const searchKeyword = (keyword || fair_name || '').trim();
 
-    // Validation — keyword OR fair_name required (unless custom_url)
-    if (!searchKeyword) {
-      return res.status(400).json({ error: 'keyword (or fair_name) is required' });
+    // Validation — at least ONE input required (keyword, industry, or country)
+    const hasKeyword = searchKeyword.length > 0;
+    const hasIndustry = industry && industry.trim().length > 0;
+    const hasCountries = (Array.isArray(target_countries) && target_countries.length > 0) ||
+      (typeof target_countries === 'string' && target_countries.trim().length > 0);
+
+    if (!hasKeyword && !hasIndustry && !hasCountries) {
+      return res.status(400).json({ error: 'At least one filter is required (keyword, industry, or country)' });
     }
     if (searchKeyword.length > 300) {
       return res.status(400).json({ error: 'keyword must be under 300 characters' });
