@@ -1,8 +1,8 @@
 /**
- * Source Discovery Engine v2.0
+ * Source Discovery Engine v2.1
  *
  * Uses Claude API with web_search tool to find B2B data sources.
- * v2: Source-type-aware search with query templates per source type.
+ * v2.1: Optimized prompts (~150 words), 429 rate limit handling, domain dedup.
  *
  * Input:  { keyword, industry, target_countries: [], source_type?, organizer_id }
  *         (backward compat: fair_name accepted as alias for keyword)
@@ -12,88 +12,24 @@
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
 const MODEL = 'claude-haiku-4-5-20251001';
 const TIMEOUT_MS = 60000;
+const MAX_PER_DOMAIN = 3;
 
-// Source type → search focus mapping
-const SOURCE_TYPE_PROMPTS = {
-  trade_fair: {
-    searchFocus: 'exhibitor lists and directories from trade fairs and exhibitions',
-    searchPriority: [
-      'Exhibitor list pages from trade fairs and exhibitions (e.g. /exhibitors, /katilimcilar, /exposants, /aussteller)',
-      'PDF exhibitor catalogs from trade fairs',
-      'Past edition exhibitor archives',
-    ],
-  },
-  association: {
-    searchFocus: 'member lists and directories from industry associations, federations, and unions',
-    searchPriority: [
-      'Direct member directory pages (e.g. /members, /uyeler, /annuaire, /mitglieder, /soci)',
-      'PDF membership lists from industry associations',
-      'Annual reports with member listings',
-    ],
-  },
-  chamber: {
-    searchFocus: 'member directories from chambers of commerce and industry',
-    searchPriority: [
-      'Chamber of commerce member search pages and directories',
-      'Chamber member listing pages (e.g. /members, /uyeler)',
-      'PDF member directories from chambers',
-    ],
-  },
-  business_directory: {
-    searchFocus: 'business directory and supplier portal listings',
-    searchPriority: [
-      'Europages or Kompass directory pages filtered by industry+country',
-      'Industry-specific supplier directories and portals',
-      'B2B marketplace company listing pages',
-    ],
-  },
-  company_listing: {
-    searchFocus: 'company catalog pages, blog listings, and WordPress directory pages',
-    searchPriority: [
-      'Company listing pages from WordPress sites or blog posts',
-      'Industry catalog pages with company contacts',
-      'Portal pages aggregating company information',
-    ],
-  },
-  trade_portal: {
-    searchFocus: 'trade portals with supplier and manufacturer databases',
-    searchPriority: [
-      'Alibaba, TradeFord, ExportHub supplier pages filtered by industry+country',
-      'Trade portal manufacturer directories',
-      'Export/import platform supplier listings',
-    ],
-  },
-  government_trade: {
-    searchFocus: 'government trade databases, ministry directories, and official exporter lists',
-    searchPriority: [
-      'Government trade ministry export databases',
-      'Trade attaché published company lists',
-      'Official exporter/importer registries (e.g. TOBB, trade.gov)',
-    ],
-  },
-  custom_search: {
-    searchFocus: 'any pages containing company lists, contact information, or business directories',
-    searchPriority: [
-      'Pages with visible email addresses and company names',
-      'Structured lists or tables with business contact data',
-      'PDF documents containing company directories',
-    ],
-  },
+// Source type → compact search focus (one line each)
+const SOURCE_TYPE_FOCUS = {
+  trade_fair: 'exhibitor list pages from trade fairs and exhibitions',
+  association: 'member directory pages from industry associations and federations',
+  chamber: 'member directories from chambers of commerce',
+  business_directory: 'business directory listings (Kompass, Europages, industry portals)',
+  company_listing: 'company catalog pages, blog listings, WordPress directory pages',
+  trade_portal: 'supplier/manufacturer pages on trade portals (Alibaba, TradeFord)',
+  government_trade: 'government trade databases, official exporter registries',
+  custom_search: 'pages with company lists, contact info, or business directories',
 };
 
 /**
- * Discover data sources (v2 — source-type-aware)
- *
- * @param {Object} params
- * @param {string} params.keyword - Search keyword (or params.fair_name for backward compat)
- * @param {string} params.industry - Industry/sector (optional for custom_search)
- * @param {string[]} params.target_countries - Target countries
- * @param {string} params.source_type - Source type (trade_fair, association, etc.)
- * @param {string} params.organizer_id - Organizer ID (for logging)
- * @returns {Promise<Object>} { sources: [...] }
+ * Discover data sources (v2.1 — optimized prompts + rate limit + dedup)
  */
 async function discoverSources({ keyword, fair_name, industry, target_countries = [], source_type, organizer_id }) {
-  // Backward compat: fair_name → keyword
   const searchKeyword = (keyword || fair_name || '').trim();
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -102,61 +38,30 @@ async function discoverSources({ keyword, fair_name, industry, target_countries 
   }
 
   const resolvedSourceType = source_type || 'trade_fair';
-  const sourceConfig = SOURCE_TYPE_PROMPTS[resolvedSourceType] || SOURCE_TYPE_PROMPTS.custom_search;
+  const searchFocus = SOURCE_TYPE_FOCUS[resolvedSourceType] || SOURCE_TYPE_FOCUS.custom_search;
 
-  // Build search description from available inputs
-  const searchParts = [];
-  if (searchKeyword) searchParts.push(searchKeyword);
-  if (industry) searchParts.push(industry);
-  if (target_countries.length > 0) searchParts.push(target_countries.join(', '));
-  const searchDescription = searchParts.join(' — ') || resolvedSourceType;
+  // Build compact search line
+  const parts = [searchKeyword, industry, target_countries.join(', ')].filter(Boolean);
+  const searchLine = parts.join(' | ') || resolvedSourceType;
 
-  console.log(`[sourceDiscovery] Starting discovery: keyword="${searchKeyword}", industry="${industry || ''}", source_type="${resolvedSourceType}", countries="${target_countries.join(', ')}", description="${searchDescription}"`);
+  console.log(`[sourceDiscovery] Starting: "${searchLine}", type=${resolvedSourceType}, org=${organizer_id}`);
 
-  const systemPrompt = `You are a B2B data sourcing expert. Your job is to find SPECIFIC URLs that directly contain lists of company names, emails, or contact information — not homepages, not news pages, not about pages.
+  // Optimized system prompt (~80 words)
+  const systemPrompt = `You find B2B data source URLs. Return SPECIFIC pages with company/member lists — not homepages. Focus: ${searchFocus}. Include PDFs with member lists. Verify URLs exist via search. Return ONLY a JSON array, no other text.`;
 
-CRITICAL RULES:
-- Every URL must point directly to a page that LISTS companies/members, not a homepage
-- Prefer pages where email addresses are visible on the page itself
-- PDF files with member lists are highly valuable — include them
-- Do NOT return: homepages, news articles, blog posts, event pages, about pages
-- Verify each URL exists by searching before including it
-- If you find a site but cannot find the specific member list page, skip it entirely
+  // Optimized user prompt (~60 words)
+  const filterLines = [
+    searchKeyword ? `Keywords: ${searchKeyword}` : '',
+    industry ? `Industry: ${industry}` : '',
+    target_countries.length ? `Countries: ${target_countries.join(', ')}` : '',
+  ].filter(Boolean).join('\n');
 
-You are specifically searching for: ${sourceConfig.searchFocus}`;
+  const userPrompt = `Find 10-15 URLs with company/member lists.
+${filterLines}
 
-  const countryLine = target_countries.length > 0 ? `Target countries: ${target_countries.join(', ')}` : '';
-  const industryLine = industry ? `Industry: ${industry}` : '';
-  const keywordLine = searchKeyword ? `Search keywords: ${searchKeyword}` : '';
+Return JSON array: [{"url":"...","source_type":"association|directory|fair|pdf|registry|other","estimated_companies":50,"has_email_on_page":true,"language":"en","notes":"..."}]`;
 
-  const userPrompt = `Find 15-20 SPECIFIC URLs containing company/member lists:
-
-${keywordLine}
-${industryLine}
-${countryLine}
-
-Search priority order:
-${sourceConfig.searchPriority.map((p, i) => `${i + 1}. ${p}`).join('\n')}
-${resolvedSourceType !== 'trade_fair' ? '' : `4. Europages or Kompass directory pages filtered by industry+country
-5. Chamber of commerce member search pages`}
-
-For EACH result you MUST search and verify the URL exists before including it.
-
-Return JSON array with these fields per result:
-- url: the SPECIFIC page URL (not homepage)
-- source_type: 'pdf' | 'association' | 'fair' | 'directory' | 'registry' | 'other'
-- estimated_companies: number
-- has_email_on_page: true | false | 'unknown'
-- language: page language
-- notes: one sentence explaining exactly what this page contains
-
-IMPORTANT: Return ONLY a valid JSON array. No markdown, no explanation, no code fences, no text before or after.
-If you found no results, return an empty array: []
-Example format: [{"url":"https://...","source_type":"association","estimated_companies":50,"has_email_on_page":true,"language":"en","notes":"..."}]`;
-
-  console.log(`[sourceDiscovery] User prompt (first 500 chars): ${userPrompt.slice(0, 500)}`);
-  console.log(`[sourceDiscovery] System prompt (first 300 chars): ${systemPrompt.slice(0, 300)}`);
-
+  console.log(`[sourceDiscovery] Prompt lengths: system=${systemPrompt.length}, user=${userPrompt.length}`);
 
   try {
     const controller = new AbortController();
@@ -171,7 +76,7 @@ Example format: [{"url":"https://...","source_type":"association","estimated_com
       },
       body: JSON.stringify({
         model: MODEL,
-        max_tokens: 16000,
+        max_tokens: 8000,
         system: systemPrompt,
         tools: [{ type: 'web_search_20250305', name: 'web_search' }],
         messages: [{ role: 'user', content: userPrompt }]
@@ -180,6 +85,13 @@ Example format: [{"url":"https://...","source_type":"association","estimated_com
     });
 
     clearTimeout(timeoutId);
+
+    // FIX 1: Rate limit handling
+    if (response.status === 429) {
+      const retryAfter = parseInt(response.headers.get('retry-after') || '60', 10);
+      console.warn(`[sourceDiscovery] Rate limited (429). retry-after=${retryAfter}s`);
+      return { sources: [], error: 'rate_limit', retry_after: retryAfter };
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -191,7 +103,7 @@ Example format: [{"url":"https://...","source_type":"association","estimated_com
 
     // Debug: log response structure
     const contentTypes = (data.content || []).map(b => b.type);
-    console.log(`[sourceDiscovery] API response: stop_reason="${data.stop_reason}", content_blocks=${contentTypes.length}, types=[${contentTypes.join(', ')}]`);
+    console.log(`[sourceDiscovery] Response: stop="${data.stop_reason}", blocks=${contentTypes.length}, types=[${contentTypes.join(', ')}]`);
 
     // Check for web_search_tool_result errors
     if (data.content && Array.isArray(data.content)) {
@@ -205,10 +117,9 @@ Example format: [{"url":"https://...","source_type":"association","estimated_com
       }
     }
 
-    // Extract text content from response — use ONLY the LAST text block
-    // (earlier text blocks are Claude's "I'll search for..." narrative)
+    // Extract text — use LAST text block (contains JSON after web search)
     let textContent = '';
-    let allTextBlocks = [];
+    const allTextBlocks = [];
     if (data.content && Array.isArray(data.content)) {
       for (const block of data.content) {
         if (block.type === 'text') {
@@ -217,8 +128,6 @@ Example format: [{"url":"https://...","source_type":"association","estimated_com
       }
     }
 
-    // Use last text block (the one after web search results) — it contains the JSON
-    // Fall back to all text concatenated if only one block
     if (allTextBlocks.length > 1) {
       textContent = allTextBlocks[allTextBlocks.length - 1];
       console.log(`[sourceDiscovery] Using last of ${allTextBlocks.length} text blocks (${textContent.length} chars)`);
@@ -226,24 +135,24 @@ Example format: [{"url":"https://...","source_type":"association","estimated_com
       textContent = allTextBlocks[0];
     }
 
-    // If last block didn't parse, try all blocks concatenated
     if (!textContent) {
-      console.log('[sourceDiscovery] No text content in response. Full content blocks:');
-      console.log(JSON.stringify(data.content?.map(b => ({ type: b.type, text: b.text?.slice(0, 200) })), null, 2));
+      console.log('[sourceDiscovery] No text content in response. Blocks:', JSON.stringify(data.content?.map(b => ({ type: b.type, text: b.text?.slice(0, 200) }))));
       return { sources: [] };
     }
 
-    console.log(`[sourceDiscovery] Text content length: ${textContent.length}, first 500 chars: ${textContent.slice(0, 500)}`);
+    console.log(`[sourceDiscovery] Text: ${textContent.length} chars, first 300: ${textContent.slice(0, 300)}`);
 
-    // Parse JSON from response — try last block first, then all blocks
+    // Parse JSON — try last block first, then all concatenated
     let sources = parseSourcesFromText(textContent);
     if (sources.length === 0 && allTextBlocks.length > 1) {
-      console.log('[sourceDiscovery] Last block gave 0 results, trying all text concatenated...');
-      const allText = allTextBlocks.join('\n');
-      sources = parseSourcesFromText(allText);
+      console.log('[sourceDiscovery] Last block gave 0, trying all text concatenated...');
+      sources = parseSourcesFromText(allTextBlocks.join('\n'));
     }
-    console.log(`[sourceDiscovery] Found ${sources.length} sources`);
 
+    // FIX 3: Domain dedup — max 3 per domain
+    sources = deduplicateByDomain(sources);
+
+    console.log(`[sourceDiscovery] Final: ${sources.length} sources (after dedup)`);
     return { sources };
   } catch (err) {
     if (err.name === 'AbortError') {
@@ -256,50 +165,65 @@ Example format: [{"url":"https://...","source_type":"association","estimated_com
 }
 
 /**
+ * Domain dedup: max MAX_PER_DOMAIN results per domain
+ */
+function deduplicateByDomain(sources) {
+  const seen = {};
+  return sources.filter(s => {
+    try {
+      const d = new URL(s.url).hostname.replace(/^www\./, '');
+      seen[d] = (seen[d] || 0) + 1;
+      return seen[d] <= MAX_PER_DOMAIN;
+    } catch {
+      return true;
+    }
+  });
+}
+
+/**
  * Parse JSON array of sources from Claude's text response
- * Handles various response formats (with/without code fences, mixed text)
  */
 function parseSourcesFromText(text) {
-  // Try direct parse first
+  // Try direct parse
   try {
     const parsed = JSON.parse(text.trim());
     if (Array.isArray(parsed)) {
-      console.log(`[sourceDiscovery] Parsed via direct JSON: ${parsed.length} items`);
+      console.log(`[sourceDiscovery] Parsed direct: ${parsed.length} items`);
       return validateSources(parsed);
     }
   } catch (e) {
-    console.log(`[sourceDiscovery] Direct parse failed: ${e.message}`);
+    // fall through
   }
 
-  // Try extracting JSON from code fences
+  // Try code fences
   const codeFenceMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
   if (codeFenceMatch) {
     try {
       const parsed = JSON.parse(codeFenceMatch[1].trim());
       if (Array.isArray(parsed)) {
-        console.log(`[sourceDiscovery] Parsed via code fence: ${parsed.length} items`);
+        console.log(`[sourceDiscovery] Parsed code fence: ${parsed.length} items`);
         return validateSources(parsed);
       }
     } catch (e) {
-      console.log(`[sourceDiscovery] Code fence parse failed: ${e.message}`);
+      // fall through
     }
   }
 
-  // Try finding JSON array in text
+  // Try regex extraction
   const arrayMatch = text.match(/\[\s*\{[\s\S]*\}\s*\]/);
   if (arrayMatch) {
     try {
       const parsed = JSON.parse(arrayMatch[0]);
       if (Array.isArray(parsed)) {
-        console.log(`[sourceDiscovery] Parsed via regex extraction: ${parsed.length} items`);
+        console.log(`[sourceDiscovery] Parsed regex: ${parsed.length} items`);
         return validateSources(parsed);
       }
     } catch (e) {
-      console.log(`[sourceDiscovery] Regex extraction parse failed: ${e.message}`);
+      // fall through
     }
   }
 
-  console.log(`[sourceDiscovery] Could not parse sources from response. Text (last 500 chars): ${text.slice(-500)}`);
+  console.log(`[sourceDiscovery] Parse failed. Last 300 chars: ${text.slice(-300)}`);
   return [];
 }
 

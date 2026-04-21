@@ -90,7 +90,8 @@ router.post('/', authRequired, async (req, res) => {
     const responseBody = {
       sources: result.sources || [],
       searched_at: new Date().toISOString(),
-      ...(result.error ? { error: result.error } : {})
+      ...(result.error ? { error: result.error } : {}),
+      ...(result.retry_after ? { retry_after: result.retry_after } : {})
     };
 
     // Explicit stringify to catch serialization issues and log response size
