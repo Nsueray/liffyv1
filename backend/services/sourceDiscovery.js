@@ -150,7 +150,9 @@ Return JSON array with these fields per result:
 - language: page language
 - notes: one sentence explaining exactly what this page contains
 
-Return JSON array only. No markdown, no explanation, no code fences.`;
+IMPORTANT: Return ONLY a valid JSON array. No markdown, no explanation, no code fences, no text before or after.
+If you found no results, return an empty array: []
+Example format: [{"url":"https://...","source_type":"association","estimated_companies":50,"has_email_on_page":true,"language":"en","notes":"..."}]`;
 
   console.log(`[sourceDiscovery] User prompt (first 500 chars): ${userPrompt.slice(0, 500)}`);
   console.log(`[sourceDiscovery] System prompt (first 300 chars): ${systemPrompt.slice(0, 300)}`);
@@ -191,16 +193,40 @@ Return JSON array only. No markdown, no explanation, no code fences.`;
     const contentTypes = (data.content || []).map(b => b.type);
     console.log(`[sourceDiscovery] API response: stop_reason="${data.stop_reason}", content_blocks=${contentTypes.length}, types=[${contentTypes.join(', ')}]`);
 
-    // Extract text content from response
-    let textContent = '';
+    // Check for web_search_tool_result errors
     if (data.content && Array.isArray(data.content)) {
       for (const block of data.content) {
-        if (block.type === 'text') {
-          textContent += block.text;
+        if (block.type === 'web_search_tool_result') {
+          const errorBlocks = (block.content || []).filter(c => c.type === 'web_search_tool_result_error');
+          if (errorBlocks.length > 0) {
+            console.warn(`[sourceDiscovery] Web search errors: ${JSON.stringify(errorBlocks)}`);
+          }
         }
       }
     }
 
+    // Extract text content from response — use ONLY the LAST text block
+    // (earlier text blocks are Claude's "I'll search for..." narrative)
+    let textContent = '';
+    let allTextBlocks = [];
+    if (data.content && Array.isArray(data.content)) {
+      for (const block of data.content) {
+        if (block.type === 'text') {
+          allTextBlocks.push(block.text);
+        }
+      }
+    }
+
+    // Use last text block (the one after web search results) — it contains the JSON
+    // Fall back to all text concatenated if only one block
+    if (allTextBlocks.length > 1) {
+      textContent = allTextBlocks[allTextBlocks.length - 1];
+      console.log(`[sourceDiscovery] Using last of ${allTextBlocks.length} text blocks (${textContent.length} chars)`);
+    } else if (allTextBlocks.length === 1) {
+      textContent = allTextBlocks[0];
+    }
+
+    // If last block didn't parse, try all blocks concatenated
     if (!textContent) {
       console.log('[sourceDiscovery] No text content in response. Full content blocks:');
       console.log(JSON.stringify(data.content?.map(b => ({ type: b.type, text: b.text?.slice(0, 200) })), null, 2));
@@ -209,8 +235,13 @@ Return JSON array only. No markdown, no explanation, no code fences.`;
 
     console.log(`[sourceDiscovery] Text content length: ${textContent.length}, first 500 chars: ${textContent.slice(0, 500)}`);
 
-    // Parse JSON from response
-    const sources = parseSourcesFromText(textContent);
+    // Parse JSON from response — try last block first, then all blocks
+    let sources = parseSourcesFromText(textContent);
+    if (sources.length === 0 && allTextBlocks.length > 1) {
+      console.log('[sourceDiscovery] Last block gave 0 results, trying all text concatenated...');
+      const allText = allTextBlocks.join('\n');
+      sources = parseSourcesFromText(allText);
+    }
     console.log(`[sourceDiscovery] Found ${sources.length} sources`);
 
     return { sources };
