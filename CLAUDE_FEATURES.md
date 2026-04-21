@@ -1969,3 +1969,141 @@ Enhanced reply event rendering in ContactDrawer timeline.
 3. **Independent state** — `expandedReplies: Set<number>` tracks expanded replies by timeline index
 4. **Reset on refresh** — `setExpandedReplies(new Set())` called in both `fetchAll` and `addNote` to prevent stale index references
 5. **Fallback preserved** — "Reply detected — check email for details" when `meta.text` is missing
+
+---
+
+## Login Sidebar Fix (2026-04-20)
+
+**Status:** LIVE.
+
+**Problem:** After login, sidebar didn't show Admin menu item. Users had to refresh page.
+
+**Root cause chain:**
+1. Backend `/api/auth/login` returns flat response: `{ success, organizer_id, user_id, role, token }` — no `user` property
+2. Login page stored only `liffy_token`, never constructed `liffy_user`
+3. Sidebar reads `liffy_user` from localStorage on mount (React effects fire children-first)
+4. Without `liffy_user`, sidebar role check fails → Admin hidden
+
+**Fix (`liffy-ui/app/login/page.tsx`):**
+```javascript
+const userInfo = {
+  email: data.user?.email || data.email || email,
+  role: data.user?.role || data.role || '',
+  user_id: data.user?.user_id || data.user_id || '',
+  organizer_id: data.user?.organizer_id || data.organizer_id || '',
+};
+localStorage.setItem("liffy_user", JSON.stringify(userInfo));
+```
+
+---
+
+## Duplicate Send Fix — CAS Pattern (2026-04-20)
+
+**Status:** LIVE.
+
+**Problem:** Siema Mail campaign: 1747 recipients but 2053 sent emails. Two distinct bursts 18 minutes apart (09:11-09:18: 1001, 09:36-09:43: 1052).
+
+**Root cause:** Render redeploy: old and new instances briefly overlap. `FOR UPDATE SKIP LOCKED` in autocommit mode releases locks immediately after SELECT returns. Both instances claim the same recipients.
+
+**Fix: CAS (Compare-And-Swap) claim pattern** in 3 files:
+
+1. **`worker.js`** — background campaign send:
+```javascript
+const claim = await client.query(
+  `UPDATE campaign_recipients SET status = 'sending'
+   WHERE id = $1 AND status = 'pending' RETURNING id`, [r.id]
+);
+if (claim.rows.length === 0) return; // already claimed
+```
+
+2. **`campaignSend.js`** — API send-batch path: same pattern
+
+3. **`sequenceService.js`** — sequence engine (different state machine):
+```javascript
+// active → sending (claim)
+const claim = await db.query(
+  `UPDATE sequence_recipients SET status = 'sending', updated_at = NOW()
+   WHERE id = $1 AND status = 'active' RETURNING id`, [id]
+);
+// After send: sending → active (next step) or completed
+// On failure: sending → active (retry)
+```
+
+**Key insight:** Sequence engine runs inside `server.js` (API process), NOT in `worker.js` — separate processes with separate redeploy overlap risks.
+
+---
+
+## Daily Email Usage Visibility (2026-04-20)
+
+**Status:** LIVE.
+
+**Backend:** `GET /api/campaigns/email-usage` (authRequired)
+- Returns `{ daily_limit, sent_today, remaining }`
+- Counts today's `sent` events from `campaign_events` for current user's campaigns
+
+**Frontend (Dashboard):**
+- Progress bar card showing daily email usage
+- Colors: green <80%, yellow 80-100%, red = limit reached
+- Fetched in parallel with actions summary and dashboard stats
+
+---
+
+## Contact Campaign History (2026-04-20)
+
+**Status:** LIVE.
+
+**Backend:** `GET /api/persons/:id/campaigns` (authRequired)
+- Returns campaigns a person was involved in with per-campaign event stats
+- Groups `campaign_events` by campaign, counts each event type (sent/delivered/opens/clicks/replies/bounces)
+
+**Frontend (`liffy-ui/app/leads/[id]/page.tsx`):**
+- Campaign History table in Overview tab below Engagement section
+- Columns: Campaign name (clickable → /campaigns/[id]), status badge, ✅/— for each event type (sent, delivered, opened, clicked, replied, bounced)
+
+---
+
+## inlineContactMiner (2026-04-20)
+
+**Status:** ACTIVE.
+
+Cheerio-based inline contact extraction for pages where all contact info (emails, phones, company names) appears inline on a single page — no exhibitor links to follow. WordPress tables, association directories, simple HTML pages.
+
+**Architecture:**
+- Input: raw HTML string (NOT Playwright page object)
+- Output: Array of raw contact cards
+- Dependencies: cheerio only (no Playwright, no browser)
+
+**HTML source strategy:**
+1. HtmlCache (Redis) — reuse already-fetched HTML from prior miners
+2. HTTP fetch fallback — simple `fetch()` with User-Agent header
+3. No Playwright navigation — avoids duplicate requests that trigger blocking
+
+**Extraction pipeline:**
+1. Find all emails (mailto: links + text regex)
+2. For each email, walk up DOM to find container (tr, li, dl, article, section, div>30chars)
+3. Extract context from container:
+   - `parseLabeledFields()` — "Label: Value" patterns with multi-language keywords
+   - `parseTableRowContext()` — table header → column mapping
+   - `findBoldText()` — bold/strong/heading text as company name
+   - `findTitlePrefixName()` — Mr./Mrs./Dr./Bay/Bayan prefixes as contact name
+   - `findPhone()` — international phone regex (7-15 digits)
+   - `findWebsite()` — URL regex + href extraction
+   - `domainToCompany()` — email domain fallback (skip generic domains)
+4. Merge duplicate emails (keep richest data, prefer longer values)
+
+**Multi-language labels (LABELS constant):**
+- EN, TR, FR, DE, ES keywords for: company, contact_name, phone, website, address, country, city
+
+**Execution plan integration:**
+- Added as fallback step in ALL execution plans: directory, member_table, label_value, website, table, unknown
+- Runs AFTER primary miner, catches emails missed by link-following strategies
+
+**HtmlCache isPoisoned() fix:**
+- Block indicators (cloudflare, rate limit, forbidden, etc.) only flag short pages (<10KB) or structural signals (title/h1)
+- Large content pages (>10KB) that mention "rate limit" in body text are NOT poisoned
+
+**Files:**
+- `backend/services/urlMiners/inlineContactMiner.js` — miner (~476 lines)
+- `backend/services/superMiner/services/flowOrchestrator.js` — wrapper (HtmlCache + HTTP fallback)
+- `backend/services/superMiner/services/executionPlanBuilder.js` — fallback step in all plans
+- `backend/services/superMiner/services/htmlCache.js` — isPoisoned() fix

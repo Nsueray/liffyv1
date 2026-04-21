@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-20*
+*Updated: 2026-04-21*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -44,6 +44,9 @@
 | A34 | SuperMiner finalization hang fix — deepCrawlAttempted=true, duplicate Flow 2 prevention, 2h Promise.race timeout | P1 | ✅ DONE |
 | A35 | contactPageMiner DNS fail optimization — ERR_NAME_NOT_RESOLVED'da domainDead flag ile hemen skip | P2 | ✅ DONE |
 | A36 | labelValueMiner profile-only contact investigation — 30 contact bulundu ama sadece 2 kaydedildi, emailsiz card'lar DB'ye yazılmıyor mu? | P2 | TODO |
+| A37 | inlineContactMiner — Cheerio-based inline contact extraction from raw HTML (no Playwright). HtmlCache + HTTP fallback. | P1 | ✅ DONE |
+| A38 | inlineContactMiner execution plan integration — added as fallback step in ALL plans (directory, member_table, label_value, website, table, unknown) | P1 | ✅ DONE |
+| A39 | isPoisoned() false positive fix — block indicators only on short pages (<10KB) or title/h1. WordPress directory blocked. | P1 | ✅ DONE |
 
 ## B. UI TASKS
 
@@ -238,3 +241,10 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | K17 | Reply Timeline expand/collapse — From/Subject header + Show full reply toggle | P1 | ✅ DONE |
 | K18 | Sender Identity Edit/Delete — PUT endpoint + Settings UI (Edit modal, Delete confirm, campaign_count) | P1 | ✅ DONE |
 | K19 | Senders 500 fix — sender_identity_id → sender_id column name | P1 | ✅ DONE |
+| K20 | Login sidebar fix — flat login response → liffy_user not stored → Admin hidden. Construct user object in login page. | P1 | ✅ DONE |
+| K21 | Duplicate send fix (CAS) — Render redeploy overlap causes double send. CAS claim in worker.js, campaignSend.js, sequenceService.js. | P1 | ✅ DONE |
+| K22 | Daily email usage visibility — GET /api/campaigns/email-usage + Dashboard progress bar card | P2 | ✅ DONE |
+| K23 | Contact campaign history — GET /api/persons/:id/campaigns + Contact Detail campaign history table | P2 | ✅ DONE |
+| K24 | Sequence engine CAS guard — CAS claim in sequenceService.js (active→sending→active/completed) + error recovery | P1 | ✅ DONE |
+| K25 | inlineContactMiner — Cheerio-based inline contact extraction from raw HTML, multi-language labels, DOM context | P1 | ✅ DONE |
+| K26 | Execution plan + poison fix — inlineContactMiner in ALL plans, isPoisoned() false positive for large pages | P1 | ✅ DONE |

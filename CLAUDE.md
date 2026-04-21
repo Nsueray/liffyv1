@@ -198,6 +198,13 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 38. ~~Sender Identity Edit/Delete~~ ✅ DONE — PUT /api/senders/:id (from_name, reply_to, visibility editable; from_email locked). Settings page Edit modal + Delete confirm dialog with campaign usage warning. GET /api/senders returns campaign_count.
 39. ~~Senders 500 Fix~~ ✅ DONE — campaign_count query used `sender_identity_id` but correct column is `sender_id`. Same column-name assumption bug pattern.
 40. ~~Reply Timeline Expand/Collapse~~ ✅ DONE — ContactDrawer reply events show From + Subject header, 200→full text toggle, expandedReplies Set state with reset on timeline refresh.
+41. ~~Login Sidebar Fix~~ ✅ DONE — Backend `/api/auth/login` returns flat response (no `user` property) → `liffy_user` never stored → Admin/sidebar hidden. Fixed login page to construct user object from flat response.
+42. ~~Duplicate Send Fix (CAS)~~ ✅ DONE — Render redeploy race: old+new instances overlap → double send. CAS claim (`UPDATE SET status='sending' WHERE status='pending' RETURNING id`) in worker.js, campaignSend.js, sequenceService.js.
+43. ~~Daily Email Usage Visibility~~ ✅ DONE — `GET /api/campaigns/email-usage` endpoint + Dashboard progress bar card (green <80%, yellow 80-100%, red = limit).
+44. ~~Contact Campaign History~~ ✅ DONE — `GET /api/persons/:id/campaigns` endpoint + Contact Detail page campaign history table with event type columns.
+45. ~~Sequence Engine CAS Guard~~ ✅ DONE — CAS claim in sequenceService.js (active→sending→active/completed), error recovery restores to 'active'.
+46. ~~inlineContactMiner~~ ✅ DONE — Cheerio-based inline contact extraction from page HTML. Multi-language labels (EN/TR/FR/DE/ES), email+phone+website+company extraction from DOM context. No link following, no Playwright — accepts raw HTML from HtmlCache.
+47. ~~Execution Plan + Poison Fix~~ ✅ DONE — inlineContactMiner added as fallback step in ALL execution plans. isPoisoned() false positive fixed (block indicators only on short pages <10KB or title/h1).
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for detailed task tracking.
 
@@ -260,3 +267,4 @@ memberTableMiner ✅ DONE — HTML table member/exhibitor lists (associations, c
 reedExpoMiner ✅ DONE — Generic ReedExpo platform exhibitor directories (infinite scroll + GraphQL API). batimat.com, arabhealth.com, wtm.com, etc. Phase 2 "not_found" error'ları normal — API'de kayıtsız org'lar için beklenen davranış.
 reedExpoMailtoMiner ✅ DONE — ReedExpo sites with mailto: emails in HTML (GraphQL'siz fallback). reedExpoMiner sonrası emailsiz org'lar için company-name match ile enrichment.
 playwrightTableMiner: column-aware parse ✅ DONE — Çince/Rusça/Türkçe/çok dilli tablo header desteği. Longest-match keyword eşleştirme. Eski heuristic fallback korundu. Timeout 60s + domcontentloaded.
+inlineContactMiner ✅ DONE — Cheerio-based inline contact extraction from raw HTML. No Playwright, no link following. Uses HtmlCache + HTTP fallback. Added as fallback step in ALL execution plans.
