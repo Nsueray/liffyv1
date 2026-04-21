@@ -2107,3 +2107,100 @@ Cheerio-based inline contact extraction for pages where all contact info (emails
 - `backend/services/superMiner/services/flowOrchestrator.js` — wrapper (HtmlCache + HTTP fallback)
 - `backend/services/superMiner/services/executionPlanBuilder.js` — fallback step in all plans
 - `backend/services/superMiner/services/htmlCache.js` — isPoisoned() fix
+
+---
+
+## Source Discovery v2 — Sprint 1 + Search History (2026-04-21)
+
+**Status:** LIVE.
+
+**RFC:** `docs/RFC_Source_Discovery_v2.md` — 4-sprint plan (Discovery Search → Source Analysis → Collections → ASE).
+
+### Sprint 1: Source-Type-Aware Discovery
+
+Source type is a first-class concept. User selects WHAT they're looking for before searching.
+
+**9 source types (5 main + 4 expandable):**
+
+| Main | Expandable |
+|------|-----------|
+| Trade Fair | Chamber of Commerce |
+| Association | Trade Portal |
+| Directory | Gov Database |
+| Catalog / Listing | Custom Search |
+| Paste URL | |
+
+**Filters:** Country dropdown (80+ countries, 10 popular at top with separator), Industry dropdown (24 sectors), Keywords (optional).
+
+**Backend — `backend/services/sourceDiscovery.js` (v2.1):**
+- Claude API `web_search_20250305` tool with Haiku model
+- Source-type → compact search focus mapping (`SOURCE_TYPE_FOCUS`)
+- Optimized prompts: system ~80 words, user ~60 words (was 300+ combined)
+- `max_tokens`: 8K (was 16K), requested results: 10-15 (was 15-20)
+- Response parsing: uses LAST text block (contains JSON), fallback to all concatenated
+- Web search error detection (`web_search_tool_result_error` blocks)
+- Domain dedup: max 3 results per domain (`deduplicateByDomain()`)
+- Rate limit 429 handling: returns `{ error: 'rate_limit', retry_after: N }`
+
+**Backend — `backend/routes/sourceDiscovery.js`:**
+- `POST /api/source-discovery` — extended with `source_type`, `keyword` (optional), saves to `discovery_searches`
+- Validation: at least one filter required (keyword, industry, or country)
+- Returns `search_id` in response
+
+**Backend — `backend/routes/miningJobs.js`:**
+- `POST /api/mining/batch-create` — batch create mining jobs (max 50 URLs)
+
+**Frontend — `/mining/page.tsx` DiscoverTab:**
+- 5 main source type cards + "More options" expandable (4 extra)
+- Cards collapse to inline badge after selection ("Change" link to reset)
+- Inline filter row (keyword, industry, country)
+- Country chips with remove
+- Rate limit countdown banner + disabled button ("Wait Xs")
+- Result rows: checkbox + type badge + URL + notes + estimated contacts + Mine button
+- Batch mine: "Mine Selected (N)" sticky bottom bar
+- "This search has been saved. View in Search History →" link
+
+### Sprint 1.5: Search History
+
+**Migration 043:** `discovery_searches` table:
+```sql
+CREATE TABLE discovery_searches (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  organizer_id UUID NOT NULL REFERENCES organizers(id),
+  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  source_type VARCHAR(30) NOT NULL,
+  keyword TEXT,
+  industry VARCHAR(100),
+  countries TEXT[],
+  results JSONB NOT NULL DEFAULT '[]',
+  result_count INTEGER DEFAULT 0,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+```
+
+**Backend endpoints:**
+- `GET /api/source-discovery/history` — last 50 searches, each result URL enriched with mining status from `mining_jobs` (batch `DISTINCT ON (input)` query)
+- `GET /api/source-discovery/history/:id` — single search detail with mining status
+
+**Mining status enrichment per URL:**
+- `mining_status`: completed / running / failed / null (never mined)
+- `mining_found`: total contacts found
+- `mining_job_id`: link to the job
+
+**Frontend — SearchHistoryTab:**
+- 3-tab layout: [Discover] [Search History] [Jobs]
+- Compact search cards with: source type badge, filter description (`keyword | industry | countries`), result count, unmined count, timestamp
+- Expand/collapse to see all results
+- Mining status badges:
+  - Green: "Mined — N found" (completed)
+  - Yellow: "Mining..." (running)
+  - Red: "Failed" (failed)
+  - Orange "Mine" button (unmined)
+- Checkbox multi-select + batch mine for unmined results
+- Empty state: "No searches yet. Start discovering sources in the Discover tab."
+
+### Parked: Google Custom Search API
+
+Google Cloud project "Liffy" created (elan-expo.com org), Custom Search API enabled, Programmable Search Engine created (cx: `0603113d7eb6642a6`). Got 403 "PERMISSION_DENIED" — Google Custom Search JSON API deprecated/migrated to Vertex AI. Parked — continuing with Claude API web search. SerpAPI/Serper.dev as future alternatives.
+
+---
