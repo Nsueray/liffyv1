@@ -630,7 +630,27 @@ router.post(
       return res.status(200).send('OK');
     }
 
-    // 2. Detect reply source — plus addressing (primary), unsubscribe link, or from-email match
+    // 2a. Test reply detection (c-00000000-r-00000000 pattern)
+    const testPlusIds = parsePlusAddress(to);
+    if (testPlusIds && testPlusIds.campaignShort === '00000000' && testPlusIds.recipientShort === '00000000') {
+      console.log(`[Inbound] Test reply detected — from: ${from}, to: ${to}`);
+      // Find organizer from the sender/forwarded email
+      const fromEmail = (from.match(/<([^>]+)>/) || [null, from.trim()])[1] || from;
+      const orgLookup = await db.query(
+        `SELECT organizer_id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+        [fromEmail]
+      );
+      if (orgLookup.rows.length > 0) {
+        const orgId = orgLookup.rows[0].organizer_id;
+        // Store in shared memory map (read by settings/reply-health)
+        global._liffyTestReplies = global._liffyTestReplies || {};
+        global._liffyTestReplies[orgId] = new Date().toISOString();
+        console.log(`[Inbound] Test reply recorded in memory for organizer ${orgId}`);
+      }
+      return res.status(200).send('OK');
+    }
+
+    // 2b. Detect reply source — plus addressing (primary), unsubscribe link, or from-email match
     const replySource = await detectReplySource(html || text || '', from, to);
 
     if (!replySource) {
