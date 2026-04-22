@@ -634,18 +634,32 @@ router.post(
     const testPlusIds = parsePlusAddress(to);
     if (testPlusIds && testPlusIds.campaignShort === '00000000' && testPlusIds.recipientShort === '00000000') {
       console.log(`[Inbound] Test reply detected — from: ${from}, to: ${to}`);
-      // Find organizer from the sender/forwarded email
-      const fromEmail = (from.match(/<([^>]+)>/) || [null, from.trim()])[1] || from;
-      const orgLookup = await db.query(
-        `SELECT organizer_id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
-        [fromEmail]
-      );
-      if (orgLookup.rows.length > 0) {
-        const orgId = orgLookup.rows[0].organizer_id;
-        // Store in shared memory map (read by settings/reply-health)
+      // Find organizer from the To address (user's plus-addressed email)
+      // To: suer+c-00000000-r-00000000@elan-expo.com → base email: suer@elan-expo.com
+      let orgId = null;
+      const toAddresses = (to || '').split(',');
+      for (const addr of toAddresses) {
+        const emailMatch = addr.match(/<([^>]+)>/) || [null, addr.trim()];
+        const email = (emailMatch[1] || '').trim();
+        // Strip plus-address part to get base email
+        const baseEmail = email.replace(/\+[^@]*@/, '@');
+        if (baseEmail && baseEmail.includes('@')) {
+          const orgLookup = await db.query(
+            `SELECT organizer_id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`,
+            [baseEmail]
+          );
+          if (orgLookup.rows.length > 0) {
+            orgId = orgLookup.rows[0].organizer_id;
+            break;
+          }
+        }
+      }
+      if (orgId) {
         global._liffyTestReplies = global._liffyTestReplies || {};
         global._liffyTestReplies[orgId] = new Date().toISOString();
         console.log(`[Inbound] Test reply recorded in memory for organizer ${orgId}`);
+      } else {
+        console.warn(`[Inbound] Test reply — could not resolve organizer from to: ${to}`);
       }
       return res.status(200).send('OK');
     }

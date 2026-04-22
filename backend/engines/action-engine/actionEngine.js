@@ -356,7 +356,7 @@ async function upsertActionItem({ organizerId, assignedTo, personId, campaignId,
        (organizer_id, assigned_to, person_id, campaign_id, trigger_reason, trigger_detail,
         priority, priority_label, status, last_activity_at, engagement_score)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'open', $9, $10)
-     ON CONFLICT (organizer_id, person_id, trigger_reason) WHERE status IN ('open', 'in_progress')
+     ON CONFLICT (organizer_id, person_id, trigger_reason) WHERE status IN ('open', 'in_progress') AND trigger_reason <> 'reply_received'
      DO UPDATE SET
        trigger_detail = EXCLUDED.trigger_detail,
        last_activity_at = EXCLUDED.last_activity_at,

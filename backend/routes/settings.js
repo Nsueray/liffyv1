@@ -266,6 +266,7 @@ router.get('/reply-health', authRequired, async (req, res) => {
       last_reply: lastReply,
       recent_replies: recentReplies,
       test_reply_received: testReplyReceived,
+      last_test_at: testReplyAt || null,
     });
   } catch (err) {
     console.error('GET /api/settings/reply-health error:', err);
