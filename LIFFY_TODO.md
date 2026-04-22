@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-21 (Source Discovery v2 session)*
+*Updated: 2026-04-22 (Mineability pre-check + Campaign sequencing status)*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -250,10 +250,13 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | K26 | Execution plan + poison fix — inlineContactMiner in ALL plans, isPoisoned() false positive for large pages | P1 | ✅ DONE |
 | K27 | Source Discovery v2 Sprint 1 — RFC, 9 source types, country/industry filters, batch mine, domain dedup, rate limit 429, prompt optimization | P1 | ✅ DONE |
 | K28 | Source Discovery Search History — migration 043, save searches, history tab, mining status badges, batch mine from history | P1 | ✅ DONE |
-| K29 | Source Discovery Sprint 2 — mineability analysis endpoint (POST /api/mining/analyze-url), reason badges, estimated contacts | P2 | TODO |
+| K29 | Source Discovery Sprint 2 — mineability analysis endpoint (POST /api/mining/analyze-url), reason badges, estimated contacts | P2 | ✅ DONE |
 | K30 | Source Discovery Sprint 3 — discovery collections (save/load source sets), review screen before batch mine, domain dedup warnings | P3 | TODO |
 | K31 | Google Custom Search API — parked, 403 PERMISSION_DENIED (deprecated → Vertex AI). SerpAPI/Serper.dev alternatives. | P3 | PARKED |
 | K32 | Mining quality indicators — zero result banner, single-domain warning, quality badges in jobs list | P1 | ✅ DONE |
 | K33 | SPA/JS site mining improvement — increase success rate on most-mined site types | P2 | TODO |
 | K34 | labelValueMiner WordPress fix investigation — profile-only contacts, 30 found but only 2 saved | P2 | TODO |
 | K35 | gefera.ru listing+detail SPA miner — listing page + detail page multi-step extraction | P2 | TODO |
+| K36 | Source Discovery Sprint 2 (mineability pre-check) | P1 | ✅ DONE |
+| K37 | Campaign sequencing status + sequence progress UI | P1 | ✅ DONE |
+| K38 | E1 Legacy Cleanup — prospects table drop | P2 | TODO |

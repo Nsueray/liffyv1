@@ -2260,3 +2260,54 @@ Found column in the mining jobs table now shows quality indicators:
 - `liffy-ui/app/mining/page.tsx` — quality badges in jobs table
 
 ---
+
+### Source Discovery Sprint 2 — Mineability Pre-Check (2026-04-22)
+
+**Backend:** `POST /api/mining/analyze-url` — `urlAnalyzer.js`
+- HTTP fetch + cheerio HTML analysis, 10s timeout
+- Checks: reachability, page size, email count (mailto + regex), table/link count, exhibitor/member link patterns, JS-heavy detection (SPA), login form detection (password field), Cloudflare/CAPTCHA/403 block detection
+- Scoring: 0-100 scale. emails > 10 → +30, exhibitor pattern → +20, tables → +10, links > 50 → +10, blocked → -50, login → -30, JS-heavy → -20, tiny page → -15
+- Mineability: high (>=60), medium (30-59), low (<30)
+- Returns: `{ mineability, score, checks, badges, warnings, suggested_miner, estimated_contacts }`
+
+**Frontend:** Mine button now triggers pre-check before job creation
+- High confidence: green toast with email count, auto-proceed to mining
+- Medium confidence: yellow modal with score progress bar, badges (positive findings), warnings (issues), "Mine Anyway" button
+- Low confidence: red modal with warnings, "Mine Anyway" button
+- "Analyzing..." spinner on Mine button during check
+- Batch mine skips pre-check for speed (avoids N × 10s delay)
+- Both DiscoverTab and SearchHistoryTab support pre-check
+
+**Files:** `backend/services/urlAnalyzer.js` (new), `backend/routes/miningJobs.js` (POST /api/mining/analyze-url), `liffy-ui/app/mining/page.tsx` (PreCheckModal, analyzeUrlPreCheck)
+
+---
+
+### Campaign Sequencing Status (2026-04-22)
+
+**Problem:** Sequence campaigns stuck at "sending" after initial email completes — should show they're waiting for sequence steps.
+
+**New status: `sequencing`** — initial email sent, sequence steps pending.
+
+**Backend changes:**
+- `worker.js`: When all campaign_recipients sent, checks for active sequence_recipients → sets 'sequencing' (not 'completed')
+- `sequenceWorker.js`: Completion check now looks for both 'sending' AND 'sequencing' status
+- `GET /api/campaigns/:id/sequence-progress`: Returns per-step progress with:
+  - Step status: completed / waiting / pending
+  - Completed steps: engagement stats (delivered%, open%, click count, bounced) from campaign_events
+  - Waiting steps: next_send_at for countdown, active/bounced recipient counts
+  - Response: `{ steps, total_steps, completed_steps, recipients, next_send_at }`
+- Campaigns list endpoint: Sequencing campaigns enriched with `sequence_info` (total_steps, completed_steps, next_send_at) via batch query
+
+**Frontend changes:**
+- Campaigns list: "sequencing" indigo badge + "Step 1/2 · Next in 2d" subtitle
+- Campaign detail — Sequence Progress section:
+  - Completed step (green): subject, condition, engagement stats row (sent, delivered%, opened%, clicked, bounced)
+  - Waiting step (indigo): subject, condition, countdown timer (Xd Yh format), recipient count, excluded (bounced). Overdue = red warning.
+  - Pending step (gray): "Pending — will run after Step X"
+- Cannot delete sequencing campaigns
+
+**Bug fix:** sequence-progress endpoint returned 500 because it queried `campaign_events.meta->>'sequence_step'` — `meta` column doesn't exist. Fixed to use `sequence_recipients.last_sent_step` with cumulative counting.
+
+**Files:** `backend/worker.js`, `backend/services/sequenceWorker.js`, `backend/routes/campaigns.js`, `liffy-ui/app/campaigns/page.tsx`, `liffy-ui/app/campaigns/[id]/page.tsx`
+
+---

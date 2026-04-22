@@ -96,6 +96,8 @@
 - **Duplicate Send Fix (CAS Pattern)** — Render redeploy causes old+new instances to overlap. `FOR UPDATE SKIP LOCKED` in autocommit releases locks immediately. CAS claim (`UPDATE SET status='sending' WHERE status='pending' RETURNING id`) added to worker.js, campaignSend.js, sequenceService.js. Sequence engine uses active→sending→active/completed state transitions with error recovery.
 - **Daily Email Usage Card** — Dashboard shows daily email usage progress bar card. `GET /api/campaigns/email-usage` returns `{ daily_limit, sent_today, remaining }`. Colors: green <80%, yellow 80-100%, red = limit hit. Fetched in parallel with actions/summary.
 - **Contact Campaign History** — Contact Detail page (`/leads/[id]`) shows campaign history table in Overview tab. `GET /api/persons/:id/campaigns` endpoint returns per-campaign engagement stats (sent/delivered/opens/clicks/replies/bounces). Table with campaign name (clickable → /campaigns/[id]), status badge, checkmark/dash per event type.
+- **Source Discovery Sprint 2 — Mineability Pre-Check** — Mine button triggers URL analysis (`POST /api/mining/analyze-url`), PreCheckModal for medium/low confidence with score progress bar, badges (positive findings), warnings (issues), "Mine Anyway" button. High confidence auto-proceeds with green toast. Batch mine skips pre-check for speed.
+- **Campaign Sequencing Status** — 'sequencing' indigo badge on campaigns list with "Step 1/2 · Next in 2d" subtitle. Sequence Progress section on campaign detail with per-step cards: completed (green, engagement stats), waiting (indigo, countdown timer, recipient count), pending (gray). Cannot delete sequencing campaigns.
 
 ---
 
