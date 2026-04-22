@@ -143,10 +143,51 @@ router.get('/', authRequired, async (req, res) => {
       [organizerId, ...scope.params]
     );
 
-    res.json(result.rows.map(r => ({
+    const campaigns = result.rows.map(r => ({
       ...r,
       creator_name: [r.creator_first_name, r.creator_last_name].filter(Boolean).join(' ') || null
-    })));
+    }));
+
+    // Enrich sequencing campaigns with step progress
+    const sequencingIds = campaigns.filter(c => c.status === 'sequencing').map(c => c.id);
+    if (sequencingIds.length > 0) {
+      const seqRes = await db.query(
+        `SELECT campaign_id,
+                COUNT(*)::int AS total_steps,
+                MAX(CASE WHEN cs.sequence_order <= COALESCE(sub.max_sent_step, 0) THEN 1 ELSE 0 END)::int AS has_completed
+         FROM campaign_sequences cs
+         LEFT JOIN LATERAL (
+           SELECT MAX(last_sent_step) AS max_sent_step
+           FROM sequence_recipients sr WHERE sr.campaign_id = cs.campaign_id
+         ) sub ON true
+         WHERE cs.campaign_id = ANY($1)
+         GROUP BY campaign_id`,
+        [sequencingIds]
+      );
+      const seqRecipRes = await db.query(
+        `SELECT campaign_id,
+                MAX(last_sent_step)::int AS completed_steps,
+                MIN(next_send_at) AS next_send_at
+         FROM sequence_recipients
+         WHERE campaign_id = ANY($1) AND status = 'active'
+         GROUP BY campaign_id`,
+        [sequencingIds]
+      );
+      const seqStepsMap = {};
+      for (const r of seqRes.rows) seqStepsMap[r.campaign_id] = { total_steps: r.total_steps };
+      for (const r of seqRecipRes.rows) {
+        if (!seqStepsMap[r.campaign_id]) seqStepsMap[r.campaign_id] = {};
+        seqStepsMap[r.campaign_id].completed_steps = r.completed_steps || 0;
+        seqStepsMap[r.campaign_id].next_send_at = r.next_send_at;
+      }
+      for (const c of campaigns) {
+        if (seqStepsMap[c.id]) {
+          c.sequence_info = seqStepsMap[c.id];
+        }
+      }
+    }
+
+    res.json(campaigns);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -1368,6 +1409,19 @@ router.get('/:id/sequence-progress', authRequired, async (req, res) => {
       }
     }
 
+    // Get engagement stats from campaign_events (aggregated — no per-step breakdown available)
+    const engagementRes = await db.query(
+      `SELECT event_type, COUNT(*)::int AS count
+       FROM campaign_events
+       WHERE campaign_id = $1
+       GROUP BY event_type`,
+      [campaignId]
+    );
+    const engagement = {};
+    for (const r of engagementRes.rows) {
+      engagement[r.event_type] = r.count;
+    }
+
     const recipientsByStep = {};
     let totalActive = 0;
     let totalCompleted = 0;
@@ -1389,18 +1443,51 @@ router.get('/:id/sequence-progress', authRequired, async (req, res) => {
       if (r.status === 'bounced') totalBounced += r.count;
     }
 
-    const steps = stepsRes.rows.map((s) => ({
-      sequence_order: s.sequence_order,
-      delay_days: s.delay_days,
-      condition: s.condition,
-      subject: s.subject_override || s.template_subject || s.template_name,
-      is_active: s.is_active,
-      sent_count: sentByStep[s.sequence_order] || 0,
-      recipients: recipientsByStep[s.sequence_order] || {},
-    }));
+    // Determine which steps are completed (sent and no active recipients at that step)
+    const maxSentStep = Math.max(0, ...Object.keys(sentByStep).map(Number));
+
+    const steps = stepsRes.rows.map((s) => {
+      const order = s.sequence_order;
+      const stepSent = sentByStep[order] || 0;
+      const stepRecipients = recipientsByStep[order] || {};
+      const isCompleted = order <= maxSentStep && !(stepRecipients.active > 0);
+      const isWaiting = stepRecipients.active > 0;
+
+      const stepData = {
+        sequence_order: order,
+        delay_days: s.delay_days,
+        condition: s.condition,
+        subject: s.subject_override || s.template_subject || s.template_name,
+        is_active: s.is_active,
+        sent_count: stepSent,
+        recipients: stepRecipients,
+        status: isCompleted ? 'completed' : isWaiting ? 'waiting' : 'pending',
+        next_send_at: isWaiting ? (recipientRes.rows.find(r => r.current_step === order && r.status === 'active')?.earliest_send || null) : null,
+      };
+
+      // Attach engagement stats to the highest completed step (since events aren't per-step)
+      if (isCompleted && order === maxSentStep) {
+        const sentCount = engagement.sent || stepSent;
+        stepData.engagement = {
+          delivered: engagement.delivered || 0,
+          opened: engagement.open || 0,
+          clicked: engagement.click || 0,
+          replied: engagement.reply || 0,
+          bounced: engagement.bounce || 0,
+          dropped: engagement.dropped || 0,
+          delivery_rate: sentCount > 0 ? Math.round(((engagement.delivered || 0) / sentCount) * 1000) / 10 : 0,
+          open_rate: sentCount > 0 ? Math.round(((engagement.open || 0) / sentCount) * 1000) / 10 : 0,
+          click_rate: sentCount > 0 ? Math.round(((engagement.click || 0) / sentCount) * 1000) / 10 : 0,
+        };
+      }
+
+      return stepData;
+    });
 
     return res.json({
       steps,
+      total_steps: stepsRes.rows.length,
+      completed_steps: steps.filter(s => s.status === 'completed').length,
       recipients: {
         total: totalActive + totalCompleted + totalBounced,
         active: totalActive,
