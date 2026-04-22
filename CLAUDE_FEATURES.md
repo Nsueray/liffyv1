@@ -2204,3 +2204,59 @@ CREATE TABLE discovery_searches (
 Google Cloud project "Liffy" created (elan-expo.com org), Custom Search API enabled, Programmable Search Engine created (cx: `0603113d7eb6642a6`). Got 403 "PERMISSION_DENIED" — Google Custom Search JSON API deprecated/migrated to Vertex AI. Parked — continuing with Claude API web search. SerpAPI/Serper.dev as future alternatives.
 
 ---
+
+## Mining Quality Indicators (2026-04-21)
+
+**Status:** LIVE.
+
+Improves the mining failure experience — users now see clear feedback when mining produces poor results.
+
+### Zero/Low Result Banners (Job Detail Page)
+
+- **0 results (completed):** Red banner "No contacts found on this page." with 4 possible reasons:
+  - Site uses JavaScript rendering (SPA) requiring Local Miner
+  - Page requires login/registration
+  - Site blocking automated access (Cloudflare, CAPTCHA)
+  - Page structure not supported by mining engine
+- **1-3 results (completed):** Yellow banner "Very few contacts found (X). The site structure may not be fully supported."
+
+### Single-Domain Warning
+
+**Problem:** Some mining jobs return contacts that are all from the same organization (e.g. 13 results from ameublement.com are all staff, not member companies).
+
+**Backend:** Lazy-computed on `GET /api/mining/jobs/:id`. On first view of a completed job with results:
+1. Queries `mining_results` emails, groups by domain
+2. If 80%+ emails share the same domain → stores warning in `mining_jobs.stats` JSONB:
+   ```json
+   { "single_domain_warning": true, "dominant_domain": "ameublement.com", "domain_percentage": 92, "single_domain_checked": true }
+   ```
+3. Cached — subsequent requests read from stats without recomputing
+
+**SQL:**
+```sql
+SELECT LOWER(SPLIT_PART(email, '@', 2)) AS domain, COUNT(*) AS cnt
+FROM mining_results, LATERAL unnest(emails) AS email
+WHERE job_id = $1 AND emails IS NOT NULL AND array_length(emails, 1) > 0
+GROUP BY 1 ORDER BY cnt DESC LIMIT 5
+```
+
+**Frontend:**
+- **Job detail page:** Yellow banner "92% of results are from ameublement.com — These may be staff contacts from the organization itself, not member companies."
+- **Results page:** Inline badge in header + full warning banner above results table
+- **Jobs list:** Yellow triangle icon on Found column (hover shows domain %)
+
+### Quality Badges in Jobs List
+
+Found column in the mining jobs table now shows quality indicators:
+- Red "No results" badge — 0 found
+- Yellow "Low" badge — 1-3 found
+- Green "Good" badge — 50+ found
+- Yellow triangle icon — single_domain_warning present
+
+**Files changed:**
+- `backend/routes/miningJobs.js` — domain analysis in GET /api/mining/jobs/:id
+- `liffy-ui/app/mining/jobs/[id]/page.tsx` — zero/low/domain banners
+- `liffy-ui/app/mining/jobs/[id]/results/page.tsx` — domain warning banner + badge
+- `liffy-ui/app/mining/page.tsx` — quality badges in jobs table
+
+---

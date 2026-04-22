@@ -253,3 +253,7 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | K29 | Source Discovery Sprint 2 — mineability analysis endpoint (POST /api/mining/analyze-url), reason badges, estimated contacts | P2 | TODO |
 | K30 | Source Discovery Sprint 3 — discovery collections (save/load source sets), review screen before batch mine, domain dedup warnings | P3 | TODO |
 | K31 | Google Custom Search API — parked, 403 PERMISSION_DENIED (deprecated → Vertex AI). SerpAPI/Serper.dev alternatives. | P3 | PARKED |
+| K32 | Mining quality indicators — zero result banner, single-domain warning, quality badges in jobs list | P1 | ✅ DONE |
+| K33 | SPA/JS site mining improvement — increase success rate on most-mined site types | P2 | TODO |
+| K34 | labelValueMiner WordPress fix investigation — profile-only contacts, 30 found but only 2 saved | P2 | TODO |
+| K35 | gefera.ru listing+detail SPA miner — listing page + detail page multi-step extraction | P2 | TODO |
