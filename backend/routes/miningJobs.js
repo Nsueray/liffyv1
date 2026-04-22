@@ -5,6 +5,7 @@ const db = require('../db');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const { isPrivileged, getHierarchicalScope, getUserContext, canAccessRowHierarchical } = require('../middleware/userScope');
+const { analyzeUrl } = require('../services/urlAnalyzer');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
 
@@ -98,6 +99,37 @@ function bufferToByteaHex(buffer) {
   // PostgreSQL bytea hex format: \x followed by hex string
   return '\\x' + buffer.toString('hex');
 }
+
+/**
+ * POST /api/mining/analyze-url
+ * Pre-check a URL for mineability before creating a mining job
+ */
+router.post('/api/mining/analyze-url', authRequired, async (req, res) => {
+  try {
+    const { url } = req.body;
+
+    if (!url || typeof url !== 'string' || !url.trim()) {
+      return res.status(400).json({ error: 'URL is required' });
+    }
+
+    // Basic URL validation
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(url.startsWith('http') ? url : `https://${url}`);
+    } catch {
+      return res.status(400).json({ error: 'Invalid URL format' });
+    }
+
+    console.log(`[analyze-url] Analyzing: ${parsedUrl.href}`);
+    const result = await analyzeUrl(parsedUrl.href);
+    console.log(`[analyze-url] Result: mineability=${result.mineability} score=${result.score} emails=${result.checks.email_count}`);
+
+    return res.json(result);
+  } catch (err) {
+    console.error('POST /mining/analyze-url error:', err);
+    return res.status(500).json({ error: 'Failed to analyze URL', details: err.message });
+  }
+});
 
 /**
  * POST /api/mining/jobs
