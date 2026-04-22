@@ -11,6 +11,9 @@
 
 const axios = require('axios');
 const cheerio = require('cheerio');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 // Import extractors
 const seoTextExtractor = require('./extractors/seoTextExtractor');
@@ -267,36 +270,71 @@ class DocumentMiner {
 
         const fullPdfUrl = pdfUrl.startsWith('http') ? pdfUrl : new URL(pdfUrl, baseUrl).href;
 
-        const response = await axios.get(fullPdfUrl, {
-            responseType: 'arraybuffer',
-            timeout: CONFIG.TIMEOUT,
-            headers: { 'User-Agent': CONFIG.USER_AGENT },
-        });
-
-        let buffer = Buffer.from(response.data);
-        console.log(`[DocumentMiner] PDF downloaded: ${buffer.length} bytes`);
-
-        // Full extraction: pdfplumber tables + columnar parser + email-centric
-        const fileResult = await fileMiner.processFile(buffer, 'download.pdf');
-
-        // Memory cleanup
-        buffer = null;
-        if (response.data) response.data = null;
-
-        const result = {
-            text: '', // Text not needed — contacts extracted directly
-            textBlocks: [],
-            method: EXTRACTION_METHODS.PDF_DELEGATION,
-            pageCount: null,
-        };
-
-        // Pass pre-extracted contacts for the adapter to use directly
-        if (fileResult.contacts && fileResult.contacts.length > 0) {
-            result.pdfContacts = fileResult.contacts;
-            console.log(`[DocumentMiner] PDF contacts: ${fileResult.contacts.length} (method: ${fileResult.stats?.extraction_method})`);
+        // Check file size via HEAD request first
+        let contentLength = 0;
+        try {
+            const head = await axios.head(fullPdfUrl, {
+                timeout: 10000,
+                headers: { 'User-Agent': CONFIG.USER_AGENT },
+            });
+            contentLength = parseInt(head.headers['content-length'] || '0', 10);
+            if (contentLength > 0) {
+                const sizeMB = (contentLength / 1024 / 1024).toFixed(1);
+                console.log(`[DocumentMiner] PDF size (HEAD): ${sizeMB} MB`);
+                if (contentLength > 200 * 1024 * 1024) {
+                    console.warn(`[DocumentMiner] Large PDF (${sizeMB} MB) — using disk-based processing`);
+                }
+            }
+        } catch (headErr) {
+            console.log(`[DocumentMiner] HEAD request failed, proceeding with download: ${headErr.message}`);
         }
 
-        return result;
+        // Stream PDF to disk instead of holding in memory
+        const tempPath = path.join(os.tmpdir(), `liffy_dl_${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`);
+        try {
+            const response = await axios.get(fullPdfUrl, {
+                responseType: 'stream',
+                timeout: 300000, // 5 min for large PDFs
+                headers: { 'User-Agent': CONFIG.USER_AGENT },
+            });
+
+            // Write stream to disk
+            await new Promise((resolve, reject) => {
+                const writer = fs.createWriteStream(tempPath);
+                response.data.pipe(writer);
+                writer.on('finish', resolve);
+                writer.on('error', reject);
+                response.data.on('error', reject);
+            });
+
+            const stat = await fs.promises.stat(tempPath);
+            const sizeMB = (stat.size / 1024 / 1024).toFixed(1);
+            console.log(`[DocumentMiner] PDF downloaded to disk: ${sizeMB} MB (${tempPath})`);
+
+            // Read file into buffer for fileMiner (it needs buffer input)
+            // For very large files (>500MB), this may still use significant memory
+            // but at least we're not doubling it (axios arraybuffer + Buffer.from)
+            const buffer = await fs.promises.readFile(tempPath);
+
+            const fileResult = await fileMiner.processFile(buffer, 'download.pdf');
+
+            const result = {
+                text: '',
+                textBlocks: [],
+                method: EXTRACTION_METHODS.PDF_DELEGATION,
+                pageCount: null,
+            };
+
+            if (fileResult.contacts && fileResult.contacts.length > 0) {
+                result.pdfContacts = fileResult.contacts;
+                console.log(`[DocumentMiner] PDF contacts: ${fileResult.contacts.length} (method: ${fileResult.stats?.extraction_method})`);
+            }
+
+            return result;
+        } finally {
+            // Always clean up temp file
+            try { await fs.promises.unlink(tempPath); } catch (_) {}
+        }
     }
 
     extractEmbeddedText(html) {

@@ -9,11 +9,25 @@ const { analyzeUrl } = require('../services/urlAnalyzer');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'liffy_secret_key_change_me';
 
-// --- MULTER AYARLARI (MEMORY STORAGE) ---
-const storage = multer.memoryStorage();
-const upload = multer({ 
+const os = require('os');
+const path = require('path');
+const fs = require('fs');
+
+// --- MULTER AYARLARI (DISK STORAGE — supports large files up to 1GB) ---
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const uploadDir = path.join(os.tmpdir(), 'liffy-uploads');
+        fs.mkdirSync(uploadDir, { recursive: true });
+        cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+        const uniqueName = `upload_${Date.now()}_${Math.random().toString(36).slice(2)}${path.extname(file.originalname)}`;
+        cb(null, uniqueName);
+    },
+});
+const upload = multer({
     storage: storage,
-    limits: { fileSize: 50 * 1024 * 1024 } // 50MB Limit
+    limits: { fileSize: 1024 * 1024 * 1024 } // 1GB Limit
 });
 
 /**
@@ -145,23 +159,30 @@ router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req,
     let fileBuffer = null;
     let fileHex = null;
 
-    // Dosya Yüklendiyse (Multipart)
+    // Dosya Yüklendiyse (Multipart — disk storage)
     if (req.file) {
+        const sizeMB = (req.file.size / 1024 / 1024).toFixed(2);
         console.log(`📁 File upload received: ${req.file.originalname}`);
-        console.log(`   Original size: ${req.file.size} bytes`);
-        console.log(`   Buffer size: ${req.file.buffer.length} bytes`);
-        console.log(`   Magic bytes: ${req.file.buffer.slice(0, 4).toString('hex')}`);
-        
+        console.log(`   Size: ${sizeMB} MB (${req.file.size} bytes)`);
+        console.log(`   Disk path: ${req.file.path}`);
+
         type = 'file';
         input = req.file.originalname;
         name = name || req.file.originalname;
         strategy = 'auto';
-        fileBuffer = req.file.buffer;
-        
+
+        // Read from disk into buffer, then convert to hex for PostgreSQL
+        fileBuffer = await fs.promises.readFile(req.file.path);
+        console.log(`   Magic bytes: ${fileBuffer.slice(0, 4).toString('hex')}`);
+
         // ÖNEMLİ: Buffer'ı hex string'e çevir - encoding sorununu önler
         fileHex = bufferToByteaHex(fileBuffer);
-        
+
         console.log(`   Hex string length: ${fileHex ? fileHex.length : 0}`);
+
+        // Clean up temp upload file
+        fs.promises.unlink(req.file.path).catch(() => {});
+        fileBuffer = null; // Free memory after hex conversion
     }
 
     // Validation

@@ -26,12 +26,80 @@ async function analyzeUrl(url) {
     js_heavy: false,
     login_required: false,
     blocked: false,
+    is_pdf: false,
+    pdf_size_mb: 0,
   };
 
   const badges = [];
   const warnings = [];
   let html = '';
   let statusCode = 0;
+
+  // Check if URL is a direct PDF link
+  try {
+    const urlPath = new URL(url).pathname.toLowerCase();
+    if (urlPath.endsWith('.pdf')) {
+      checks.is_pdf = true;
+      checks.reachable = true;
+
+      // HEAD request for file size
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+        const headRes = await fetch(url, {
+          method: 'HEAD',
+          signal: controller.signal,
+          redirect: 'follow',
+          headers: { 'User-Agent': USER_AGENT },
+        });
+        clearTimeout(timeout);
+        statusCode = headRes.status;
+
+        if (headRes.status >= 400) {
+          checks.reachable = false;
+          checks.blocked = headRes.status === 403 || headRes.status === 401;
+          warnings.push(`Server returned ${headRes.status}`);
+          return buildResult(checks, badges, warnings);
+        }
+
+        const contentLength = parseInt(headRes.headers.get('content-length') || '0', 10);
+        if (contentLength > 0) {
+          checks.pdf_size_mb = Math.round(contentLength / 1024 / 1024 * 10) / 10;
+          badges.push(`PDF file (${checks.pdf_size_mb >= 1 ? checks.pdf_size_mb + 'MB' : Math.round(contentLength / 1024) + 'KB'})`);
+
+          if (contentLength > 500 * 1024 * 1024) {
+            warnings.push('Very large PDF — processing may be slow, consider splitting');
+          } else if (contentLength > 100 * 1024 * 1024) {
+            warnings.push('Large PDF — processing may take several minutes');
+          }
+        } else {
+          badges.push('PDF file (size unknown)');
+        }
+      } catch (headErr) {
+        // HEAD failed — try GET to check reachability
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+          const getRes = await fetch(url, {
+            signal: controller.signal,
+            redirect: 'follow',
+            headers: { 'User-Agent': USER_AGENT, 'Range': 'bytes=0-0' },
+          });
+          clearTimeout(timeout);
+          checks.reachable = getRes.status < 400;
+          badges.push('PDF file (size unknown)');
+        } catch {
+          checks.reachable = false;
+          warnings.push('URL is not reachable — connection failed or timed out');
+          return buildResult(checks, badges, warnings);
+        }
+      }
+
+      // PDF-specific scoring: base 50 (PDFs usually have extractable contacts)
+      badges.push('Document mining will extract contacts from PDF text and tables');
+      return buildResult(checks, badges, warnings);
+    }
+  } catch (_) { /* not a valid URL — continue to normal flow */ }
 
   // 1. Fetch page
   try {
@@ -168,6 +236,9 @@ function buildResult(checks, badges, warnings) {
 
   if (!checks.reachable) score = 0;
 
+  // PDF gets higher base score (PDFs usually contain extractable data)
+  if (checks.is_pdf && checks.reachable) score = 50;
+
   if (checks.email_count > 10) score += 30;
   else if (checks.email_count > 0) score += 15;
 
@@ -178,7 +249,7 @@ function buildResult(checks, badges, warnings) {
   if (checks.blocked) score -= 50;
   if (checks.login_required) score -= 30;
   if (checks.js_heavy) score -= 20;
-  if (checks.page_size_kb < 5 && checks.reachable) score -= 15;
+  if (checks.page_size_kb < 5 && checks.reachable && !checks.is_pdf) score -= 15;
 
   // Clamp
   score = Math.max(0, Math.min(100, score));
@@ -187,7 +258,9 @@ function buildResult(checks, badges, warnings) {
 
   // Suggested miner
   let suggested_miner = 'playwrightMiner';
-  if (checks.email_count > 5 && checks.table_count > 0) {
+  if (checks.is_pdf) {
+    suggested_miner = 'documentMiner (PDF)';
+  } else if (checks.email_count > 5 && checks.table_count > 0) {
     suggested_miner = 'tableMiner / inlineContactMiner';
   } else if (checks.has_exhibitor_pattern) {
     suggested_miner = 'directoryMiner';
