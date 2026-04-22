@@ -115,12 +115,12 @@ async function pollAndProcess() {
 // ---------------------------------------------------------------------------
 async function checkSequenceCompletion() {
   try {
-    // Find sequence campaigns in 'sending' that have no active/paused recipients
+    // Find sequence campaigns in 'sending' or 'sequencing' that have no active/paused recipients
     const res = await db.query(
       `SELECT c.id, c.organizer_id
        FROM campaigns c
        WHERE c.campaign_type = 'sequence'
-         AND c.status = 'sending'
+         AND c.status IN ('sending', 'sequencing')
          AND NOT EXISTS (
            SELECT 1 FROM sequence_recipients sr
            WHERE sr.campaign_id = c.id AND sr.status IN ('active', 'paused')

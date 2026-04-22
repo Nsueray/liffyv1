@@ -1314,4 +1314,102 @@ router.get('/:id/recipients', authRequired, async (req, res) => {
   }
 });
 
+// GET /api/campaigns/:id/sequence-progress
+router.get('/:id/sequence-progress', authRequired, async (req, res) => {
+  try {
+    const campaignId = req.params.id;
+
+    const owned = await loadOwnedCampaign(req, campaignId);
+    if (owned.error) {
+      return res.status(owned.error.status).json({ error: owned.error.message });
+    }
+
+    // Get sequence steps
+    const stepsRes = await db.query(
+      `SELECT cs.id, cs.sequence_order, cs.delay_days, cs.condition, cs.subject_override, cs.is_active,
+              t.subject AS template_subject, t.name AS template_name
+       FROM campaign_sequences cs
+       LEFT JOIN email_templates t ON t.id = cs.template_id
+       WHERE cs.campaign_id = $1
+       ORDER BY cs.sequence_order`,
+      [campaignId]
+    );
+
+    if (stepsRes.rows.length === 0) {
+      return res.json({ steps: [], recipients: { total: 0 } });
+    }
+
+    // Get recipient stats grouped by current_step and status
+    const recipientRes = await db.query(
+      `SELECT current_step, status, COUNT(*)::int AS count,
+              MIN(next_send_at) AS earliest_send, MAX(next_send_at) AS latest_send
+       FROM sequence_recipients
+       WHERE campaign_id = $1
+       GROUP BY current_step, status
+       ORDER BY current_step, status`,
+      [campaignId]
+    );
+
+    // Get sent counts per step from campaign_events
+    const sentPerStepRes = await db.query(
+      `SELECT meta->>'sequence_step' AS step, COUNT(*)::int AS sent_count
+       FROM campaign_events
+       WHERE campaign_id = $1 AND event_type = 'sent' AND meta->>'sequence_step' IS NOT NULL
+       GROUP BY meta->>'sequence_step'`,
+      [campaignId]
+    );
+
+    // Build step-by-step summary
+    const sentByStep = {};
+    for (const r of sentPerStepRes.rows) {
+      sentByStep[parseInt(r.step)] = r.sent_count;
+    }
+
+    const recipientsByStep = {};
+    let totalActive = 0;
+    let totalCompleted = 0;
+    let totalBounced = 0;
+    let nextSendAt = null;
+
+    for (const r of recipientRes.rows) {
+      const step = r.current_step;
+      if (!recipientsByStep[step]) recipientsByStep[step] = {};
+      recipientsByStep[step][r.status] = r.count;
+
+      if (r.status === 'active') {
+        totalActive += r.count;
+        if (r.earliest_send && (!nextSendAt || new Date(r.earliest_send) < new Date(nextSendAt))) {
+          nextSendAt = r.earliest_send;
+        }
+      }
+      if (r.status === 'completed') totalCompleted += r.count;
+      if (r.status === 'bounced') totalBounced += r.count;
+    }
+
+    const steps = stepsRes.rows.map((s) => ({
+      sequence_order: s.sequence_order,
+      delay_days: s.delay_days,
+      condition: s.condition,
+      subject: s.subject_override || s.template_subject || s.template_name,
+      is_active: s.is_active,
+      sent_count: sentByStep[s.sequence_order] || 0,
+      recipients: recipientsByStep[s.sequence_order] || {},
+    }));
+
+    return res.json({
+      steps,
+      recipients: {
+        total: totalActive + totalCompleted + totalBounced,
+        active: totalActive,
+        completed: totalCompleted,
+        bounced: totalBounced,
+      },
+      next_send_at: nextSendAt,
+    });
+  } catch (err) {
+    console.error("Sequence progress error:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

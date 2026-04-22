@@ -286,11 +286,27 @@ async function processSendingCampaigns() {
       `, [campaign.id]);
 
       if (parseInt(remaining.rows[0].count) === 0) {
-        await client.query(`
-          UPDATE campaigns SET status = 'completed', completed_at = NOW() 
-          WHERE id = $1
+        // Check if this is a sequence campaign with active sequence recipients
+        const seqCheck = await client.query(`
+          SELECT COUNT(*) as count FROM sequence_recipients
+          WHERE campaign_id = $1 AND status IN ('active', 'paused')
         `, [campaign.id]);
-        console.log(`🎉 Campaign ${campaign.id} completed!`);
+
+        const hasActiveSequence = parseInt(seqCheck.rows[0].count) > 0;
+
+        if (hasActiveSequence) {
+          await client.query(`
+            UPDATE campaigns SET status = 'sequencing'
+            WHERE id = $1
+          `, [campaign.id]);
+          console.log(`📨 Campaign ${campaign.id} initial send done — now sequencing`);
+        } else {
+          await client.query(`
+            UPDATE campaigns SET status = 'completed', completed_at = NOW()
+            WHERE id = $1
+          `, [campaign.id]);
+          console.log(`🎉 Campaign ${campaign.id} completed!`);
+        }
       }
     }
   } finally {
