@@ -1350,19 +1350,22 @@ router.get('/:id/sequence-progress', authRequired, async (req, res) => {
       [campaignId]
     );
 
-    // Get sent counts per step from campaign_events
+    // Get sent counts per step from sequence_recipients (last_sent_step >= N means step N was sent)
     const sentPerStepRes = await db.query(
-      `SELECT meta->>'sequence_step' AS step, COUNT(*)::int AS sent_count
-       FROM campaign_events
-       WHERE campaign_id = $1 AND event_type = 'sent' AND meta->>'sequence_step' IS NOT NULL
-       GROUP BY meta->>'sequence_step'`,
+      `SELECT last_sent_step AS step, COUNT(*)::int AS sent_count
+       FROM sequence_recipients
+       WHERE campaign_id = $1 AND last_sent_step IS NOT NULL
+       GROUP BY last_sent_step`,
       [campaignId]
     );
 
-    // Build step-by-step summary
+    // Build cumulative sent counts: if last_sent_step=2, then steps 1 AND 2 were sent
     const sentByStep = {};
     for (const r of sentPerStepRes.rows) {
-      sentByStep[parseInt(r.step)] = r.sent_count;
+      const step = parseInt(r.step);
+      for (let s = 1; s <= step; s++) {
+        sentByStep[s] = (sentByStep[s] || 0) + r.sent_count;
+      }
     }
 
     const recipientsByStep = {};
