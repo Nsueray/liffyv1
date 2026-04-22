@@ -2311,3 +2311,97 @@ Found column in the mining jobs table now shows quality indicators:
 **Files:** `backend/worker.js`, `backend/services/sequenceWorker.js`, `backend/routes/campaigns.js`, `liffy-ui/app/campaigns/page.tsx`, `liffy-ui/app/campaigns/[id]/page.tsx`
 
 ---
+
+### Reply Detection Health Dashboard (2026-04-22)
+
+**Status:** LIVE.
+
+Monitoring section on Settings page for reply detection health.
+
+**Backend endpoints:**
+- `GET /api/settings/reply-health` — reply counts (7d/30d), last reply time, recent replies (last 10), status indicator (active/warning/error), test reply flag, last_test_at
+- `POST /api/settings/reply-test` — sends test email via SendGrid with plus-address token `c-00000000-r-00000000`, auto-detection via inbound webhook
+
+**Test reply detection flow:**
+1. User clicks "Send Test Reply" → sends email to `user+c-00000000-r-00000000@domain.com`
+2. Gmail Content Compliance matches `+c-` → forwards to `parse@reply.liffy.app`
+3. Inbound webhook detects test token (00000000) → stores timestamp in `global._liffyTestReplies[orgId]`
+4. Frontend auto-refreshes after 30s → shows "Reply detection verified!"
+
+**Org detection fix:** Test reply `from` is `notify@liffy.app` (SendGrid sender), not user's email. Fixed to parse base email from `to` address: `suer+c-00000000-r-00000000@elan-expo.com` → `suer@elan-expo.com` → user lookup → organizer_id.
+
+**Frontend (Settings page):**
+- Reply Detection section with status dot (green/yellow/red)
+- Status labels: Active (replies in 7d), Warning (no replies in 7d), Not Working (no replies in 30d)
+- Config info: detection mode, forward address, Gmail filter rule
+- Reply counts (7d/30d) + last reply timestamp
+- Send Test Reply button with "Sending..." state, auto-refresh after 30s
+- "Last test: Apr 22, 12:21 PM — Successful" line
+- Recent Replies table (email, subject, campaign, date)
+
+**Files:** `backend/routes/settings.js` (reply-health, reply-test), `backend/routes/webhooks.js` (test reply detection), `liffy-ui/app/settings/page.tsx`
+
+---
+
+### Action Engine ON CONFLICT Fix (2026-04-22)
+
+**Problem:** `upsertActionItem` ON CONFLICT clause failed because PostgreSQL requires the WHERE predicate to exactly match the partial unique index definition.
+
+**Index:** `idx_action_items_dedup` — `CREATE UNIQUE INDEX ... ON action_items (organizer_id, person_id, trigger_reason) WHERE status IN ('open', 'in_progress') AND trigger_reason <> 'reply_received'`
+
+**Fix:** Added `AND trigger_reason <> 'reply_received'` to the ON CONFLICT WHERE clause in `upsertActionItem()` to match the partial index exactly.
+
+**File:** `backend/engines/action-engine/actionEngine.js`
+
+---
+
+### PDF Memory-Safe Processing + File Upload Fix (2026-04-22)
+
+**Status:** LIVE.
+
+Large PDF support — disk-based processing instead of memory, file upload limit raised to 1GB.
+
+**DocumentMiner disk-based PDF download:**
+- `extractFromPdf()` now uses `responseType: 'stream'` → pipes to tmpfile on disk
+- HEAD request checks Content-Length before download, warns for >200MB
+- 5-minute timeout (was 30s) for large PDFs
+- Temp file always cleaned up in `finally` block
+- Eliminates double memory usage (axios arraybuffer + Buffer.from copy)
+
+**urlAnalyzer PDF detection:**
+- PDF URLs (`.pdf` extension) get HEAD request for file size instead of full page fetch
+- Badges: "PDF file (45MB)", "PDF file (521MB)"
+- Warnings: >100MB "Large PDF — processing may take several minutes", >500MB "Very large PDF — processing may be slow, consider splitting"
+- PDF base score 50 (higher than generic pages — PDFs usually have extractable data)
+- Suggested miner: "documentMiner (PDF)"
+- Score not reduced for PDF size — informational only
+
+**File upload fix (multer):**
+- Switched from `multer.memoryStorage()` to `multer.diskStorage()` — files written to `/tmp/liffy-uploads/`
+- File size limit raised from 50MB to 1GB
+- Upload handler reads from disk path (`req.file.path`), converts to hex for PostgreSQL bytea
+- Temp upload file cleaned up after DB insert, buffer freed after hex conversion
+
+**Frontend upload progress:**
+- `XMLHttpRequest` with `onprogress` replaces `fetch` for file uploads
+- Progress bar below submit button shows upload percentage
+- Button text: "Uploading... 45%" during upload, "Starting Job..." after
+- 10-minute XHR timeout for large files
+- Large file warning (>100MB): amber "Large file — upload may take a few minutes"
+- File size limit text updated from "10MB" to "1GB"
+
+**Failed PDF banner (job detail):**
+- Purple banner when job failed + error matches `memory|oom|heap|pdf|ENOMEM`
+- Text: "This PDF exceeded memory limits during processing."
+- Buttons: "Download PDF" (opens URL in new tab, for URL jobs) + "Retry with File Upload"
+
+**Known limitation:** Render has 30s request timeout. Files >~100MB may timeout during upload. Future work: presigned S3 upload or chunked upload.
+
+**Files changed:**
+- `backend/services/urlMiners/documentMiner.js` — stream-to-disk PDF download
+- `backend/services/urlAnalyzer.js` — PDF HEAD request + size badges
+- `backend/routes/miningJobs.js` — diskStorage, 1GB limit, read from disk
+- `liffy-ui/app/mining/page.tsx` — upload progress bar, large file warning
+- `liffy-ui/app/mining/jobs/[id]/page.tsx` — failed PDF banner
+
+---

@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-22 (Mineability pre-check + Campaign sequencing status)*
+*Updated: 2026-04-22 (Reply health dashboard, PDF memory-safe, file upload 1GB, ActionEngine fix)*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -259,4 +259,11 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | K35 | gefera.ru listing+detail SPA miner — listing page + detail page multi-step extraction | P2 | TODO |
 | K36 | Source Discovery Sprint 2 (mineability pre-check) | P1 | ✅ DONE |
 | K37 | Campaign sequencing status + sequence progress UI | P1 | ✅ DONE |
-| K38 | E1 Legacy Cleanup — prospects table drop | P2 | TODO |
+| K38 | E1 Legacy Cleanup — prospects table drop (analysis done: docs/E1_LEGACY_CLEANUP_ANALYSIS.md) | P2 | TODO |
+| K39 | Reply detection health dashboard + test reply endpoint (settings page monitoring) | P1 | ✅ DONE |
+| K40 | ActionEngine ON CONFLICT fix — partial index predicate match | P1 | ✅ DONE |
+| K41 | PDF memory-safe processing — documentMiner stream-to-disk, HEAD size check, 5min timeout | P1 | ✅ DONE |
+| K42 | File upload fix — multer diskStorage (was memoryStorage), 1GB limit (was 50MB) | P1 | ✅ DONE |
+| K43 | Upload progress bar — XMLHttpRequest onprogress, failed PDF banner, large file warning | P1 | ✅ DONE |
+| K44 | urlAnalyzer PDF detection — HEAD request size check, PDF-specific badges and scoring | P1 | ✅ DONE |
+| K45 | Render 30s timeout — presigned S3 upload for files >100MB | P2 | FUTURE |

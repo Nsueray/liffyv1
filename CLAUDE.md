@@ -207,6 +207,9 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 47. ~~Execution Plan + Poison Fix~~ ✅ DONE — inlineContactMiner added as fallback step in ALL execution plans. isPoisoned() false positive fixed (block indicators only on short pages <10KB or title/h1).
 48. ~~Source Discovery v2 (Sprint 1)~~ ✅ DONE — RFC written (`docs/RFC_Source_Discovery_v2.md`). 9 source types (5 main + 4 "More options"). Country dropdown (80+ countries, popular section). Industry dropdown (24 sectors). Claude API web search with source-type-aware query templates. `POST /api/mining/batch-create` batch job creation. Domain dedup (max 3/domain). Rate limit 429 handling (countdown banner). Prompt optimization (system ~80 words, user ~60 words, down from 300+).
 49. ~~Source Discovery Search History~~ ✅ DONE — Migration 043: `discovery_searches` table. POST saves searches automatically. `GET /api/source-discovery/history` (last 50, mining status enrichment per URL). `GET /api/source-discovery/history/:id` single search detail. Frontend: 3-tab layout (Discover / Search History / Jobs), expand/collapse search cards, mining status badges (completed/running/failed/unmined), batch mine from history.
+50. ~~Reply Detection Health Dashboard~~ ✅ DONE — Settings page monitoring section (status indicator, reply counts, recent replies). Send Test Reply button. Test reply org detection fix (To address parsing). Last test timestamp.
+51. ~~ActionEngine ON CONFLICT Fix~~ ✅ DONE — upsertActionItem partial index predicate match.
+52. ~~PDF Memory-Safe Processing~~ ✅ DONE — DocumentMiner stream-to-disk (was memory), HEAD size check, 5min timeout. urlAnalyzer PDF detection with size badges. File upload: multer diskStorage 1GB (was memoryStorage 50MB). Upload progress bar. Failed PDF banner.
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for detailed task tracking.
 
