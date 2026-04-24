@@ -82,7 +82,8 @@ router.get('/api/campaigns/:id/sequences', authRequired, loadOwnedCampaign, asyn
     const result = await db.query(
       `SELECT cs.id, cs.sequence_order, cs.template_id, cs.delay_days, cs.condition,
               cs.subject_override, cs.is_active, cs.created_at,
-              t.name AS template_name, t.subject AS template_subject
+              t.name AS template_name, t.subject AS template_subject,
+              LEFT(t.body_html, 500) AS template_body_preview
        FROM campaign_sequences cs
        JOIN email_templates t ON t.id = cs.template_id
        WHERE cs.campaign_id = $1 AND cs.organizer_id = $2
