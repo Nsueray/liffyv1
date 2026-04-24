@@ -120,7 +120,7 @@ if (process.env.MINING_TEST === "1") {
 if (!process.env.DISABLE_SEQUENCE_WORKER) {
   const sequenceWorker = require('./services/sequenceWorker');
   sequenceWorker.start();
-  process.on('SIGTERM', () => sequenceWorker.stop());
+  process.on('SIGTERM', () => { console.log('[SequenceWorker] SIGTERM received (deploy/restart)'); sequenceWorker.stop(); });
 }
 
 // Action Engine worker — reconciles triggers every 15 min

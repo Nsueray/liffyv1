@@ -63,6 +63,16 @@ async function pollAndProcess() {
     );
 
     if (res.rows.length === 0) {
+      // Log next due for debugging
+      const nextDue = await db.query(
+        `SELECT MIN(next_send_at) AS next FROM sequence_recipients WHERE status = 'active' AND next_send_at IS NOT NULL`
+      );
+      const next = nextDue.rows[0]?.next;
+      if (next) {
+        const diffMs = new Date(next).getTime() - Date.now();
+        const diffMin = Math.round(diffMs / 60000);
+        console.log(`[SequenceWorker] 0 due — next in ${diffMin}m (${next})`);
+      }
       isProcessing = false;
       return;
     }
