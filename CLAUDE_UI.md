@@ -102,6 +102,8 @@
 - **Action Engine ON CONFLICT Fix** — `upsertActionItem` ON CONFLICT WHERE clause didn't match partial index predicate (missing `trigger_reason <> 'reply_received'`). PostgreSQL requires exact match.
 - **PDF Memory-Safe Processing** — DocumentMiner: stream-to-disk PDF download (was memory), HEAD size check, 5-min timeout. urlAnalyzer: PDF-specific analysis with size badges ("PDF file (45MB)"), warnings for >100MB/>500MB.
 - **File Upload Fix (1GB)** — multer switched from memoryStorage to diskStorage, limit 50MB→1GB. Frontend: XMLHttpRequest upload progress bar ("Uploading... 45%"), large file warning >100MB, size text "1GB". Failed PDF banner on job detail (purple, "Download PDF" + "Retry with File Upload" buttons).
+- **Sequence Builder Modernization** — Visual timeline with orange "Wait N days" pill nodes between step cards. Template preview hover popover (subject + body preview + "Open template" link). Condition descriptions ("If no reply after 4 days, send this follow-up"). Inline step performance stats (sent/delivered%/opened%/clicked%). Up/down reorder buttons (editable state, POST /reorder). Sequencing status analytics fix. Total duration display. Orange accent color scheme.
+- **Sequence Worker Constraint Fix (Migration 044)** — DROP CHECK constraints on sequence_recipients + campaign_recipients. CAS 'sending' status was blocked by constraint. Diagnostic logging: 0-due next time, SIGTERM source.
 
 ---
 

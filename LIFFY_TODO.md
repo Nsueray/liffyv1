@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-22 (Reply health dashboard, PDF memory-safe, file upload 1GB, ActionEngine fix)*
+*Updated: 2026-04-24 (Sequence Builder modernization, constraint fix migration 044, worker diagnostic logging)*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -267,3 +267,6 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | K43 | Upload progress bar — XMLHttpRequest onprogress, failed PDF banner, large file warning | P1 | ✅ DONE |
 | K44 | urlAnalyzer PDF detection — HEAD request size check, PDF-specific badges and scoring | P1 | ✅ DONE |
 | K45 | Render 30s timeout — presigned S3 upload for files >100MB | P2 | FUTURE |
+| K46 | Sequence Builder modernization — visual timeline, template preview, reorder buttons, inline stats, condition descriptions | P1 | ✅ DONE |
+| K47 | Sequence worker constraint fix — migration 044, DROP CHECK constraints (sequence_recipients + campaign_recipients) | P1 | ✅ DONE |
+| K48 | Sequence worker diagnostic logging — 0-due next time log, SIGTERM source log | P1 | ✅ DONE |

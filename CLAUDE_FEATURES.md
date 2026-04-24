@@ -2405,3 +2405,84 @@ Large PDF support — disk-based processing instead of memory, file upload limit
 - `liffy-ui/app/mining/jobs/[id]/page.tsx` — failed PDF banner
 
 ---
+
+### Sequence Builder Modernization (2026-04-24)
+
+**Status:** LIVE.
+
+Visual timeline redesign with 6 improvements to `/campaigns/[id]/sequences` page.
+
+**1. Visual Timeline with Wait Nodes:**
+- Orange "Wait N days" pill nodes between step cards (`bg-orange-50 border-orange-200 text-orange-600`)
+- Vertical connector lines above and below each pill
+- Total sequence duration display at bottom: "Total sequence duration: 7 days"
+
+**2. Template Preview Popover:**
+- Hover over template name → popover appears after 300ms delay
+- Shows: subject line (or subject_override), first 200 chars of body (HTML stripped), "Open template →" link
+- Backend: `LEFT(t.body_html, 500) AS template_body_preview` added to GET sequences query
+- `stripHtml()` utility removes tags + decodes entities
+
+**3. Condition Descriptions:**
+- Instead of just badge ("If No Reply"), shows full sentence:
+  - `no_reply` → "If no reply after 4 days, send this follow-up"
+  - `no_open` → "If not opened after 4 days, send this follow-up"
+  - `always` → "Always send after 4 days" / "Send immediately" (step 1)
+
+**4. Inline Step Performance Stats:**
+- Fetches `GET /api/campaigns/:id/sequence-progress` in parallel with analytics
+- Per-step mini stat bar: sent count, delivered%, opened%, clicked%
+- Status badge: "Done" (green) for completed steps, next send date for waiting steps
+- Only shown when `sent_count > 0`
+
+**5. Reorder Buttons:**
+- Up/down arrow SVG buttons on each step card (editable state only)
+- Optimistic UI: swaps steps immediately, calls `POST /reorder` in background
+- Rollback on error (re-fetches all data)
+- Disabled at boundaries (first step can't go up, last can't go down)
+
+**6. Sequencing Status Analytics Fix:**
+- Added `'sequencing'` to analytics fetch condition alongside `'sending'`, `'paused'`, `'completed'`
+- Previously, campaigns in `sequencing` status showed no analytics
+
+**Design:**
+- Orange accent color scheme (step circles, buttons, funnel bars, add form border)
+- `max-w-3xl mx-auto` centering for better readability
+- Mobile-friendly: `shrink-0`, `min-w-0`, `truncate` on appropriate elements
+
+**Files changed:**
+- `backend/routes/sequences.js` — `template_body_preview` in GET query
+- `liffy-ui/app/campaigns/[id]/sequences/page.tsx` — full page rewrite (501→~480 lines)
+
+---
+
+### Sequence Worker Constraint Fix + Diagnostic Logging (2026-04-24)
+
+**Status:** LIVE. Migration 044 applied.
+
+**Problem:** `sequence_recipients` table had a CHECK constraint on `status` column that didn't include `'sending'`. The CAS (Compare-And-Swap) pattern in `sequenceService.js` does `UPDATE SET status='sending' WHERE status='active'` as an atomic claim — this violated the constraint and blocked all sequence sends. Siema Mail campaign had 649 recipients stuck at step 2.
+
+**Fix:** Migration 044 drops CHECK constraints entirely:
+```sql
+ALTER TABLE sequence_recipients DROP CONSTRAINT IF EXISTS sequence_recipients_status_check;
+ALTER TABLE campaign_recipients DROP CONSTRAINT IF EXISTS campaign_recipients_status_check;
+```
+
+**Rationale:** Status values are enforced in application code (`sequenceService.js`). All 7 valid statuses: `active`, `sending`, `completed`, `replied`, `bounced`, `unsubscribed`, `paused`. DB constraint adds unnecessary risk when new statuses are added.
+
+**Worker "Stopped" after 1 minute — Root Cause:**
+- Not a bug — Render SIGTERM from redeploy (git push triggers new deployment)
+- `process.on('SIGTERM', () => sequenceWorker.stop())` calls `clearInterval` → "Stopped" log
+- 649 recipients had `next_send_at` in the future (step 2, delay_days=4, sent April 20 → due April 24 14:23)
+- Worker correctly found 0 due recipients and continued polling
+
+**Diagnostic logging added:**
+- `[SequenceWorker] 0 due — next in 6m (2026-04-24T14:23:47Z)` — shows next due time when 0 found
+- `[SequenceWorker] SIGTERM received (deploy/restart)` — explicitly identifies deploy-triggered stops
+
+**Files changed:**
+- `backend/migrations/044_drop_status_check_constraints.sql` — idempotent migration
+- `backend/services/sequenceWorker.js` — 0-due diagnostic log
+- `backend/server.js` — SIGTERM source log
+
+---
