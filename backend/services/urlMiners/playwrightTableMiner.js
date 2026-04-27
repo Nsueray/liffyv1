@@ -204,8 +204,8 @@ async function parseColumnAwareTable(page, baseUrl) {
             }
         }
 
-        // Need at least email column to be useful
-        if (columnMap.email === undefined) continue;
+        // Need at least email or company column to be useful
+        if (columnMap.email === undefined && columnMap.company === undefined) continue;
 
         console.log(`[TableMiner] Column-aware: mapped ${Object.keys(columnMap).join(', ')} from headers: [${table.headers.join(' | ')}]`);
 
@@ -216,19 +216,24 @@ async function parseColumnAwareTable(page, baseUrl) {
                 return row[idx];
             };
 
-            // Extract email
+            // Extract email (optional — table may not have email column)
+            let emails = [];
             const emailCell = getCell('email');
-            if (!emailCell) continue;
-
-            const emailText = emailCell.text.trim().toLowerCase();
-            // Also try extracting from HTML (for CF-encoded or mailto: links)
-            const emailsFromHtml = extractAllEmails(emailCell.html) || [];
-            const emailsFromText = extractAllEmails(emailText) || [];
-            const emails = [...new Set([...emailsFromHtml, ...emailsFromText])];
-            if (emails.length === 0) continue;
+            if (emailCell) {
+                const emailText = emailCell.text.trim().toLowerCase();
+                // Also try extracting from HTML (for CF-encoded or mailto: links)
+                const emailsFromHtml = extractAllEmails(emailCell.html) || [];
+                const emailsFromText = extractAllEmails(emailText) || [];
+                emails = [...new Set([...emailsFromHtml, ...emailsFromText])];
+            }
 
             // Extract other fields
             const companyCell = getCell('company');
+            const companyName = companyCell ? companyCell.text.trim() || null : null;
+
+            // Need at least company name or email
+            if (emails.length === 0 && !companyName) continue;
+
             const countryCell = getCell('country');
             const websiteCell = getCell('website');
             const phoneCell = getCell('phone');
@@ -258,7 +263,7 @@ async function parseColumnAwareTable(page, baseUrl) {
             }
 
             contacts.push({
-                companyName: companyCell ? companyCell.text.trim() || null : null,
+                companyName,
                 emails,
                 phones: phoneCell ? extractPhones(phoneCell.text).slice(0, 3) : [],
                 address: countryCell ? countryCell.text.trim() || null : null,
@@ -437,12 +442,21 @@ async function mine(job) {
         
         // Wait for content to load
         await page.waitForTimeout(2000);
-        
-        // Scroll to trigger lazy loading
-        await page.evaluate(() => {
-            window.scrollTo(0, document.body.scrollHeight);
-        });
-        await page.waitForTimeout(1000);
+
+        // Progressive scroll to trigger lazy loading (up to 4 scrolls, stop if no new content)
+        let prevElementCount = 0;
+        for (let scrollAttempt = 0; scrollAttempt < 4; scrollAttempt++) {
+            await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+            await page.waitForTimeout(1500);
+            const currentCount = await page.evaluate(() =>
+                document.querySelectorAll('tr, [class*="card"], [class*="item"], .listing, .member').length
+            );
+            if (currentCount === prevElementCount && scrollAttempt > 0) {
+                console.log(`[TableMiner] Scroll ${scrollAttempt + 1}: no new content (${currentCount} elements), stopping`);
+                break;
+            }
+            prevElementCount = currentCount;
+        }
         
         // Get full HTML
         const html = await page.content();
@@ -450,19 +464,8 @@ async function mine(job) {
         // Extract all emails from entire page (including CF protected)
         const allEmails = extractAllEmails(html);
         console.log(`[TableMiner] Found ${allEmails.length} emails on page`);
-        
-        if (allEmails.length === 0) {
-            return {
-                status: 'PARTIAL',
-                emails: [],
-                contacts: [],
-                extracted_links: [],
-                http_code: response?.status() || 200,
-                meta: { source: 'tableMiner', note: 'No emails found on page' }
-            };
-        }
-        
-        // Extract all phones and websites
+
+        // Extract all phones and websites (always — needed by both strategies)
         const pageText = await page.evaluate(() => document.body.innerText);
         const allPhones = extractPhones(pageText);
         const allWebsites = extractWebsites(html, url);
@@ -474,18 +477,24 @@ async function mine(job) {
         if (columnAwareContacts.length > 0) {
             console.log(`[TableMiner] Column-aware: ${columnAwareContacts.length} contacts extracted`);
             const usedEmails = new Set();
+            const usedCompanies = new Set();
             for (const contact of columnAwareContacts) {
                 const newEmails = contact.emails.filter(e => !usedEmails.has(e));
                 if (newEmails.length > 0) {
                     contact.emails = newEmails;
                     newEmails.forEach(e => usedEmails.add(e));
                     contacts.push(contact);
+                } else if (contact.companyName && !usedCompanies.has(contact.companyName.toLowerCase())) {
+                    // No email but has company name — still valuable for Flow2 enrichment
+                    usedCompanies.add(contact.companyName.toLowerCase());
+                    contacts.push(contact);
                 }
             }
         }
 
         // ─── Strategy B: Heuristic fallback (cards, bold labels, etc.) ───
-        if (contacts.length === 0) {
+        // Only attempt heuristic if emails exist on page (heuristic requires email matches)
+        if (contacts.length === 0 && allEmails.length > 0) {
             console.log(`[TableMiner] Column-aware found nothing, falling back to heuristic`);
             const dataBlocks = await parseTableData(page);
             console.log(`[TableMiner] Found ${dataBlocks.length} data blocks`);

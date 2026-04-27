@@ -161,16 +161,26 @@ async function runContactPageMiner(page, url, config = {}) {
       if (emails.length > 0) {
         console.log(`[contactPageMiner] Found ${emails.length} email(s) on ${sourcePath}`);
 
+        let hasPersonal = false;
         for (const email of emails) {
+          const generic = isGenericEmail(email);
+          if (!generic) hasPersonal = true;
           results.push({
             website: url,
             email: email,
             email_source_page: sourcePath,
-            is_generic: isGenericEmail(email),
+            is_generic: generic,
             company_name: null // set by caller
           });
         }
-        return true; // found emails, stop
+
+        if (hasPersonal) {
+          console.log(`[contactPageMiner] Personal email found on ${sourcePath}, stopping`);
+          return true; // personal email found, stop
+        }
+        // Only generic emails found — save but continue searching for personal emails
+        console.log(`[contactPageMiner] Only generic email(s) on ${sourcePath}, continuing search`);
+        return false;
       }
     } catch (err) {
       const msg = err.message || '';
@@ -223,7 +233,7 @@ async function runContactPageMiner(page, url, config = {}) {
     }
   }
 
-  console.log(`[contactPageMiner] No emails found on ${url} (checked ${CONTACT_PATHS.length + 2} pages in ${Date.now() - startTime}ms)`);
+  console.log(`[contactPageMiner] Done: ${results.length} email(s) on ${url} (checked ${CONTACT_PATHS.length + 2} pages in ${Date.now() - startTime}ms)`);
   return results;
 }
 
