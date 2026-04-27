@@ -93,6 +93,44 @@ router.post('/', authRequired, async (req, res) => {
 
     const sources = result.sources || [];
 
+    // Enrich sources with prior mining history (same pattern as GET /history)
+    if (sources.length > 0) {
+      try {
+        const sourceUrls = sources.map(s => s.url).filter(Boolean);
+        const { rows: miningRows } = await db.query(
+          `SELECT DISTINCT ON (input) input, id, status, total_found, created_at
+           FROM mining_jobs
+           WHERE organizer_id = $1 AND input = ANY($2)
+           ORDER BY input, created_at DESC`,
+          [organizer_id, sourceUrls]
+        );
+        const miningMap = {};
+        for (const row of miningRows) {
+          miningMap[row.input] = {
+            mining_job_id: row.id,
+            mining_status: row.status,
+            mining_found: row.total_found || 0,
+            mined_at: row.created_at,
+          };
+        }
+        for (const s of sources) {
+          const prior = miningMap[s.url];
+          if (prior) {
+            s.mining_status = prior.mining_status;
+            s.mining_found = prior.mining_found;
+            s.mining_job_id = prior.mining_job_id;
+            s.mined_at = prior.mined_at;
+          }
+        }
+        const minedCount = miningRows.length;
+        if (minedCount > 0) {
+          console.log(`[sourceDiscovery] Prior mining: ${minedCount}/${sources.length} URLs already mined`);
+        }
+      } catch (miningErr) {
+        console.error(`[sourceDiscovery] Mining enrichment error: ${miningErr.message}`);
+      }
+    }
+
     // Save to discovery_searches (fire-and-forget for rate_limit, save even with 0 results)
     let searchId = null;
     if (!result.error || result.error === 'rate_limit') {

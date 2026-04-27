@@ -261,13 +261,14 @@ router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req,
 /**
  * POST /api/mining/batch-create
  * Create multiple mining jobs at once (Source Discovery v2)
- * Body: { urls: [{ url, name? }] }
+ * Body: { urls: [{ url, name? }], force?: boolean }
+ * force=true skips duplicate check (user confirmed "Mine Again")
  */
 router.post('/api/mining/batch-create', authRequired, async (req, res) => {
   try {
     const organizer_id = req.auth.organizer_id;
     const user_id = req.auth.user_id;
-    const { urls } = req.body;
+    const { urls, force } = req.body;
 
     if (!Array.isArray(urls) || urls.length === 0) {
       return res.status(400).json({ error: 'urls array is required and must not be empty' });
@@ -277,19 +278,68 @@ router.post('/api/mining/batch-create', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'Maximum 50 URLs per batch' });
     }
 
-    const jobs = [];
+    // Collect all valid URLs
+    const validItems = [];
     const errors = [];
-
     for (const item of urls) {
       const url = typeof item === 'string' ? item : item?.url;
       if (!url || typeof url !== 'string' || !url.trim()) {
         errors.push({ url: url || null, error: 'Invalid URL' });
         continue;
       }
+      validItems.push({ url: url.trim(), name: (typeof item === 'object' && item.name) ? item.name : null });
+    }
 
-      const jobName = (typeof item === 'object' && item.name)
-        ? item.name
-        : `Discovery — ${(() => { try { return new URL(url).hostname; } catch { return url.slice(0, 40); } })()}`;
+    // Duplicate check (skip if force=true)
+    const duplicates = [];
+    const newItems = [];
+    if (!force && validItems.length > 0) {
+      const urlList = validItems.map(i => i.url);
+      const { rows: existingJobs } = await db.query(
+        `SELECT DISTINCT ON (input) id, input, status, total_found, created_at
+         FROM mining_jobs
+         WHERE input = ANY($1) AND organizer_id = $2 AND status IN ('completed', 'running', 'pending')
+         ORDER BY input, created_at DESC`,
+        [urlList, organizer_id]
+      );
+      const existingMap = {};
+      for (const row of existingJobs) {
+        existingMap[row.input] = row;
+      }
+      for (const item of validItems) {
+        const existing = existingMap[item.url];
+        if (existing) {
+          duplicates.push({
+            url: item.url,
+            job_id: existing.id,
+            status: existing.status,
+            total_found: existing.total_found || 0,
+            mined_at: existing.created_at,
+          });
+        } else {
+          newItems.push(item);
+        }
+      }
+    } else {
+      newItems.push(...validItems);
+    }
+
+    // If there are duplicates and no new items, return duplicates for confirmation
+    if (duplicates.length > 0 && newItems.length === 0) {
+      return res.json({
+        jobs: [],
+        created: 0,
+        failed: errors.length,
+        duplicates,
+        errors: errors.length > 0 ? errors : undefined,
+      });
+    }
+
+    // Create jobs for new URLs
+    const jobs = [];
+    for (const item of newItems) {
+      const jobName = item.name
+        || `Discovery — ${(() => { try { return new URL(item.url).hostname; } catch { return item.url.slice(0, 40); } })()}`;
 
       try {
         const result = await db.query(
@@ -297,21 +347,22 @@ router.post('/api/mining/batch-create', authRequired, async (req, res) => {
            (organizer_id, type, input, name, strategy, config, status, created_by_user_id)
            VALUES ($1, 'url', $2, $3, 'auto', $4, 'pending', $5)
            RETURNING id, type, input, name, status, created_at`,
-          [organizer_id, url.trim(), jobName, { mining_mode: 'full' }, user_id]
+          [organizer_id, item.url, jobName, { mining_mode: 'full' }, user_id]
         );
         jobs.push(result.rows[0]);
       } catch (err) {
-        console.error(`[batch-create] Error creating job for ${url}:`, err.message);
-        errors.push({ url, error: err.message });
+        console.error(`[batch-create] Error creating job for ${item.url}:`, err.message);
+        errors.push({ url: item.url, error: err.message });
       }
     }
 
-    console.log(`[batch-create] Created ${jobs.length} jobs, ${errors.length} errors for organizer ${organizer_id}`);
+    console.log(`[batch-create] Created ${jobs.length} jobs, ${duplicates.length} duplicates, ${errors.length} errors for organizer ${organizer_id}`);
 
     return res.json({
       jobs,
       created: jobs.length,
       failed: errors.length,
+      ...(duplicates.length > 0 ? { duplicates } : {}),
       errors: errors.length > 0 ? errors : undefined,
     });
   } catch (err) {

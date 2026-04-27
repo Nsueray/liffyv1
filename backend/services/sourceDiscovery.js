@@ -26,6 +26,44 @@ const SOURCE_TYPE_FOCUS = {
   custom_search: 'pages with company lists, contact info, or business directories',
 };
 
+// Source type → specific instruction to avoid wrong page types
+const SOURCE_TYPE_INSTRUCTION = {
+  trade_fair: 'Find exhibitor LIST pages, NOT fair homepages or event info pages.',
+  association: 'Find MEMBER DIRECTORY or member list pages, NOT about/contact pages.',
+  chamber: 'Find member DIRECTORY pages with company listings, NOT chamber homepages.',
+  business_directory: 'Find searchable company LISTING pages with contact details.',
+  company_listing: 'Find pages with actual company lists and contact info.',
+  trade_portal: 'Find supplier/manufacturer listing pages with company details.',
+  government_trade: 'Find official exporter/company REGISTRY pages with downloadable lists.',
+  custom_search: '',
+};
+
+// Country → preferred language mapping
+const COUNTRY_LANGUAGES = {
+  'Turkey': 'Turkish', 'France': 'French', 'Germany': 'German',
+  'Morocco': 'French', 'Algeria': 'French', 'Tunisia': 'French',
+  'Nigeria': 'English', 'Ghana': 'English', 'Kenya': 'English',
+  'South Africa': 'English', 'Egypt': 'Arabic', 'Libya': 'Arabic',
+  'Russia': 'Russian', 'Ukraine': 'Ukrainian',
+  'China': 'Chinese', 'Japan': 'Japanese', 'South Korea': 'Korean',
+  'Spain': 'Spanish', 'Italy': 'Italian', 'Portugal': 'Portuguese',
+  'Brazil': 'Portuguese', 'Argentina': 'Spanish', 'Mexico': 'Spanish',
+  'Colombia': 'Spanish', 'Chile': 'Spanish', 'Peru': 'Spanish',
+  'Saudi Arabia': 'Arabic', 'UAE': 'Arabic', 'Qatar': 'Arabic',
+  'Kuwait': 'Arabic', 'Bahrain': 'Arabic', 'Oman': 'Arabic',
+  'Jordan': 'Arabic', 'Iraq': 'Arabic', 'Lebanon': 'Arabic',
+  'Iran': 'Persian', 'Pakistan': 'Urdu/English',
+  'India': 'English', 'Bangladesh': 'Bengali/English',
+  'Indonesia': 'Indonesian', 'Malaysia': 'Malay/English',
+  'Thailand': 'Thai', 'Vietnam': 'Vietnamese',
+  'Netherlands': 'Dutch', 'Belgium': 'Dutch/French',
+  'Poland': 'Polish', 'Czech Republic': 'Czech',
+  'Romania': 'Romanian', 'Hungary': 'Hungarian',
+  'Greece': 'Greek', 'Serbia': 'Serbian', 'Bulgaria': 'Bulgarian',
+  'Croatia': 'Croatian', 'Sweden': 'Swedish', 'Norway': 'Norwegian',
+  'Denmark': 'Danish', 'Finland': 'Finnish',
+};
+
 /**
  * Discover data sources (v2.1 — optimized prompts + rate limit + dedup)
  */
@@ -49,15 +87,36 @@ async function discoverSources({ keyword, fair_name, industry, target_countries 
   // Optimized system prompt (~80 words)
   const systemPrompt = `You find B2B data source URLs. Return SPECIFIC pages with company/member lists — not homepages. Focus: ${searchFocus}. Include PDFs with member lists. Verify URLs exist via search. Return ONLY a JSON array, no other text.`;
 
-  // Optimized user prompt (~60 words)
+  // Build language hint from target countries
+  let languageHint = '';
+  if (target_countries.length === 1) {
+    const lang = COUNTRY_LANGUAGES[target_countries[0]];
+    if (lang) {
+      const tld = target_countries[0] === 'Turkey' ? '.tr' : target_countries[0] === 'Germany' ? '.de' : target_countries[0] === 'France' ? '.fr' : '';
+      languageHint = `Prefer ${lang}-language sources${tld ? ` (e.g. ${tld} domains)` : ''}.`;
+    }
+  } else if (target_countries.length > 1) {
+    const langs = [...new Set(target_countries.map(c => COUNTRY_LANGUAGES[c]).filter(Boolean))];
+    if (langs.length > 0) {
+      languageHint = `Include sources in relevant local languages (${langs.slice(0, 3).join(', ')}).`;
+    }
+  }
+
+  // Source type specific instruction
+  const sourceTypeInstruction = SOURCE_TYPE_INSTRUCTION[resolvedSourceType] || '';
+
+  // Optimized user prompt (~60-90 words depending on hints)
   const filterLines = [
     searchKeyword ? `Keywords: ${searchKeyword}` : '',
     industry ? `Industry: ${industry}` : '',
     target_countries.length ? `Countries: ${target_countries.join(', ')}` : '',
   ].filter(Boolean).join('\n');
 
+  const hintLines = [languageHint, sourceTypeInstruction].filter(Boolean).join('\n');
+
   const userPrompt = `Find 10-15 URLs with company/member lists.
 ${filterLines}
+${hintLines ? '\n' + hintLines : ''}
 
 Return JSON array: [{"url":"...","source_type":"association|directory|fair|pdf|registry|other","estimated_companies":50,"has_email_on_page":true,"language":"en","notes":"..."}]`;
 
