@@ -882,6 +882,18 @@ PageAnalyzer.prototype.detectSpaCatalog = function($, html, url) {
         return { isSpa: true, method: 'generic rules', reason: 'framework meta tag' };
     }
 
+    // Rule 5: State hydration markers in scripts
+    const scriptContent = $('script').map((_, el) => $(el).html() || '').get().join(' ');
+    if (/__INITIAL_STATE__|__APOLLO_STATE__|window\.__INITIAL|__NUXT__|__NEXT_DATA__/.test(scriptContent)) {
+        return { isSpa: true, method: 'generic rules', reason: 'state hydration marker in script' };
+    }
+
+    // Rule 6: JS-heavy page — very little visible text but large HTML (JS-rendered content)
+    const bodyTextLength = bodyText.trim().length;
+    if (bodyTextLength < 500 && contentHtml.length > 50000) {
+        return { isSpa: true, method: 'generic rules', reason: `JS-heavy: ${bodyTextLength} chars text, ${contentHtml.length}B HTML` };
+    }
+
     // Fallback: hostname match from known SPA catalog list
     try {
         const hostname = new URL(url).hostname.toLowerCase();
@@ -973,6 +985,61 @@ PageAnalyzer.prototype.analyzeHtml = function(html, url) {
         // Invalid URL, continue to other checks
     }
     result.isMemberTable = false;
+
+    // Content-based DIRECTORY detection — generic, no hostname dependency.
+    // Detects business directories by Schema.org markup, repeated card structures,
+    // URL keywords, and pagination + contact density. Requires 2+ signals.
+    try {
+        const urlLower = url.toLowerCase();
+        const lowerHtml = html.toLowerCase();
+
+        const directorySignals = [];
+
+        // Signal 1: Schema.org LocalBusiness or Organization markup
+        if (lowerHtml.includes('"localbusiness"') || lowerHtml.includes('"organization"') ||
+            lowerHtml.includes("'localbusiness'") || lowerHtml.includes("'organization'")) {
+            directorySignals.push('schema_org_markup');
+        }
+
+        // Signal 2: Repeated card structures (5+ elements with directory-like classes)
+        const cardPatterns = [
+            /class="[^"]*\bcard\b[^"]*"/gi,
+            /class="[^"]*\blisting\b[^"]*"/gi,
+            /class="[^"]*\bcompany\b[^"]*"/gi,
+            /class="[^"]*\bbusiness\b[^"]*"/gi,
+            /class="[^"]*\bvendor\b[^"]*"/gi,
+        ];
+        for (const pattern of cardPatterns) {
+            const matches = html.match(pattern) || [];
+            if (matches.length >= 5) {
+                directorySignals.push('repeated_cards:' + matches.length);
+                break;
+            }
+        }
+
+        // Signal 3: URL keywords
+        if (/\/(directory|listing|companies|members|exhibitors|suppliers|vendors|catalog)\b/i.test(urlLower)) {
+            directorySignals.push('url_keyword');
+        }
+
+        // Signal 4: Pagination + multiple phone patterns (directory-like contact density)
+        if (result.paginationType !== 'none') {
+            const phonePattern = /(?:\+?\d{1,4}[\s\-.]?)?\(?\d{1,5}\)?[\s\-.]?\d{2,5}[\s\-.]?\d{2,5}/g;
+            const phoneMatches = (html.match(phonePattern) || []).length;
+            if (phoneMatches >= 5) {
+                directorySignals.push('pagination_with_phones');
+            }
+        }
+
+        if (directorySignals.length >= 2) {
+            result.pageType = PAGE_TYPES.DIRECTORY;
+            result.isDirectory = true;
+            console.log(`[PageAnalyzer] Content fingerprint: directory (${directorySignals.join(', ')})`);
+            return result;
+        }
+    } catch (e) {
+        // Content-based directory detection failed, continue
+    }
 
     // Content-based MEMBER_TABLE detection — generic, no hostname dependency.
     // Looks for HTML tables with semantic <th> header rows that map to contact fields.
@@ -1070,6 +1137,36 @@ PageAnalyzer.prototype.analyzeHtml = function(html, url) {
         }
     } catch (e) {
         // Label-value detection failed, continue
+    }
+
+    // Content-based FLIPBOOK detection
+    try {
+        const flipbookSignals = [];
+
+        // Signal 1: FlipHTML5/Flipbuilder/AnyFlip script references
+        if (/fliphtml5|flipbuilder|anyflip|flipsnack/i.test(html)) {
+            flipbookSignals.push('flipbook platform script');
+        }
+
+        // Signal 2: Flipbook container class/id
+        if (/class\s*=\s*["'][^"']*flipbook[^"']*["']|id\s*=\s*["'][^"']*flipbook[^"']*["']/i.test(html)) {
+            flipbookSignals.push('flipbook container element');
+        }
+
+        // Signal 3: URL keywords
+        if (/\/(flipbook|digital-catalog|e-catalog|online-catalog|ecatalog)\b/i.test(url)) {
+            flipbookSignals.push('flipbook URL keyword');
+        }
+
+        if (flipbookSignals.length >= 1) {
+            result.pageType = PAGE_TYPES.DOCUMENT_VIEWER;
+            result.isDocumentViewer = true;
+            result.documentViewerIndicators = flipbookSignals;
+            console.log(`[PageAnalyzer] Content fingerprint: flipbook (${flipbookSignals.join(', ')})`);
+            return result;
+        }
+    } catch (e) {
+        // Flipbook detection failed, continue
     }
 
     // SPA catalog detection — generic rules first, hostname as fallback
