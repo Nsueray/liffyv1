@@ -1,5 +1,5 @@
 /**
- * LIFFY Label-Value Miner v1.0
+ * LIFFY Label-Value Miner v1.1
  *
  * Extracts data from flat HTML directory listings where entries follow a
  * bold-label:value pattern separated by <br> tags.
@@ -12,6 +12,12 @@
  *   <b>Email:</b> <a href="mailto:xxx">xxx</a><br>
  *   <b>Website:</b> <a href="xxx">xxx</a><br>
  *   <br><br>  ← separator to next entry
+ *
+ * Also handles Turkish directory format:
+ *   <b>Firma Adı : COMPANY NAME</b><br>
+ *   <b>Adres:</b> value<br>
+ *   <b>Yetkili Kişi:</b> CONTACT NAME<br>
+ *   <b>Tel:</b> xxx; <b>Faks:</b> xxx; <b>e-mail:</b> xxx; <b>web:</b> xxx
  *
  * Returns raw card data — normalization handled by flowOrchestrator.
  *
@@ -30,7 +36,7 @@ const LABEL_KEYWORDS = {
   ],
   phone: [
     'phone', 'tel', 'telephone', 'telefon', 'teléfono', 'telefono',
-    'telefone', 'mob', 'mobile', 'fax', 'gsm'
+    'telefone', 'mob', 'mobile', 'fax', 'faks', 'gsm'
   ],
   email: [
     'email', 'e-mail', 'mail', 'e mail', 'e-posta', 'eposta',
@@ -100,9 +106,11 @@ async function runLabelValueMiner(page, url, config = {}) {
 
   // Extract entries via page.evaluate
   const rawEntries = await page.evaluate(() => {
-    // Find the content container: the smallest element that contains all "Address:" labels
-    const allElements = Array.from(document.querySelectorAll('*'));
-    const containers = allElements.filter(el => {
+    // Find the content container — use targeted selectors instead of querySelectorAll('*')
+    // to avoid O(n * innerText) performance disaster on large pages (22K+ elements)
+    const CONTAINER_SELECTORS = 'table, tbody, article, main, section, div.entry-content, div.post-content, div.content, div.page-content, div.wpb_wrapper, body';
+    const candidates = Array.from(document.querySelectorAll(CONTAINER_SELECTORS));
+    const containers = candidates.filter(el => {
       const text = el.innerText || '';
       const addressCount = (text.match(/\bAddress\b|\bAdresse\b|\bDirección\b|\bAdres\b/gi) || []).length;
       return addressCount >= 2;
@@ -119,7 +127,17 @@ async function runLabelValueMiner(page, url, config = {}) {
     if (boldElements.length === 0) return [];
 
     // Known label patterns (checked client-side for speed)
-    const LABEL_PATTERNS = /^(address|adresse|dirección|direccion|adres|indirizzo|endereço|endereco|phone|tel|telephone|telefon|teléfono|telefono|telefone|mob|mobile|fax|gsm|email|e-mail|mail|e mail|e-posta|eposta|correo|courriel|website|web|web site|site web|sitio web|homepage|internet|url|webpage)(\s*\/\s*(phone|tel|telephone|telefon|fax|mobile|gsm|mob))?\s*:?\s*$/i;
+    // Includes Turkish: faks, yetkili kişi/kisi, kayıt tarihi/kayit tarihi, firma adı/adi
+    const LABEL_PATTERNS = /^(address|adresse|dirección|direccion|adres|indirizzo|endereço|endereco|phone|tel|telephone|telefon|teléfono|telefono|telefone|mob|mobile|fax|faks|gsm|email|e-mail|mail|e mail|e-posta|eposta|correo|courriel|website|web|web site|site web|sitio web|homepage|internet|url|webpage)(\s*\/\s*(phone|tel|telephone|telefon|fax|faks|mobile|gsm|mob))?\s*:?\s*$/i;
+
+    // Labels that are recognized but should be skipped (not company names, not data fields)
+    const SKIP_LABEL = /^(kay[ıi]t\s+tarihi|date|datum|fecha|registration\s+date|tarih)\s*$/i;
+
+    // Contact name labels (extract value as contact_name, not company)
+    const CONTACT_LABEL = /^(yetkili\s+ki[şs]i|yetkili|contact\s+person|contact|ansprechpartner|personne\s+de\s+contact|responsable)\s*$/i;
+
+    // Company name labels: "Firma Adı : COMPANY" pattern
+    const COMPANY_LABEL = /^firma\s+ad[ıi]\s*:\s*/i;
 
     const entries = [];
     let currentEntry = null;
@@ -131,15 +149,53 @@ async function runLabelValueMiner(page, url, config = {}) {
       const cleanedForLabel = text.replace(/:\s*$/, '').trim();
       const isLabel = LABEL_PATTERNS.test(cleanedForLabel);
 
+      // Check for skip labels (recognized but ignored — don't start new entry)
+      if (SKIP_LABEL.test(cleanedForLabel)) {
+        continue;
+      }
+
+      // Check for contact name label
+      if (CONTACT_LABEL.test(cleanedForLabel)) {
+        if (currentEntry) {
+          // Extract value after the bold as contact_name
+          let textAfter = '';
+          let node = bold.nextSibling;
+          let nodeCount = 0;
+          while (node && nodeCount < 10) {
+            if (node.nodeType === 3) {
+              textAfter += node.textContent;
+            } else if (node.tagName === 'BR' || node.tagName === 'B' || node.tagName === 'STRONG') {
+              break;
+            } else {
+              textAfter += node.textContent || '';
+            }
+            node = node.nextSibling;
+            nodeCount++;
+          }
+          const val = textAfter.replace(/;\s*$/, '').trim();
+          if (val && val.length > 1) {
+            currentEntry.contact_name = val;
+          }
+        }
+        continue;
+      }
+
+      // Check for "Firma Adı : COMPANY" pattern
+      if (COMPANY_LABEL.test(text)) {
+        if (currentEntry && currentEntry.company_name) {
+          entries.push(currentEntry);
+        }
+        const companyName = text.replace(COMPANY_LABEL, '').trim();
+        currentEntry = { company_name: companyName || text, address: null, phone: null, email: null, website: null, contact_name: null };
+        continue;
+      }
+
       if (!isLabel) {
         // This is a company name — start new entry
         if (currentEntry && currentEntry.company_name) {
           entries.push(currentEntry);
         }
-        currentEntry = { company_name: text, address: null, phone: null, email: null, website: null };
-
-        // Check if there's a subtitle (next sibling text node before the next bold)
-        // Skip — raw data, normalizer can handle
+        currentEntry = { company_name: text, address: null, phone: null, email: null, website: null, contact_name: null };
       } else if (currentEntry) {
         // This is a label — extract value from siblings/next nodes
         const labelLower = cleanedForLabel.toLowerCase();
@@ -147,7 +203,7 @@ async function runLabelValueMiner(page, url, config = {}) {
         // Determine field type
         let field = null;
         if (/address|adresse|dirección|direccion|adres|indirizzo|endereço|endereco/i.test(labelLower)) field = 'address';
-        else if (/phone|tel|telephone|telefon|teléfono|telefono|telefone|mob|mobile|fax|gsm/i.test(labelLower)) field = 'phone';
+        else if (/phone|tel|telephone|telefon|teléfono|telefono|telefone|mob|mobile|fax|faks|gsm/i.test(labelLower)) field = 'phone';
         else if (/email|e-mail|mail|e.mail|e-posta|eposta|correo|courriel/i.test(labelLower)) field = 'email';
         else if (/website|web|site web|sitio web|homepage|internet|url|webpage/i.test(labelLower)) field = 'website';
 
@@ -275,7 +331,7 @@ async function runLabelValueMiner(page, url, config = {}) {
     phone: entry.phone || null,
     website: entry.website || null,
     address: entry.address || null,
-    contact_name: null,
+    contact_name: entry.contact_name || null,
     job_title: null,
     country: null,
     city: null
