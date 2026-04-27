@@ -1044,7 +1044,11 @@ ReedExpo sites where emails are visible as `mailto:` links directly in HTML (no 
 
 **Matching strategy:** Two-pass — exact match first, then longest substring match. Prevents ambiguous matches (e.g., `公司网站` → website, not company).
 
-**Fallback:** If column-aware produces 0 results, falls back to existing heuristic (bold text, first line, card selectors).
+**Fallback:** If column-aware produces 0 results AND emails exist, falls back to existing heuristic (bold text, first line, card selectors).
+
+**Email-optional (2026-04-27):** Tables with company names but no email column are now accepted. Row-level email extraction is optional. Company-based dedup added alongside email dedup.
+
+**Progressive scroll (2026-04-27):** Single scroll replaced with 4-attempt progressive scroll. DOM element count tracked (tr, card, item, listing, member selectors). Early stop when no new content loaded between scroll attempts.
 
 ## SuperMiner Status Update Bug Fix (2026-04-07)
 
@@ -2635,5 +2639,141 @@ Client-side filtering (no backend changes):
 5. No inbound webhook errors in logs for Siema Mail campaign period
 
 **Conclusion:** Genuinely 0 replies. Target audience was Russian/Chinese (low English reply rate), campaign was 3-7 days old at analysis time. No technical issues found.
+
+---
+
+## Miner Improvements — Additive Fixes (2026-04-27)
+
+Constitution rule relaxed for additive-only improvements. No existing logic removed — only additions/extensions.
+
+### playwrightTableMiner — Email-Optional Tables + Progressive Scroll
+
+**Problem 1:** Tables with company names but no email column were skipped entirely (email was mandatory).
+
+**Fix:** Relaxed requirement at 3 levels:
+1. **Table-level:** `parseColumnAwareTable()` now accepts tables with company OR email column (was: email required)
+2. **Row-level:** Email extraction is optional per row — rows with only company name are kept
+3. **mine() function:** Early return when `allEmails.length === 0` removed — column-aware parsing always runs
+4. **Dedup:** Company-based dedup added alongside email dedup (`usedCompanies` Set)
+5. **Heuristic fallback:** Gated with `if (contacts.length === 0 && allEmails.length > 0)` — only runs when column-aware produced nothing and emails exist
+
+**Problem 2:** Single scroll missed lazy-loaded content (infinite scroll, virtual lists).
+
+**Fix:** Progressive scroll replaces single scroll:
+```javascript
+let prevElementCount = 0;
+for (let scrollAttempt = 0; scrollAttempt < 4; scrollAttempt++) {
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForTimeout(1500);
+    const currentCount = await page.evaluate(() =>
+        document.querySelectorAll('tr, [class*="card"], [class*="item"], .listing, .member').length
+    );
+    if (currentCount === prevElementCount && scrollAttempt > 0) break;
+    prevElementCount = currentCount;
+}
+```
+- 4 scroll attempts max
+- DOM element count check (tr, card, item, listing, member selectors)
+- Early stop when no new content loaded
+
+**Files:** `backend/services/urlMiners/playwrightTableMiner.js`
+
+### contactPageMiner — Smart Generic Email Handling
+
+**Problem:** When contactPageMiner found a generic email (info@, contact@, office@) on the homepage, it stopped searching — missing potential personal emails on /contact or /about pages.
+
+**Fix:** `tryPage()` return logic changed:
+- Personal email found → `return true` (stop, best quality)
+- Only generic emails found → `return false` (save results, keep searching)
+- No emails found → `return false` (continue)
+
+Accumulated results from all pages are returned at end. If a personal email is found on any subsequent page, search stops immediately.
+
+**Files:** `backend/services/urlMiners/contactPageMiner.js`
+
+### Shared Utility Modules (New Files)
+
+Created shared modules for new miners to use (existing miners untouched):
+
+| Module | Contents |
+|--------|----------|
+| `backend/services/shared/emailRegex.js` | EMAIL_REGEX, 25 GENERIC_PREFIXES, 13 JUNK_PREFIXES, 27 JUNK_EMAIL_DOMAINS, extractEmails(), isGenericEmail(), isJunkEmail() |
+| `backend/services/shared/phoneRegex.js` | PHONE_REGEX (international), NIGERIAN_MOBILE/LANDLINE, extractPhones(), cleanPhone(), normalizePhone() |
+| `backend/services/shared/urlFilters.js` | 30 SOCIAL_HOSTS, 8 MAP_HOSTS, 23 JUNK_HOSTS, isSocialUrl(), isMapUrl(), isJunkUrl(), shouldFilterUrl() |
+
+**Rule:** New miners import from shared modules. Existing miners keep their own lists for backward compatibility (Constitution: never modify existing miners).
+
+---
+
+## PageAnalyzer Content-Based Detection + SPA Auto-Detection (2026-04-27)
+
+**Problem:** PageAnalyzer relied entirely on hostname lists for page type detection. Unknown domains (not in any list) defaulted to generic handling, missing opportunities for correct miner routing.
+
+**Solution:** Added content fingerprint analysis as fallback tier. Domain-based detection (fast path) is preserved and runs first.
+
+### Detection Architecture
+
+```
+URL → PageAnalyzer.analyze()
+  │
+  ├─ Tier 1: Domain-based (hostname match)
+  │   ├─ DIRECTORY_DOMAINS → DIRECTORY
+  │   ├─ MEMBER_TABLE_DOMAINS → MEMBER_TABLE
+  │   ├─ REED_EXPO_DOMAINS → REED_EXPO
+  │   ├─ VIS_DOMAINS → VIS_EXHIBITOR
+  │   └─ ... (7 domain lists)
+  │
+  └─ Tier 2: Content fingerprint (HTML analysis, only when Tier 1 misses)
+      ├─ Content directory: Schema.org + cards + URL keywords + pagination
+      ├─ Content member_table: <table> + <th> headers + field types + email rows
+      ├─ Content label_value: bold label pattern ≥3 times
+      ├─ Content flipbook: FlipHTML5/Flipbuilder/AnyFlip scripts + containers
+      └─ SPA detection: empty roots + hydration markers + JS-heavy
+```
+
+### Content-Based Directory Detection (NEW)
+
+Signals (2+ required):
+1. **Schema.org markup:** `LocalBusiness` or `Organization` in JSON-LD or microdata
+2. **Repeated card structures:** 5+ elements matching `.card`, `.listing`, `.company`, `.exhibitor`, `article`, `[itemtype]`
+3. **URL keywords:** `/directory`, `/listing`, `/companies`, `/members`, `/exhibitors`, `/suppliers`, `/vendors` in URL path
+4. **Pagination + phone density:** Pagination element exists AND 3+ phone number patterns on page
+
+### Content-Based Flipbook Detection (NEW)
+
+Signals (1+ required):
+1. **Platform scripts:** `fliphtml5`, `flipbuilder`, `anyflip`, `flipsnack` in HTML
+2. **Container elements:** `class="flipbook"` or `id="flipbook"` in DOM
+3. **URL keywords:** `/flipbook/`, `/digital-catalog/`, `/e-catalog/`, `/online-catalog/`, `/ecatalog/` in URL
+
+Detection maps to `PAGE_TYPES.DOCUMENT_VIEWER` → routes to documentMiner.
+
+### SPA Detection Strengthened (ENHANCED)
+
+Added 2 new rules to existing `detectSpaCatalog()`:
+- **Rule 5 — State hydration markers:** `__INITIAL_STATE__`, `__APOLLO_STATE__`, `window.__INITIAL`, `__NUXT__`, `__NEXT_DATA__` in script content
+- **Rule 6 — JS-heavy page:** Body text < 500 characters AND total HTML > 50KB (content rendered by JavaScript)
+
+Existing 4 rules preserved:
+- Rule 1: Small HTML + many scripts
+- Rule 2: Empty SPA root containers (#app, #root, #__nuxt, #__next)
+- Rule 3: "Enable JavaScript" message
+- Rule 4: Framework meta tags (vue, react, angular, nuxt, next)
+
+### Files Changed
+- `backend/services/superMiner/services/pageAnalyzer.js` — 3 content detection blocks added (directory, flipbook, SPA rules 5-6)
+
+---
+
+## Miner Ecosystem Analysis Summary (2026-04-27)
+
+Analysis of the full miner ecosystem (read-only, no code changes):
+
+- **18 miners**, ~10K lines of code, 13 input types
+- **58% of jobs** produce 100+ results, **5% produce 0** results
+- **12-item improvement plan** identified, 5 implemented in this session
+- **7 new miner suggestions:** csvDownloadMiner, infiniteScrollMiner, directoryMiner parallel detail, spaNetworkMiner API pagination, PageAnalyzer feedback loop, multi-language detection, contact enrichment pipeline
+
+See LIFFY_TODO.md K56-K60 for future items.
 
 ---

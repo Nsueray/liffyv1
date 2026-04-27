@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-27 (labelValueMiner Turkish fix, Source Discovery Sprint 3 P1+P2, Siema Mail reply analysis)*
+*Updated: 2026-04-27 (miner improvements, PageAnalyzer content-based detection, shared modules)*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -47,6 +47,10 @@
 | A37 | inlineContactMiner — Cheerio-based inline contact extraction from raw HTML (no Playwright). HtmlCache + HTTP fallback. | P1 | ✅ DONE |
 | A38 | inlineContactMiner execution plan integration — added as fallback step in ALL plans (directory, member_table, label_value, website, table, unknown) | P1 | ✅ DONE |
 | A39 | isPoisoned() false positive fix — block indicators only on short pages (<10KB) or title/h1. WordPress directory blocked. | P1 | ✅ DONE |
+| A40 | playwrightTableMiner email-optional — company OR email sufficient, progressive scroll (4 attempts + DOM count), company+email dedup | P2 | ✅ DONE |
+| A41 | contactPageMiner generic email improvement — generic email found → continue searching for personal email on contact pages | P2 | ✅ DONE |
+| A42 | Shared regex/filter modules — emailRegex.js, phoneRegex.js, urlFilters.js (new miners use these) | P2 | ✅ DONE |
+| A43 | PageAnalyzer content-based detection — directory (Schema.org, cards, URL keywords), flipbook (platform scripts, containers), SPA strengthened (__INITIAL_STATE__, JS-heavy) | P2 | ✅ DONE |
 
 ## B. UI TASKS
 
@@ -277,3 +281,8 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | K53 | Source Discovery Sprint 3 P3 — batch pre-check scoring, saved searches/favorites | P3 | TODO |
 | K54 | Discovery → Campaign flow — mine → list → campaign shortcut (post-mining UX) | P2 | TODO |
 | K55 | E1 Legacy Cleanup — prospects table dual-write removal (analysis: docs/E1_LEGACY_CLEANUP_ANALYSIS.md) | P2 | TODO |
+| K56 | infiniteScrollMiner — genel infinite scroll desteği (kategori sayfaları, lazy-load listeleri) | P2 | TODO |
+| K57 | csvDownloadMiner — CSV/Excel download link tespit + otomatik indirme + parse | P3 | TODO |
+| K58 | directoryMiner paralel detay ziyareti — Promise.all ile 3-5 concurrent detail page | P2 | TODO |
+| K59 | spaNetworkMiner API pagination — otomatik next page token / offset detection | P2 | TODO |
+| K60 | PageAnalyzer feedback loop — domain başarı oranı tracking, detection accuracy improvement | P3 | TODO |

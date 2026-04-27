@@ -215,6 +215,8 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 55. ~~labelValueMiner v1.1~~ ✅ DONE — Turkish labels (Faks→phone, Yetkili Kisi→contact_name, Kayit Tarihi→skip, Firma Adi→company). Container detection `querySelectorAll('*')` → targeted selectors. contact_name in output.
 56. ~~Source Discovery Sprint 3 P1~~ ✅ DONE — Duplicate URL protection (batch-create mining_jobs check, force param, duplicate modal). Prior mining badges in Discover tab (completed/running/failed/pending). Prompt language/region awareness (COUNTRY_LANGUAGES 30+, SOURCE_TYPE_INSTRUCTION).
 57. ~~Source Discovery Sprint 3 P2~~ ✅ DONE — CSV export (Discover + Search History, frontend-only). Search loading UX (skeleton cards, rotating messages, cancel button). Search History filters (source type dropdown, keyword search, counter).
+58. ~~Miner Improvements (Additive)~~ ✅ DONE — playwrightTableMiner: email-optional tables (company OR email sufficient), progressive scroll (4 attempts, DOM element count check, early stop), company+email dedup. contactPageMiner: generic email (info@) found → continue searching for personal email. Shared modules: emailRegex.js, phoneRegex.js, urlFilters.js.
+59. ~~PageAnalyzer Content-Based Detection~~ ✅ DONE — Content fingerprint fallback when domain-based detection misses. Directory (Schema.org, repeated cards, URL keywords, pagination+phones). Flipbook (FlipHTML5/Flipbuilder/AnyFlip scripts, container elements, URL keywords). SPA strengthened (__INITIAL_STATE__, __APOLLO_STATE__, __NEXT_DATA__, JS-heavy detection).
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for detailed task tracking.
 
@@ -278,3 +280,10 @@ reedExpoMiner ✅ DONE — Generic ReedExpo platform exhibitor directories (infi
 reedExpoMailtoMiner ✅ DONE — ReedExpo sites with mailto: emails in HTML (GraphQL'siz fallback). reedExpoMiner sonrası emailsiz org'lar için company-name match ile enrichment.
 playwrightTableMiner: column-aware parse ✅ DONE — Çince/Rusça/Türkçe/çok dilli tablo header desteği. Longest-match keyword eşleştirme. Eski heuristic fallback korundu. Timeout 60s + domcontentloaded.
 inlineContactMiner ✅ DONE — Cheerio-based inline contact extraction from raw HTML. No Playwright, no link following. Uses HtmlCache + HTTP fallback. Added as fallback step in ALL execution plans.
+
+### Shared Utility Modules (2026-04-27)
+New miners should use these shared modules instead of duplicating regex/filter logic:
+- `backend/services/shared/emailRegex.js` — EMAIL_REGEX, extractEmails(), isGenericEmail(), isJunkEmail()
+- `backend/services/shared/phoneRegex.js` — PHONE_REGEX, extractPhones(), cleanPhone(), normalizePhone()
+- `backend/services/shared/urlFilters.js` — isSocialUrl(), isMapUrl(), isJunkUrl(), shouldFilterUrl()
+Existing miners keep their own lists for backward compatibility.

@@ -388,7 +388,7 @@ triggerCanonicalAggregation():
 
 | Miner | Type | Specialty | Status |
 |-------|------|-----------|--------|
-| `playwrightTableMiner` | Playwright | Table/list extraction from structured HTML. Column-aware parse with multilingual header detection (EN/TR/ZH/RU/FR/DE/ES), heuristic fallback. | ACTIVE |
+| `playwrightTableMiner` | Playwright | Table/list extraction from structured HTML. Column-aware parse with multilingual header detection (EN/TR/ZH/RU/FR/DE/ES), email-optional (company OR email sufficient), progressive scroll (4 attempts + DOM count), company+email dedup, heuristic fallback. | ACTIVE |
 | `aiMiner` | Claude AI | Intelligent extraction using AI analysis | ACTIVE |
 | `documentMiner` | HTTP + PDF | Flipbook/PDF/document parsing (pdfplumber table extraction + columnar text parser) | ACTIVE |
 | `directoryMiner` | Playwright | Business directories (card-based layouts, Yellow Pages, etc.) | ACTIVE |
@@ -504,7 +504,93 @@ triggerCanonicalAggregation():
 
 ---
 
-## 7. Local Miner (Remote Execution)
+## 7. Shared Utility Modules
+
+New miners SHOULD use these shared modules instead of duplicating regex/filter lists. Existing miners keep their own lists for backward compatibility.
+
+### Location
+```
+backend/services/shared/
+├── emailRegex.js    — email extraction, generic/junk classification
+├── phoneRegex.js    — phone extraction, cleaning, normalization
+└── urlFilters.js    — social/map/junk URL filtering
+```
+
+### emailRegex.js
+```javascript
+const { extractEmails, isGenericEmail, isJunkEmail } = require('../../shared/emailRegex');
+
+// Extract all valid emails from text (deduplicated, lowercased)
+const emails = extractEmails(pageText);  // → ['john@acme.com', 'info@acme.com']
+
+// Check if email is role-based (info@, contact@, office@, etc.) — 25 prefixes
+isGenericEmail('info@acme.com');  // → true
+
+// Check if email is junk/system (mailer-daemon@, @example.com, @sentry.io, etc.)
+isJunkEmail('bounce@example.com');  // → true
+```
+
+### phoneRegex.js
+```javascript
+const { extractPhones, cleanPhone, normalizePhone } = require('../../shared/phoneRegex');
+
+// Extract phones from text (international + Nigerian patterns, deduplicated)
+const phones = extractPhones(pageText);  // → ['+90 (212) 555-1234', '08012345678']
+
+// Clean and validate a raw phone string (returns null if invalid)
+cleanPhone('tel:+1-800-555-1234');  // → '+1-800-555-1234'
+
+// Normalize to E.164-like format (digits only, preserves +)
+normalizePhone('+90 (212) 555-1234');  // → '+902125551234'
+```
+
+### urlFilters.js
+```javascript
+const { isSocialUrl, isMapUrl, isJunkUrl, shouldFilterUrl } = require('../../shared/urlFilters');
+
+// Check URL categories (30+ social, 8 map, 20+ junk domains)
+isSocialUrl('https://facebook.com/acme');     // → true
+isMapUrl('https://google.com/maps/place/x');  // → true
+isJunkUrl('https://googleapis.com/...');      // → true
+
+// Combined filter — true if URL is social, map, OR junk
+shouldFilterUrl(url);  // → true/false
+```
+
+### Usage Rule
+When writing a **new** miner, import from shared modules:
+```javascript
+const { extractEmails, isJunkEmail } = require('../../shared/emailRegex');
+const { extractPhones } = require('../../shared/phoneRegex');
+const { shouldFilterUrl } = require('../../shared/urlFilters');
+```
+Do NOT copy-paste regex patterns into new miner files. The shared modules are the single source of truth.
+
+---
+
+## 8. PageAnalyzer Content-Based Detection
+
+PageAnalyzer uses a two-tier detection strategy:
+
+### Tier 1: Domain-Based (Fast Path)
+Hostname matching against known domain lists (DIRECTORY_DOMAINS, MEMBER_TABLE_DOMAINS, etc.). Runs first, returns immediately on match. No HTML parsing needed.
+
+### Tier 2: Content Fingerprint (Fallback)
+When no hostname matches, content-based heuristics analyze the fetched HTML:
+
+| Detection | Signals | Threshold |
+|-----------|---------|-----------|
+| **Directory** | Schema.org LocalBusiness/Organization, repeated card structures (5+), URL keywords (/directory, /listing, /companies, /members, /exhibitors), pagination + phone density | 2+ signals |
+| **Flipbook** | FlipHTML5/Flipbuilder/AnyFlip in scripts, `class="flipbook"` container, URL keywords (/flipbook, /digital-catalog, /e-catalog) | 1+ signal |
+| **SPA** | Empty root containers (#app, #root, #__next), JS-required message, framework meta tags, state hydration markers (__INITIAL_STATE__, __APOLLO_STATE__, __NEXT_DATA__), JS-heavy (text < 500 chars + HTML > 50KB) | 1 signal |
+| **Member Table** | `<table>` with `<th>` header row, ≥3 field types matched (company+email+contact_name), ≥3 email rows | All conditions |
+| **Label-Value** | Bold label pattern (`<b>Address:</b>`) ≥3 times, ≥2 unique label types | All conditions |
+
+Content detection runs ONLY when domain-based detection finds no match. This ensures known sites take the fast path while unknown sites still get correctly classified.
+
+---
+
+## 9. Local Miner (Remote Execution)
 
 ### When to Use
 When Liffy detects that the target site blocks its server IP (Render), mining can be executed locally on the admin's machine.
@@ -620,7 +706,7 @@ Trade fair sites have organizer emails (e.g. `info@schall-messen.de`) in page he
 
 ---
 
-## 8. Config Options
+## 10. Config Options
 
 Job config is stored in `mining_jobs.config` (JSONB). Available options:
 
@@ -639,7 +725,7 @@ Job config is stored in `mining_jobs.config` (JSONB). Available options:
 
 ---
 
-## 9. Testing Checklist
+## 11. Testing Checklist
 
 When adding a new miner, verify:
 
