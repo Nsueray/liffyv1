@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-24 (Sequence Builder modernization, constraint fix migration 044, worker diagnostic logging)*
+*Updated: 2026-04-27 (labelValueMiner Turkish fix, Source Discovery Sprint 3 P1+P2, Siema Mail reply analysis)*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -251,7 +251,7 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | K27 | Source Discovery v2 Sprint 1 — RFC, 9 source types, country/industry filters, batch mine, domain dedup, rate limit 429, prompt optimization | P1 | ✅ DONE |
 | K28 | Source Discovery Search History — migration 043, save searches, history tab, mining status badges, batch mine from history | P1 | ✅ DONE |
 | K29 | Source Discovery Sprint 2 — mineability analysis endpoint (POST /api/mining/analyze-url), reason badges, estimated contacts | P2 | ✅ DONE |
-| K30 | Source Discovery Sprint 3 — discovery collections (save/load source sets), review screen before batch mine, domain dedup warnings | P3 | TODO |
+| K30 | Source Discovery Sprint 3 — P1+P2 done (duplicate protection, prior mining, prompt i18n, CSV export, skeleton UX, filters). P3 remaining (saved searches). | P3 | PARTIAL |
 | K31 | Google Custom Search API — parked, 403 PERMISSION_DENIED (deprecated → Vertex AI). SerpAPI/Serper.dev alternatives. | P3 | PARKED |
 | K32 | Mining quality indicators — zero result banner, single-domain warning, quality badges in jobs list | P1 | ✅ DONE |
 | K33 | SPA/JS site mining improvement — increase success rate on most-mined site types | P2 | TODO |
@@ -270,3 +270,10 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | K46 | Sequence Builder modernization — visual timeline, template preview, reorder buttons, inline stats, condition descriptions | P1 | ✅ DONE |
 | K47 | Sequence worker constraint fix — migration 044, DROP CHECK constraints (sequence_recipients + campaign_recipients) | P1 | ✅ DONE |
 | K48 | Sequence worker diagnostic logging — 0-due next time log, SIGTERM source log | P1 | ✅ DONE |
+| K49 | labelValueMiner v1.1 — Turkish labels (Faks, Yetkili Kisi, Kayit Tarihi, Firma Adi) + container performance fix | P1 | ✅ DONE |
+| K50 | Source Discovery Sprint 3 P1 — duplicate URL protection, prior mining badges, prompt language/region hints | P1 | ✅ DONE |
+| K51 | Source Discovery Sprint 3 P2 — CSV export, skeleton loading UX, search history filters | P2 | ✅ DONE |
+| K52 | Siema Mail reply detection analysis — verified working (0 replies genuine, not technical) | P1 | ✅ DONE |
+| K53 | Source Discovery Sprint 3 P3 — batch pre-check scoring, saved searches/favorites | P3 | TODO |
+| K54 | Discovery → Campaign flow — mine → list → campaign shortcut (post-mining UX) | P2 | TODO |
+| K55 | E1 Legacy Cleanup — prospects table dual-write removal (analysis: docs/E1_LEGACY_CLEANUP_ANALYSIS.md) | P2 | TODO |

@@ -2486,3 +2486,154 @@ ALTER TABLE campaign_recipients DROP CONSTRAINT IF EXISTS campaign_recipients_st
 - `backend/server.js` — SIGTERM source log
 
 ---
+
+## labelValueMiner v1.1 — Turkish Label Support + Container Performance Fix
+
+**Date:** 2026-04-27
+
+**Problem:** labelValueMiner returned 0 results on a Turkish WordPress directory page with 1560 entries (6240 labels detected by PageAnalyzer). Root causes: (1) `querySelectorAll('*')` on 22K+ elements with `.innerText` caused O(n * layout reflow) performance disaster, (2) Turkish labels not recognized (Faks, Yetkili Kisi, Kayit Tarihi, Firma Adi).
+
+**Container detection fix:**
+- Old: `querySelectorAll('*')` — iterates ALL DOM elements (~22K on large pages)
+- New: `querySelectorAll('table, tbody, article, main, section, div.entry-content, div.post-content, div.content, div.page-content, div.wpb_wrapper, body')` — targets ~10-20 containers
+
+**Turkish label additions:**
+| Pattern | Type | Behavior |
+|---------|------|----------|
+| `Faks` | phone group | Extracted as phone (alongside fax) |
+| `Yetkili Kisi` / `Yetkili` | CONTACT_LABEL | Extracted as `contact_name` (not company) |
+| `Kayit Tarihi` / Date variants | SKIP_LABEL | Recognized but skipped — prevents entry fragmentation |
+| `Firma Adi : COMPANY` | COMPANY_LABEL | Company name extracted from text after `:` |
+
+**Output change:** `contact_name` field now flows through card output (was hardcoded null).
+
+**Files changed:**
+- `backend/services/urlMiners/labelValueMiner.js` — v1.0 → v1.1
+
+---
+
+## Source Discovery Sprint 3 — P1 Improvements
+
+**Date:** 2026-04-27
+
+### Duplicate URL Protection (batch-create)
+
+`POST /api/mining/batch-create` now checks `mining_jobs` for existing completed/running/pending jobs before creating new ones.
+
+**Backend logic:**
+```sql
+SELECT DISTINCT ON (input) id, input, status, total_found, created_at
+FROM mining_jobs
+WHERE input = ANY($1) AND organizer_id = $2 AND status IN ('completed', 'running', 'pending')
+ORDER BY input, created_at DESC
+```
+
+**Response changes:**
+- `duplicates: [{url, job_id, status, total_found, mined_at}]` — URLs that already have jobs
+- `force: true` in request body skips duplicate check ("Mine Again" flow)
+- New items still get created normally alongside duplicates response
+
+**Frontend modals:**
+- Single URL: "This URL was already mined (147 contacts found on Apr 21). Mine again?" with [Cancel] [Mine Again]
+- Batch: "X already mined, Y new jobs created" with "Re-mine All (X)" option
+- Search History tab already hides mined URLs from selection — no change needed
+
+### Prior Mining Badges (Discover tab)
+
+`POST /api/source-discovery` now enriches results with mining history (same pattern as GET /history):
+```javascript
+// Each source gains: mining_status, mining_found, mining_job_id, mined_at
+```
+
+**Frontend badges in Discover tab results:**
+| Status | Badge | Action |
+|--------|-------|--------|
+| completed | Green "Mined — 147 found" | "Mine Again" link |
+| running | Yellow "Mining..." spinner | — |
+| pending | Yellow "Pending" clock | — |
+| failed | Red "Failed" | "Retry" link |
+| null | Orange "Mine" button | Normal pre-check flow |
+
+### Prompt Language/Region Awareness
+
+**COUNTRY_LANGUAGES mapping** (30+ countries):
+- Turkey → Turkish, France → French, Germany → German
+- Morocco/Algeria/Tunisia → French (francophone)
+- Saudi Arabia/UAE/Egypt → Arabic
+- And 20+ more
+
+**Language hint in user prompt:**
+- Single country: "Prefer Turkish-language sources (e.g. .tr domains)"
+- Multiple countries: "Include sources in relevant local languages (Turkish, French)"
+
+**SOURCE_TYPE_INSTRUCTION** — specific search guidance:
+- `trade_fair`: "Find exhibitor LIST pages, NOT fair homepages or event info pages."
+- `association`: "Find MEMBER DIRECTORY or member list pages, NOT about/contact pages."
+- `business_directory`: "Find searchable company LISTING pages with contact details."
+
+System prompt unchanged. Only user prompt extended (~60 → ~80 words with hints).
+
+**Files changed:**
+- `backend/routes/miningJobs.js` — batch-create duplicate check + force param
+- `backend/routes/sourceDiscovery.js` — prior mining enrichment in POST response
+- `backend/services/sourceDiscovery.js` — COUNTRY_LANGUAGES, SOURCE_TYPE_INSTRUCTION, language hint builder
+- `liffy-ui/app/mining/page.tsx` — DuplicateInfo type, duplicate modals, prior mining badges
+
+---
+
+## Source Discovery Sprint 3 — P2 Improvements
+
+**Date:** 2026-04-27
+
+### Export CSV
+
+Frontend-only CSV export (no backend changes).
+
+**Discover tab:** "Export CSV" button in results header (next to Select All).
+**Search History tab:** "Export CSV" button in each expanded search card.
+
+CSV columns: URL, Source Type, Notes, Estimated Companies, Mining Status, Mined Date.
+Filename: `liffy-discovery-{source_type}-{keyword}-{date}.csv`
+
+Implementation: `exportSourcesCsv()` utility function — `Blob` + `URL.createObjectURL` + `<a download>`.
+
+### Search Loading UX
+
+Replaced static "This may take up to 60 seconds" with:
+
+1. **Skeleton cards** — 4 shimmer/pulse animated placeholder cards matching result card layout
+2. **Rotating messages** — every 5s: "Searching the web for sources...", "Analyzing industry directories...", "Finding company listings...", "Checking member directories...", "Verifying source quality...", "Almost there..."
+3. **Cancel button** — red "Cancel" link calls `AbortController.abort()` via ref, resets loading state
+
+AbortController stored as `useRef` (was local variable) for cancel button access.
+
+### Search History Filters
+
+Client-side filtering (no backend changes):
+
+1. **Source type dropdown** — All Types / Trade Fair / Association / Directory / Catalog / Chamber / Trade Portal / Gov DB / Custom / URL
+2. **Keyword search** — filters by keyword, industry, and countries in search metadata
+3. **Counter** — "Showing X of Y searches"
+4. **Clear filters** — orange link shown when filters active
+
+**Files changed:**
+- `liffy-ui/app/mining/page.tsx` — exportSourcesCsv utility, skeleton cards, loading messages, cancel button, history filters
+
+---
+
+## Siema Mail Reply Detection Analysis
+
+**Date:** 2026-04-27 (read-only analysis, no code changes)
+
+**Campaign:** Siema Mail — 4,387 sent, 608 opened (13.9%), 29 clicked, 0 replied.
+
+**Findings:**
+1. Reply detection code is correct — test campaign captured 3 replies successfully
+2. `buildPlusReplyTo()` generates correct Reply-To headers (`sender+c-xxx-r-xxx@domain.com`)
+3. Gmail Content Compliance rule correctly configured (all users, `+c-` match)
+4. `parsePlusAddress()` + `detectReplySource()` chain tested and working
+5. No inbound webhook errors in logs for Siema Mail campaign period
+
+**Conclusion:** Genuinely 0 replies. Target audience was Russian/Chinese (low English reply rate), campaign was 3-7 days old at analysis time. No technical issues found.
+
+---

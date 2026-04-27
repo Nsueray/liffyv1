@@ -104,6 +104,9 @@
 - **File Upload Fix (1GB)** — multer switched from memoryStorage to diskStorage, limit 50MB→1GB. Frontend: XMLHttpRequest upload progress bar ("Uploading... 45%"), large file warning >100MB, size text "1GB". Failed PDF banner on job detail (purple, "Download PDF" + "Retry with File Upload" buttons).
 - **Sequence Builder Modernization** — Visual timeline with orange "Wait N days" pill nodes between step cards. Template preview hover popover (subject + body preview + "Open template" link). Condition descriptions ("If no reply after 4 days, send this follow-up"). Inline step performance stats (sent/delivered%/opened%/clicked%). Up/down reorder buttons (editable state, POST /reorder). Sequencing status analytics fix. Total duration display. Orange accent color scheme.
 - **Sequence Worker Constraint Fix (Migration 044)** — DROP CHECK constraints on sequence_recipients + campaign_recipients. CAS 'sending' status was blocked by constraint. Diagnostic logging: 0-due next time, SIGTERM source.
+- **labelValueMiner v1.1** — Turkish label support (Faks, Yetkili Kisi → contact_name, Kayit Tarihi → skip, Firma Adi → company). Container detection: `querySelectorAll('*')` → targeted selectors (22K→10 elements). contact_name in card output.
+- **Source Discovery Sprint 3 P1** — (1) Duplicate URL protection: batch-create checks mining_jobs, duplicate modal with "Mine Again" option. (2) Prior mining badges in Discover tab: completed (green), running (yellow), failed (red+Retry), pending (yellow). (3) Prompt language/region: COUNTRY_LANGUAGES (30+), SOURCE_TYPE_INSTRUCTION, "Prefer Turkish-language sources" hints.
+- **Source Discovery Sprint 3 P2** — (1) Export CSV from Discover + Search History (frontend-only Blob download). (2) Search loading UX: skeleton cards, rotating messages (5s), cancel button (AbortController ref). (3) Search History filters: source type dropdown + keyword search + "Showing X of Y" + clear filters.
 
 ---
 

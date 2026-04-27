@@ -212,6 +212,9 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 52. ~~PDF Memory-Safe Processing~~ ✅ DONE — DocumentMiner stream-to-disk (was memory), HEAD size check, 5min timeout. urlAnalyzer PDF detection with size badges. File upload: multer diskStorage 1GB (was memoryStorage 50MB). Upload progress bar. Failed PDF banner.
 53. ~~Sequence Builder Modernization~~ ✅ DONE — Visual timeline (orange "Wait N days" pills), template preview popover (hover → subject + body + link), condition descriptions, inline step performance stats, reorder buttons (↑↓), sequencing status analytics fix, total duration display.
 54. ~~Sequence Worker Constraint Fix~~ ✅ DONE — Migration 044: DROP CHECK constraints on sequence_recipients + campaign_recipients. CAS 'sending' status blocked by constraint. Diagnostic logging (0-due next time, SIGTERM source).
+55. ~~labelValueMiner v1.1~~ ✅ DONE — Turkish labels (Faks→phone, Yetkili Kisi→contact_name, Kayit Tarihi→skip, Firma Adi→company). Container detection `querySelectorAll('*')` → targeted selectors. contact_name in output.
+56. ~~Source Discovery Sprint 3 P1~~ ✅ DONE — Duplicate URL protection (batch-create mining_jobs check, force param, duplicate modal). Prior mining badges in Discover tab (completed/running/failed/pending). Prompt language/region awareness (COUNTRY_LANGUAGES 30+, SOURCE_TYPE_INSTRUCTION).
+57. ~~Source Discovery Sprint 3 P2~~ ✅ DONE — CSV export (Discover + Search History, frontend-only). Search loading UX (skeleton cards, rotating messages, cancel button). Search History filters (source type dropdown, keyword search, counter).
 
 See [LIFFY_TODO.md](./LIFFY_TODO.md) for detailed task tracking.
 
