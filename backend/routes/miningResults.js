@@ -15,6 +15,20 @@ const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 const MANUAL_MINER_TOKEN = process.env.MANUAL_MINER_TOKEN;
 const IMPORT_BATCH_SIZE = 500;
 
+// Defensive sanitizers for fields that may contain corrupted PDF data
+// (e.g., full page text dumped into city/job_title by documentMiner)
+function sanitizeShortText(text, maxLen = 200) {
+  if (!text || typeof text !== 'string') return null;
+  if (text.length > maxLen) return null;
+  if (text.includes('\n') || text.includes('\r')) return null;
+  if ((text.match(/,/g) || []).length > 5) return null;
+  return text.trim();
+}
+
+function sanitizeCityField(city) {
+  return sanitizeShortText(city, 100);
+}
+
 function authRequired(req, res, next) {
   try {
     const authHeader = req.headers.authorization;
@@ -615,9 +629,9 @@ async function processImportBatch(client, batchRows, organizerId, jobId, tagsArr
              phone = COALESCE(NULLIF(EXCLUDED.phone, ''), affiliations.phone)`,
           [
             organizerId, personId, mr.company_name,
-            mr.job_title || null,
+            sanitizeShortText(mr.job_title, 200),
             mr.country ? mr.country.substring(0, 2).toUpperCase() : null,
-            mr.city || null, mr.website || null,
+            sanitizeCityField(mr.city), mr.website || null,
             mr.phone || null, jobId
           ]
         );
@@ -642,6 +656,18 @@ async function processImportBatch(client, batchRows, organizerId, jobId, tagsArr
       console.error(`Error importing result ${mr.id}:`, rowErr.message);
       errors.push({ id: mr.id, error: rowErr.message });
       skipped++;
+
+      // CRITICAL: Mark as failed so it won't be retried infinitely.
+      // Without this, the batch loop picks this row again forever because
+      // the WHERE clause only excludes status='imported' (production-proven bug).
+      try {
+        await client.query(
+          `UPDATE mining_results SET status = 'failed', updated_at = NOW() WHERE id = $1`,
+          [mr.id]
+        );
+      } catch (markErr) {
+        console.error(`[import-all] Failed to mark row ${mr.id} as failed:`, markErr.message);
+      }
     }
   }
 
@@ -667,15 +693,24 @@ async function processImportInBackground(jobId, organizerId, tagsArray, listId) 
       FROM mining_results mr
       WHERE mr.job_id = $1 AND mr.organizer_id = $2
         AND COALESCE(array_length(mr.emails, 1), 0) > 0
-        AND COALESCE(mr.status, 'new') != 'imported'
+        AND COALESCE(mr.status, 'new') NOT IN ('imported', 'failed')
     `, [jobId, organizerId]);
     const totalToProcess = totalRes.rows[0].total;
     const totalBatches = Math.ceil(totalToProcess / IMPORT_BATCH_SIZE);
 
     console.log(`[import-all] Background processing started for job ${jobId} — ${totalToProcess} results, ~${totalBatches} batches`);
 
+    const MAX_BATCH_ITERATIONS = 1000;
+
     while (true) {
       batchNum++;
+
+      // Defensive guard: prevent infinite loop if failed rows aren't properly excluded
+      if (batchNum > MAX_BATCH_ITERATIONS) {
+        console.error(`[import-all] Max batch iterations (${MAX_BATCH_ITERATIONS}) exceeded for job ${jobId}. Aborting.`);
+        allErrors.push({ batch_error: 'max_batch_iterations_exceeded', iteration: batchNum });
+        break;
+      }
 
       // Fetch next batch (status != 'imported' naturally skips already-processed rows)
       const batchRes = await db.query(`
@@ -685,7 +720,7 @@ async function processImportInBackground(jobId, organizerId, tagsArray, listId) 
         FROM mining_results mr
         WHERE mr.job_id = $1 AND mr.organizer_id = $2
           AND COALESCE(array_length(mr.emails, 1), 0) > 0
-          AND COALESCE(mr.status, 'new') != 'imported'
+          AND COALESCE(mr.status, 'new') NOT IN ('imported', 'failed')
         ORDER BY mr.id
         LIMIT $3
       `, [jobId, organizerId, IMPORT_BATCH_SIZE]);
@@ -864,7 +899,7 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
       FROM mining_results mr
       WHERE mr.job_id = $1 AND mr.organizer_id = $2
         AND COALESCE(array_length(mr.emails, 1), 0) > 0
-        AND COALESCE(mr.status, 'new') != 'imported'
+        AND COALESCE(mr.status, 'new') NOT IN ('imported', 'failed')
     `, [jobId, organizerId]);
 
     const totalToImport = countRes.rows[0].total;
@@ -1010,7 +1045,7 @@ router.get('/api/mining/jobs/:id/import-preview', authRequired, validateJobId, a
     const countRes = await db.query(`
       SELECT
         COUNT(*) FILTER (WHERE COALESCE(array_length(mr.emails, 1), 0) > 0) as with_email,
-        COUNT(*) FILTER (WHERE COALESCE(array_length(mr.emails, 1), 0) > 0 AND COALESCE(mr.status, 'new') != 'imported') as importable,
+        COUNT(*) FILTER (WHERE COALESCE(array_length(mr.emails, 1), 0) > 0 AND COALESCE(mr.status, 'new') NOT IN ('imported', 'failed')) as importable,
         COUNT(*) FILTER (WHERE COALESCE(mr.status, 'new') = 'imported') as already_imported,
         COUNT(*) as total
       FROM mining_results mr
