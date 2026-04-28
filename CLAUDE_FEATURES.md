@@ -2777,3 +2777,37 @@ Analysis of the full miner ecosystem (read-only, no code changes):
 See LIFFY_TODO.md K56-K60 for future items.
 
 ---
+
+## Mining Numbers — Single Source of Truth
+
+Mining produces multiple counts at different pipeline stages. These are the canonical terms:
+
+| Term | DB Source | Meaning |
+|------|-----------|---------|
+| **Raw entries** | `COUNT(*) FROM mining_results WHERE job_id = X` | Every row the miner extracted — includes duplicates across pages/tables |
+| **Unique contacts** | `mining_jobs.total_found` | After email-based dedup by resultAggregator (1 email = 1 contact) |
+| **Imported** | `import_progress.imported` | Successfully written to persons + affiliations tables |
+| **Failed** | `import_progress.errors.length` | Rows that threw an error during import (marked `status='failed'`) |
+| **Skipped** | `import_progress.skipped` | Batch-internal duplicates (same email twice in one batch) |
+
+### Why raw entries > unique contacts?
+
+PDF parser or multi-page crawl may find the same person in multiple tables/pages. Each occurrence creates a separate `mining_results` row. `resultAggregator` deduplicates by email before writing `total_found`.
+
+**Example:** PDF with 318 raw entries → 159 unique contacts (each email appears ~2x across different tables in the PDF).
+
+### Why imported ≤ unique contacts?
+
+Each unique email maps to 1 person. `imported = unique contacts that passed validation`. Some may fail (VARCHAR overflow, constraint violation) and get marked as `failed`.
+
+### UI mapping
+
+| UI Page | What to show |
+|---------|-------------|
+| Jobs list (table) | `Contacts` column = `total_found`, `Raw` column = `total_emails_raw` |
+| Job detail | Unique Contacts = `total_found`, Raw Entries = `total_emails_raw` |
+| Results page header | `{count} raw entries` |
+| Import preview | Raw entries, With email, Pending import, Already imported |
+| Import progress | `X imported, Y failed, Z skipped` |
+
+---

@@ -2,7 +2,7 @@
 
 > See also: [CLAUDE.md](./CLAUDE.md), [CLAUDE_DB.md](./CLAUDE_DB.md), [CLAUDE_FEATURES.md](./CLAUDE_FEATURES.md), [CLAUDE_UI.md](./CLAUDE_UI.md), [MINER_GUIDE.md](./MINER_GUIDE.md), [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md)
 
-*Updated: 2026-04-27 (miner improvements, PageAnalyzer content-based detection, shared modules)*
+*Updated: 2026-04-28 (mining import pipeline critical fixes, UI terminology, operations runbook)*
 
 ## A. MINING ENGINE (Refactor Remaining)
 
@@ -286,3 +286,4 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | K58 | directoryMiner paralel detay ziyareti — Promise.all ile 3-5 concurrent detail page | P2 | TODO |
 | K59 | spaNetworkMiner API pagination — otomatik next page token / offset detection | P2 | TODO |
 | K60 | PageAnalyzer feedback loop — domain başarı oranı tracking, detection accuracy improvement | P3 | TODO |
+| K61 | Mining import pipeline critical fixes — (1) infinite loop: catch block marks failed rows, WHERE excludes failed, MAX_BATCH_ITERATIONS=1000 guard. (2) Migration 045: VARCHAR(255)→TEXT for 7 columns. (3) sanitizeShortText/sanitizeCityField PDF garbage rejection. Production validated: 21 rows in 5.5s, 0 errors. Commit 38bfc22, migration 045 applied. | P1 | ✅ DONE |
