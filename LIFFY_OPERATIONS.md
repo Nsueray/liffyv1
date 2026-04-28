@@ -56,10 +56,13 @@ PGPASSWORD=<password> psql \
 - Workspace: My Workspace
 - Manual deploy: service > "Manual Deploy" > "Deploy latest commit" or "Clear cache & deploy"
 
-## Repos
-- **liffyv1** — backend (Node/Express), `/Users/nsa/Projects/liffyv1`
-- **liffy-ui** — frontend (Next.js), `/Users/nsa/Projects/liffy-ui`
-- **liffy-local-miner** — local CLI mining tool, `/Users/nsa/Projects/liffy-local-miner`
+## Repos & Paths
+
+| Repo | Local Path | Remote (origin) | Branch | Render Service(s) |
+|------|-----------|-----------------|--------|-------------------|
+| liffyv1 | `/Users/nsa/Projects/liffyv1` | `https://github.com/Nsueray/liffyv1.git` | main | liffy-api, liffy-worker-docker |
+| liffy-ui | `/Users/nsa/Projects/liffy-ui` | `https://github.com/Nsueray/liffy-ui.git` | main | liffy-ui (Next.js) |
+| liffy-local-miner | `/Users/nsa/Projects/liffy-local-miner` | `https://github.com/Nsueray/liffy-local-miner.git` | main | (none — local CLI) |
 
 ## Migration Workflow
 
