@@ -287,3 +287,6 @@ Note: Zoho CRM push is optional (P3), not part of core prospect flow.
 | K59 | spaNetworkMiner API pagination — otomatik next page token / offset detection | P2 | TODO |
 | K60 | PageAnalyzer feedback loop — domain başarı oranı tracking, detection accuracy improvement | P3 | TODO |
 | K61 | Mining import pipeline critical fixes — (1) infinite loop: catch block marks failed rows, WHERE excludes failed, MAX_BATCH_ITERATIONS=1000 guard. (2) Migration 045: VARCHAR(255)→TEXT for 7 columns. (3) sanitizeShortText/sanitizeCityField PDF garbage rejection. Production validated: 21 rows in 5.5s, 0 errors. Commit 38bfc22, migration 045 applied. | P1 | ✅ DONE |
+|  | K61a: UI TypeScript fix — importProgress.errors?.length optional chaining (Render build fail). Commit 7c2650f (liffy-ui). | P1 | ✅ DONE |
+|  | K61b: Worker cache corruption — Render Docker layer cache bozuldu (e1218d9). Manual "Clear cache & deploy" ile cozuldu. Kod degisikligi yok. | P1 | ✅ DONE |
+|  | K61c: Production retry validation — 21 failed rows retry edildi, 21/21 imported 5.5s 0 error. End-to-end fix dogrulamasi. | P1 | ✅ DONE |

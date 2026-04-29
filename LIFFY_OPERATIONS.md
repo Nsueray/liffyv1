@@ -145,6 +145,8 @@ WHERE l.relation::regclass::text = '<TABLE_NAME>';
 ### 2026-04-28 — Mining Import Pipeline Critical Fixes
 - Migration 045 applied (VARCHAR-to-TEXT for affiliations.company_name/position/city, prospects.name/company, persons.first_name/last_name)
 - Commit 38bfc22 deployed (loop fix in processImportBatch + sanitize helpers + MAX_BATCH_ITERATIONS guard)
-- Worker manual restart performed (PG schema cache)
-- Validated: job 12e8aabf-... 21 rows imported in 5.5s, 0 errors
+- Commit 7c2650f (liffy-ui) — TypeScript optional chaining fix for importProgress.errors (Render build fail)
+- Worker cache corruption recovered — Render Docker layer cache bozuldu (commit e1218d9), manual "Clear cache & deploy" ile cozuldu. Kod degisikligi degil, infra sorunu.
+- Worker manual restart performed (PG schema cache after DDL)
+- Final validation: job 12e8aabf-... 21 failed rows retry edildi, 21/21 imported in 5.5s, 0 errors
 - Documented: MINING_IMPORT_BUG_REPORT.md, MINING_VARCHAR_INVESTIGATION.md
