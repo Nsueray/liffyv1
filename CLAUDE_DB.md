@@ -60,7 +60,8 @@ Engagement is stored as events, not scores.
 | Table | Status | Migration | Notes |
 |-------|--------|-----------|-------|
 | `persons` | ACTIVE | 015 | Identity layer. `(organizer_id, LOWER(email))` unique. Populated by aggregationTrigger + backfill + CSV upload. |
-| `affiliations` | ACTIVE | 016 | Person-company relationships. Additive only. Populated by aggregationTrigger + backfill + CSV upload. |
+| `affiliations` | ACTIVE | 016, 046 | Person-company relationships. Additive only. Populated by aggregationTrigger + backfill + CSV upload. `company_id` UUID FK to companies (nullable, backfill Week 2). |
+| `companies` | ACTIVE | 046 | Canonical company entity. One row per normalized name per organizer (ADR-014 Phase 1). `country_code` CHAR(2) soft FK to core_countries (cross-system, no FK constraint). `sector_id` INTEGER soft FK to core_sectors (cross-system, no FK constraint). Dedup: UNIQUE(organizer_id, name_normalized). Trigger: auto updated_at. |
 | `prospect_intents` | ACTIVE | 017 | Intent signals. Populated by webhook (reply, click_through). |
 | `campaign_events` | ACTIVE | 018 | Immutable event log. Populated by webhook + campaignSend + backfill. |
 | `verification_queue` | ACTIVE | 019 | Email verification queue. Processed by worker via ZeroBounce API. |
@@ -198,6 +199,10 @@ Located in `backend/scripts/`. One-time, idempotent, `--dry-run` supported.
 | 040 | `040_template_sender_visibility.sql` | ALTER `email_templates` (+visibility, +created_by_user_id), ALTER `sender_identities` (+visibility) — upward visibility scope (ADR-015) |
 | 041 | `041_allow_multiple_reply_actions.sql` | DROP + recreate `idx_action_items_dedup` excluding `reply_received` — every reply creates new P1 action item |
 | 042 | `042_cleanup_company_industry.sql` | Data cleanup: email domain company_name → NULL (~887 rows), industry typo normalization (Otomotiv→Automotive, Lojistik→Logistics, etc.) |
+| 043 | `043_create_discovery_searches.sql` | `discovery_searches` (Source Discovery search history) |
+| 044 | `044_drop_status_check_constraints.sql` | DROP CHECK constraints on sequence_recipients + campaign_recipients (CAS 'sending' status) |
+| 045 | `045_varchar_to_text.sql` | ALTER affiliations (company_name, position, city → TEXT), prospects (name, company → TEXT), persons (first_name, last_name → TEXT) |
+| 046 | `046_create_companies.sql` | `companies` table (ADR-014 Phase 1, ELL_RULES v4). ALTER `affiliations` (+company_id UUID FK). pg_trgm extension. updated_at trigger. |
 
 ---
 
