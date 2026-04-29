@@ -1,6 +1,14 @@
 # AI Miner Generator — Proje Raporu v2 (Yeni Yaklaşım)
 
-> **Status:** AKTİF GELİŞTİRME — Park'tan çıkarıldı, yeni mimari ile devam
+> **🗄️ HISTORICAL — Project Retired (April 2026)**
+>
+> Bu rapor AI Miner Generator v2 deneme sonuçlarını dokümante eder. Proje resmi olarak retire edilmiştir; bu rapor tarihsel referans olarak korunmaktadır.
+>
+> **Detay:** `RFC_v3_AI_Miner_Generator.md` archive notuna bakınız.
+>
+> **Tarih:** April 2026
+
+> **Status:** ~~AKTİF GELİŞTİRME~~ ARCHIVED — project retired
 > **Tarih:** 2025-03-06 v2
 > **Review:** ChatGPT (selector discovery önerisi), Gemini (AXTree + Self-Healing REPL + HITL raporu)
 

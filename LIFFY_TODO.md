@@ -33,12 +33,12 @@
 | A23 | Node.js heap limit (NODE_OPTIONS env var) | P1 | ✅ DONE (startup log + Render manual config) |
 | A24 | Excel mining quality — column mapping improvement (two-pass matching, first/last name merge, multilingual keywords) | P2 | ✅ DONE |
 | A25 | flipbookMiner v2 — dual-path extraction (column-position + isolateSegment for pre/code layouts) | P1 | ✅ DONE |
-| A26 | AI Miner Generator v2 — AXTree integration (Playwright ariaSnapshot) | P1 | ✅ DONE |
-| A27 | AI Miner Generator v2 — GenericExtractor templates (config-driven, anchor+container+bulk modes) | P1 | ✅ DONE |
-| A28 | AI Miner Generator v2 — Self-healing REPL loop (3-5 iterations) | P1 | ✅ DONE (code ready, needs more testing) |
-| A29 | AI Miner Generator v2 — Multi-step config (listing + detail AXTree) — expat.com 7 contact best case | P1 | ✅ DONE |
-| A30 | AI Miner Generator v2 — Test sonuçları: glmis ✅ 11, expat.com ✅ 7 (best), performans 24dk→2dk. Kalan sorun: Claude non-deterministic (anchor vs container). | P1 | PARKED |
-| A31 | AI Miner Generator v2 — Claude tutarlılık sorunu: aynı AXTree'ye TYPE 1/TYPE 2, anchor/container farklı dönüyor. Prompt veya post-processing iyileştirmesi gerekli. | P2 | TODO |
+| A26 | AI Miner Generator v2 — AXTree integration (Playwright ariaSnapshot) | P1 | ✅ DONE (ARCHIVED — project retired April 2026) |
+| A27 | AI Miner Generator v2 — GenericExtractor templates (config-driven, anchor+container+bulk modes) | P1 | ✅ DONE (ARCHIVED — project retired April 2026) |
+| A28 | AI Miner Generator v2 — Self-healing REPL loop (3-5 iterations) | P1 | ✅ DONE (ARCHIVED — project retired April 2026) |
+| A29 | AI Miner Generator v2 — Multi-step config (listing + detail AXTree) — expat.com 7 contact best case | P1 | ✅ DONE (ARCHIVED — project retired April 2026) |
+| A30 | AI Miner Generator v2 — Test sonuçları: glmis ✅ 11, expat.com ✅ 7 (best), performans 24dk→2dk. Kalan sorun: Claude non-deterministic (anchor vs container). | P1 | ARCHIVED — project retired April 2026 |
+| A31 | AI Miner Generator v2 — Claude tutarlılık sorunu: aynı AXTree'ye TYPE 1/TYPE 2, anchor/container farklı dönüyor. Prompt veya post-processing iyileştirmesi gerekli. | P2 | ARCHIVED — project retired April 2026 |
 | A32 | Local miner — global email pollution detection (frequency-based dedup, 30% threshold) | P1 | ✅ DONE |
 | A33 | SuperMiner status='completed' bug fix — direct path missing final status update, jobs stuck in 'running' forever | P1 | ✅ DONE |
 | A34 | SuperMiner finalization hang fix — deepCrawlAttempted=true, duplicate Flow 2 prevention, 2h Promise.race timeout | P1 | ✅ DONE |

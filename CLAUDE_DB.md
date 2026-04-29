@@ -65,7 +65,7 @@ Engagement is stored as events, not scores.
 | `campaign_events` | ACTIVE | 018 | Immutable event log. Populated by webhook + campaignSend + backfill. |
 | `verification_queue` | ACTIVE | 019 | Email verification queue. Processed by worker via ZeroBounce API. |
 | `zoho_push_log` | ACTIVE | 020 | Zoho CRM push audit trail. Tracks create/update per person+module. |
-| `generated_miners` | ACTIVE | 024 | AI Miner Generator — stores AI-generated extraction per domain. v1: `miner_code` = JavaScript. v2 (geçiş): `miner_code` = JSON config (AXTree selector). Approval workflow + quality tracking. |
+| `generated_miners` | RETIRED (table exists, unused) | 024 | AI Miner Generator için kullanılıyordu. Proje April 2026'da retired. 8 test kaydı pending_approval'da, last_used_at NULL, total_contacts_mined=0. Tablo silinmedi, ama yazma da yok (env var off). |
 | `contact_notes` | ACTIVE | 030 | Per-person notes created by users. |
 | `contact_activities` | ACTIVE | 030 | Auto-logged activity timeline per person (calls, emails, status changes). |
 | `contact_tasks` | ACTIVE | 030 | Follow-up tasks with due dates, priority, assignment. |

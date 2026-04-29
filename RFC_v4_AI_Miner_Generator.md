@@ -1,9 +1,29 @@
 # RFC v4: AI Miner Generator — AXTree + Config-Driven + Self-Healing
 
-> **Status:** AKTİF GELİŞTİRME
-> **Tarih:** 2025-03-06 (v4 — yeni yaklaşım)
-> **Önceki:** v1-v3 park edildi (%29 başarı). v4 = tamamen farklı mimari.
-> **Reviewer consensus:** ChatGPT + Gemini + Claude → 3 temel değişiklik gerekli
+> **🗄️ ARCHIVED — Project Retired (April 2026)**
+>
+> Bu RFC artık aktif değildir. AI Miner Generator projesi resmi olarak retire edilmiştir.
+>
+> **Sebep:**
+> - v1 yaklaşımı (JS kod üretimi) %29 başarı oranıyla park edildi
+> - v4 yaklaşımı (AXTree + config + REPL) tamamlanmadı, geliştirme durdu
+> - Production'da son 54 günde sıfır çağrı, sıfır contact, sıfır approve edilmiş miner
+> - `AI_MINER_GENERATOR_ENABLED` env var production'da kapalı
+>
+> **Mevcut durum:**
+> - Kod (`backend/services/aiMinerGenerator.js`) ve DB tablosu (`generated_miners`) yerinde duruyor
+> - Lazy-load + env var guard nedeniyle hiç çağrılmıyor
+> - Kod silme planlanmıyor (risk var, kazanç yok)
+>
+> **Bunun yerine:** Mining stratejisi 12 manuel miner + insan onaylı source addition'a döndü.
+>
+> **Tarih:** April 2026
+> **Karar veren:** Suer Ay (üç bağımsız AI review sonrası)
+
+**Status:** ARCHIVED — project retired
+**Tarih:** 2025-03-06 (v4 — yeni yaklaşım)
+**Önceki:** v1-v3 park edildi (%29 başarı). v4 = tamamen farklı mimari.
+**Reviewer consensus:** ChatGPT + Gemini + Claude → 3 temel değişiklik gerekli
 
 ---
 

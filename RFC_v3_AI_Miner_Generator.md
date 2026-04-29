@@ -1,8 +1,26 @@
 # RFC v3: AI Miner Generator — Self-Evolving Mining Engine
 
-> **⚠️ SUPERSEDED:** Bu RFC v4 tarafından supersede edilmiştir. v1 yaklaşım (JS kod üretimi) %29 başarı oranıyla park edildi. Yeni yaklaşım için bkz: [RFC_v4_AI_Miner_Generator.md](./RFC_v4_AI_Miner_Generator.md)
+> **🗄️ ARCHIVED — Project Retired (April 2026)**
+>
+> Bu RFC artık aktif değildir. AI Miner Generator projesi resmi olarak retire edilmiştir.
+>
+> **Sebep:**
+> - v1 yaklaşımı (JS kod üretimi) %29 başarı oranıyla park edildi
+> - v4 yaklaşımı (AXTree + config + REPL) tamamlanmadı, geliştirme durdu
+> - Production'da son 54 günde sıfır çağrı, sıfır contact, sıfır approve edilmiş miner
+> - `AI_MINER_GENERATOR_ENABLED` env var production'da kapalı
+>
+> **Mevcut durum:**
+> - Kod (`backend/services/aiMinerGenerator.js`) ve DB tablosu (`generated_miners`) yerinde duruyor
+> - Lazy-load + env var guard nedeniyle hiç çağrılmıyor
+> - Kod silme planlanmıyor (risk var, kazanç yok)
+>
+> **Bunun yerine:** Mining stratejisi 12 manuel miner + insan onaylı source addition'a döndü.
+>
+> **Tarih:** April 2026
+> **Karar veren:** Suer Ay (üç bağımsız AI review sonrası)
 
-**Status:** ~~ACTIVE DEVELOPMENT~~ PARKED — v1 approach (%29 success). Superseded by v4 (AXTree + Config-Driven + Self-Healing).
+**Status:** ARCHIVED — project retired
 **Author:** Liffy Architecture Team
 **Date:** 2025-03-06 (v3 — rewritten based on real-world testing)
 **Reviewers:** Engineering team, ChatGPT (2 rounds), Gemini (deep feasibility report)

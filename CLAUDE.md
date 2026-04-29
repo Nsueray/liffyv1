@@ -7,6 +7,13 @@
 
 ---
 
+## ELL Cross-System Rules
+
+Before making architectural decisions, read: `docs/ELL_RULES.md`
+If in doubt, mark with 🔶 ELL onayı gerek and ask the user to check with ELIZA chat.
+
+---
+
 ## What is Liffy?
 
 Liffy is a multi-tenant SaaS platform for data discovery, qualification, and communication.
@@ -179,7 +186,7 @@ See [MINING_REFACTOR_PLAN.md](./MINING_REFACTOR_PLAN.md) for the 10-step refacto
 19. ~~Phase 4 Prep~~ ✅ DONE — person_id backfill script, campaign resolve canonical path, visibility columns (migration 033-034)
 20. ~~Dashboard Stat Fix~~ ✅ DONE — COUNT(DISTINCT email) for rates, events.sent for total
 21. **Frontend UI build** — liffy-ui (Next.js) pages for canonical APIs ← CURRENT
-22. **AI Miner Generator v2** — AXTree + Config-Driven + Self-Healing REPL. glmis ✅ 11 contact (3.5K token). expat.com multi-step ✅ 7 contact best case (tutarsız — Claude non-deterministic). Performans 24dk→2dk. Kalan: Claude tutarlılığı, anchor vs container mode seçimi. Bkz: [RFC_v4_AI_Miner_Generator.md](./RFC_v4_AI_Miner_Generator.md) ← PARKED (ASE'ye geçiş)
+22. ~~AI Miner Generator v2~~ 🗄️ ARCHIVED — Project retired April 2026. v1 %29 başarı, v4 tamamlanmadı. Production'da 54 gün inaktif. Kod yerinde (lazy-load + env guard). Bkz: [RFC_v3_AI_Miner_Generator.md](./RFC_v3_AI_Miner_Generator.md) archive notu.
 23. ~~Zoho Import~~ ✅ DONE — 54K records imported (persons + affiliations), industry normalization, 75K+ persons
 24. ~~ADR-015 Hierarchical Permissions~~ ✅ DONE — recursive CTE team visibility, reports_to chain, 4 roles (owner/admin/manager/sales_rep), migrations 038-039-040, 11 routes updated
 25. ~~Reply Email Quality~~ ✅ DONE — click tracking disabled, reply body in timeline (2000 chars), forward fallback to creator email, SendGrid tracking settings

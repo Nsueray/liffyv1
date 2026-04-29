@@ -888,11 +888,11 @@ All endpoints:
 
 ---
 
-## AI Miner Generator — v1 (Park) → v2 (Aktif Geliştirme)
+## AI Miner Generator — 🗄️ ARCHIVED (Project Retired April 2026)
 
 Self-evolving mining engine: when existing miners fail on a new site, Claude generates site-specific extraction config that runs via generic templates.
 
-**Status:** v1 (Phase 0, JS generation) PARKED — %29 başarı oranı. v2 geçiş aktif.
+**Status:** ARCHIVED — project retired April 2026. v1 %29 başarı, v4 tamamlanmadı. Production'da 54+ gün inaktif, env var off, sıfır contact. Kod ve DB tablosu yerinde (lazy-load + env guard, silme planlanmıyor).
 
 **v1 Neden Park Edildi:**
 - %29 başarı — sadece email'leri DOM'da doğrudan gösteren basit sayfalarda çalıştı
