@@ -2,7 +2,7 @@
 
 > This file exists in all three ELL repos (eliza, liffyv1, Leena_v401_monorepo).
 > It is the SAME file everywhere. If you update it, update all three copies.
-> Last updated: 2026-04-29 (v3 — fixed table naming inconsistencies)
+> Last updated: 2026-04-29 (v4 — added reference data tables)
 
 ---
 
@@ -10,7 +10,7 @@
 
 ELL = ELIZA + LİFFY + LEENA. Three systems, one platform, shared PostgreSQL.
 
-- **ELIZA** — Commercial system of record. Owns contracts, payments, approvals, intelligence, WhatsApp bot, CEO dashboard, master pricing data.
+- **ELIZA** — Commercial system of record. Owns contracts, payments, approvals, intelligence, WhatsApp bot, CEO dashboard, master pricing data, **reference data (countries, sectors, currencies, languages)**.
 - **LİFFY** — Sales action engine + CRM. Owns leads, companies, contacts, quotes, campaigns, sequences, action items, outreach. SaaS-ready (ADR-002). Will replace Zoho CRM by Jan 2027 (ADR-008).
 - **LEENA** — Operations execution. Owns expos (master), visitors, floorplans, check-ins, badges, certificates, exhibitor scanning.
 
@@ -18,9 +18,114 @@ Repos: `eliza` (github.com/Nsueray/eliza), `liffyv1` (github.com/Nsueray/liffyv1
 
 ---
 
-## MODULE OWNERSHIP MAP (Zoho → ELL Migration)
+## REFERENCE DATA TABLES (CRITICAL — read this first)
 
-This is the authoritative mapping of every Zoho module to its ELL system. Use this when migrating data, building features, or deciding where new functionality belongs.
+Reference data is the foundation of cross-system data quality. "Türkiye" vs "Turkey" vs "TR" inconsistencies poison the entire platform. All three systems read from the same canonical reference tables.
+
+**Owner:** ELIZA writes, LİFFY and LEENA read only.
+
+### `core_countries`
+ISO 3166 standard. Canonical country list used everywhere.
+
+```sql
+CREATE TABLE core_countries (
+  code CHAR(2) PRIMARY KEY,           -- ISO 3166-1 alpha-2 (TR, NG, MA, KE)
+  code3 CHAR(3) NOT NULL UNIQUE,      -- ISO 3166-1 alpha-3 (TUR, NGA, MAR, KEN)
+  name_en VARCHAR(100) NOT NULL,      -- "Turkey", "Nigeria"
+  name_tr VARCHAR(100),               -- "Türkiye", "Nijerya"
+  name_fr VARCHAR(100),               -- "Turquie", "Nigéria"
+  region VARCHAR(50),                 -- "Africa", "MENA", "Europe", "Asia"
+  is_active BOOLEAN DEFAULT true
+);
+```
+
+Seed: full ISO 3166 list (~250 countries).
+
+### `core_sectors`
+Hierarchical industry classification. Parent-child relationships.
+
+```sql
+CREATE TABLE core_sectors (
+  id SERIAL PRIMARY KEY,
+  parent_id INTEGER REFERENCES core_sectors(id),
+  slug VARCHAR(100) UNIQUE NOT NULL,  -- "hvac", "interior-design", "home-decoration"
+  name_en VARCHAR(100) NOT NULL,
+  name_tr VARCHAR(100),
+  name_fr VARCHAR(100),
+  level INTEGER NOT NULL,             -- 1=top, 2=mid, 3=detail
+  display_order INTEGER DEFAULT 0,
+  is_active BOOLEAN DEFAULT true
+);
+```
+
+Example hierarchy:
+```
+HVAC & Refrigeration (level 1)
+├── Air Conditioning (level 2)
+├── Refrigeration (level 2)
+└── Ventilation (level 2)
+
+Furniture & Decoration (level 1)
+├── Interior Design (level 2)
+├── Home Decoration (level 2)
+├── Office Furniture (level 2)
+├── Kitchen & Bath (level 2)
+└── Lighting (level 2)
+
+Construction & Building (level 1)
+├── Building Materials (level 2)
+├── Construction Equipment (level 2)
+└── Architecture & Engineering (level 2)
+```
+
+Seed: Elan Expo's actual sectors (HVAC, Construction, Food Processing, Furniture, Ceramics, Water/Wastewater, Plastics, Electricity, etc.) — derived from current Zoho sector list, manually curated.
+
+### `core_currencies`
+Active currencies used in contracts, quotes, payments.
+
+```sql
+CREATE TABLE core_currencies (
+  code CHAR(3) PRIMARY KEY,           -- ISO 4217 (EUR, USD, TRY, NGN, MAD, KES, DZD, GHS)
+  name_en VARCHAR(50) NOT NULL,
+  symbol VARCHAR(5),                  -- €, $, ₺, ₦
+  is_active BOOLEAN DEFAULT true
+);
+```
+
+Seed: EUR, USD, TRY, NGN, MAD, KES, DZD, GHS (Elan Expo's operating currencies).
+
+### `core_languages`
+Languages used for communication, email templates, UI.
+
+```sql
+CREATE TABLE core_languages (
+  code CHAR(2) PRIMARY KEY,           -- ISO 639-1 (en, tr, fr, ar, es, de)
+  name_en VARCHAR(50) NOT NULL,
+  name_native VARCHAR(50)             -- "Türkçe", "Français", "العربية"
+);
+```
+
+Seed: en, tr, fr, ar (Elan Expo's primary communication languages).
+
+### Usage rules
+
+**Every text-typed country/sector/currency/language field is being deprecated.** New tables and migrations MUST use FK to `core_*` tables:
+
+- `companies.country_code` (CHAR(2) FK to core_countries.code)
+- `companies.sector_id` (INTEGER FK to core_sectors.id)
+- `persons.preferred_language_code` (CHAR(2) FK to core_languages.code)
+- `quotes.currency_code` (CHAR(3) FK to core_currencies.code)
+- `contracts.currency_code` (CHAR(3) FK to core_currencies.code)
+- `expos.country_code` (CHAR(2) FK to core_countries.code)
+
+Migration plan:
+- Old text fields kept temporarily during transition (e.g., `affiliations.industry` → `affiliations.sector_id` via mapping script)
+- After Phase 1 migration, text fields dropped
+- All UI dropdowns populated from `core_*` tables only
+
+---
+
+## MODULE OWNERSHIP MAP (Zoho → ELL Migration)
 
 ### LİFFY (Sales Engine + CRM — replacing Zoho's sales side)
 
@@ -29,7 +134,7 @@ This is the authoritative mapping of every Zoho module to its ELL system. Use th
 | Leads | persons WHERE lifecycle_stage='lead' | 75K imported |
 | Contacts | persons WHERE lifecycle_stage IN ('contact','customer') | Phase 1 (now) |
 | Companies | companies (NEW table) | Phase 1 (now) |
-| Quotes | quotes | Phase 1 (now) |
+| Quotes | quotes | Phase 1.5 |
 | Potentials | opportunities | Phase 1 |
 | Tasks | tasks | Exists |
 | Meetings | meetings | Phase 1 |
@@ -39,12 +144,12 @@ This is the authoritative mapping of every Zoho module to its ELL system. Use th
 | SalesInbox | Contact Drawer Timeline + reply detection | Exists |
 | Social | social_engagement | Future |
 | Voice of the Customer | reply_intelligence (sentiment + classification) | Future |
-| New Leads | mining job results → auto-routed to users | Phase 2 |
+| New Leads | mining job results → auto-routed to users | Phase 1 |
 | My Jobs | mining_jobs | Exists |
 
-**Note:** Persons is the canonical entity. Lead/Contact/Customer are LIFECYCLE STAGES, not separate tables. State machine: lead → mql → sql → contact → customer. Convert = lifecycle_stage update + company_id assignment. This is the modern CRM model (HubSpot, Pipedrive). Zoho's lead/contact separation is legacy and unnecessary in ELL.
+**Note:** Persons is the canonical entity. Lead/Contact/Customer are LIFECYCLE STAGES, not separate tables. State machine: lead → mql → sql → contact → customer. Convert = lifecycle_stage update + company_id assignment. Modern CRM model (HubSpot, Pipedrive). Zoho's lead/contact separation is legacy and unnecessary in ELL.
 
-### ELIZA (System of Record + Intelligence)
+### ELIZA (System of Record + Intelligence + Reference Data)
 
 | Zoho Module | ELIZA Equivalent | Notes |
 |-------------|------------------|-------|
@@ -57,6 +162,7 @@ This is the authoritative mapping of every Zoho module to its ELL system. Use th
 | Sales Agents | users + permissions | ADR-015 hierarchy |
 | Products | products | Master pricing data — read by all systems, written only by ELIZA |
 | Product Groups | product_categories | Categories of products |
+| (NEW) Reference Data | core_countries, core_sectors, core_currencies, core_languages | Master ref data — read by all systems |
 
 ### LEENA (Operations + Events)
 
@@ -85,6 +191,12 @@ This is the authoritative mapping of every Zoho module to its ELL system. Use th
 
 ### Special Cases (Master Data — Cross-System Reads)
 
+**Reference Data (countries, sectors, currencies, languages):**
+- Owned by ELIZA (writes via migration scripts and admin UI)
+- Read by LİFFY and LEENA via SELECT only
+- Single source of truth for all dropdowns and FK references
+- See "REFERENCE DATA TABLES" section above
+
 **Products (master pricing data):**
 - Owned by ELIZA (writes)
 - Read by LİFFY (when creating Quotes — stand types, registration fees, agent commissions)
@@ -96,7 +208,6 @@ This is the authoritative mapping of every Zoho module to its ELL system. Use th
 - Read by LİFFY (Quote creation needs expo info)
 - Read by ELIZA (Contracts, dashboard, intelligence queries reference expo)
 - Single source of truth for expo definitions
-- All other modules pull expo data from here
 
 ---
 
@@ -104,24 +215,28 @@ This is the authoritative mapping of every Zoho module to its ELL system. Use th
 
 ### Lead Data (selective migration)
 
-Zoho contains 585K leads. Most are dead data accumulated over years. Strategy:
+Zoho contains 585K leads. Most are dead data accumulated over years.
 
-1. **75K already imported to LİFFY** — these are the active working portfolio
+1. **75K already imported to LİFFY** — active working portfolio
 2. **510K stay in Zoho as archive** — sales reps don't see them in LİFFY
 3. **New leads enter LİFFY directly** — via mining (auto-routed) or manual data entry form
 4. **Promotion path** — Zoho leads that respond, sign, or convert get migrated to LİFFY case-by-case
 5. **January 2027 cutoff** — when Zoho is decommissioned, remaining 510K archived or deleted
 
-This means LİFFY's `persons` table represents the active CRM, not a 1:1 copy of Zoho.
-
 ### Contact Data
-Zoho 17,668 contacts. These are persons with lifecycle_stage='contact' in LİFFY (already in 75K imported).
+Zoho 17,668 contacts. Already in LİFFY's 75K imported persons (lifecycle_stage='contact').
 
 ### Company Data
-Zoho ~17K companies. Migration: dedupe `affiliations.company_name` values → write to new `companies` table → update `affiliations.company_id` FK. One-time script.
+Zoho ~17K companies. Migration: dedupe `affiliations.company_name` values → write to new `companies` table → update `affiliations.company_id` FK. One-time script with manual review checkpoints.
+
+### Sector Data
+Zoho sector strings (free text, inconsistent). Migration: build `core_sectors` first (ELIZA, manual curation from Zoho data), then map `affiliations.industry` strings to `core_sectors.id` via fuzzy match + manual review.
+
+### Country Data
+Zoho country strings ("Turkey" / "Türkiye" / "TR"). Migration: standardize via ISO 3166 mapping in `core_countries`, update all references.
 
 ### Quote/Sales Contract Data
-Stays in Zoho currently. Read by ELIZA via existing Zoho sync. Quote creation moves to LİFFY in Phase 1. Sales Contract creation stays in ELIZA permanently (ADR-005). Full Zoho exit January 2027.
+Stays in Zoho currently. Read by ELIZA via existing Zoho sync. Quote creation moves to LİFFY in Phase 1.5. Sales Contract creation stays in ELIZA permanently (ADR-005). Full Zoho exit January 2027.
 
 ---
 
@@ -130,7 +245,7 @@ Stays in Zoho currently. Read by ELIZA via existing Zoho sync. Quote creation mo
 ### R1: Data Ownership
 Each table has exactly ONE owner system. Only the owner writes. Others may read.
 
-**ELIZA writes:** contracts, contract_payments, users, permissions, audit_logs, products, expenses, invoices
+**ELIZA writes:** contracts, contract_payments, users, permissions, audit_logs, products, expenses, invoices, **core_countries, core_sectors, core_currencies, core_languages**
 
 **LİFFY writes:** persons (canonical, includes leads/contacts via lifecycle_stage), affiliations, companies, opportunities, quotes, campaigns, sequences, email_events, action_items, lists, templates, sender_identities, tasks, meetings, call_logs, mining_jobs
 
@@ -139,7 +254,7 @@ Each table has exactly ONE owner system. Only the owner writes. Others may read.
 **Shared reads:** any system can SELECT from any table. Never INSERT/UPDATE/DELETE into another system's tables.
 
 ### R2: ELIZA Writes Authority Data (ADR-005)
-ELIZA is the commercial system of record. It writes contracts, payments, and master pricing data (products). This is PERMANENT, not a transition arrangement.
+ELIZA is the commercial system of record. It writes contracts, payments, master pricing data (products), and reference data (countries, sectors, currencies, languages). This is PERMANENT.
 
 ### R3: Company Entity Now in Phase 1 (ADR-014 UPDATED)
 LİFFY uses `persons` + `affiliations` currently. Company entity migration is happening NOW (Phase 1) because Zoho replacement requires Company as first-class entity.
@@ -147,7 +262,7 @@ LİFFY uses `persons` + `affiliations` currently. Company entity migration is ha
 **Migration plan:**
 - `persons` table STAYS — canonical entity for all people, no rename, no separate contacts table
 - `persons.lifecycle_stage` enum added: 'lead', 'mql', 'sql', 'contact', 'customer'
-- `companies` new table created
+- `companies` new table created with FK to core_countries, core_sectors
 - `affiliations.company_name` deduped and migrated to `companies` table
 - `affiliations.company_id` FK added pointing to companies
 - Quotes, opportunities, tasks reference both person_id and company_id
@@ -186,6 +301,9 @@ Three separate repos. Do NOT merge into monorepo. Each system has its own API se
 - LEENA: leena web service (leena.app), leena-email-worker
 Shared PostgreSQL database. Same JWT_SECRET across services.
 
+### R9: Reference Data is the Foundation
+NEW. All country, sector, currency, language fields MUST FK to core_* tables. No free-text fields for these. UI dropdowns populated from core_* tables only. This rule applies retroactively — old text fields will be migrated in Phase 1.
+
 ---
 
 ## FORBIDDEN TERMS (ELL Glossary)
@@ -214,7 +332,7 @@ Correct terms:
 | 002 | LİFFY/LEENA SaaS-ready, separate repos | DECIDED |
 | 003 | Sales reps never create contracts (Quote→Contract) | DECIDED |
 | 004 | Shared database, schema-level ownership | DECIDED |
-| 005 | ELIZA writes authority data (contracts, payments, products) — permanent | DECIDED |
+| 005 | ELIZA writes authority data (contracts, payments, products, reference data) — permanent | DECIDED |
 | 006 | Transient agents LİFFY-only access | DECIDED |
 | 007 | Floorplan owned by LEENA, consumed by LİFFY | DECIDED |
 | 008 | Zoho exit target January 2027 | DECIDED |
@@ -225,6 +343,7 @@ Correct terms:
 | 013 | SaaS long-term option, not priority | DECIDED |
 | 014 | Company entity — UPDATED: now Phase 1 (was Phase 2) | UPDATED 2026-04-29 |
 | 015 | Hierarchical data visibility — reports_to + permissions JSON | DECIDED |
+| 016 | Reference data tables (countries, sectors, currencies, languages) owned by ELIZA | DECIDED 2026-04-29 |
 
 Full ADR files: `eliza/docs/decisions/`
 
@@ -235,6 +354,7 @@ Full ADR files: `eliza/docs/decisions/`
 If you're about to:
 - Create a new table → check R1 (who owns it?)
 - Create a `contacts` or `leads` table → STOP (R3 — use persons.lifecycle_stage)
+- Add a country/sector/currency/language as text field → STOP (R9 — use FK to core_*)
 - Write to another system's table → STOP (R1 violation)
 - Add FK constraint to company_id/contract_id → STOP if Phase 2 work, else proceed (R7)
 - Build a pipeline/kanban → STOP (R5)
