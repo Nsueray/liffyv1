@@ -2,7 +2,7 @@
 
 > This file exists in all three ELL repos (eliza, liffyv1, Leena_v401_monorepo).
 > It is the SAME file everywhere. If you update it, update all three copies.
-> Last updated: 2026-04-29
+> Last updated: 2026-04-29 (v3 — fixed table naming inconsistencies)
 
 ---
 
@@ -26,9 +26,9 @@ This is the authoritative mapping of every Zoho module to its ELL system. Use th
 
 | Zoho Module | LİFFY Equivalent | Status |
 |-------------|------------------|--------|
-| Leads | persons + affiliations (status=lead) | Imported (75K) |
-| Contacts | contacts (after Company entity migration) | Phase 1 (now) |
-| Companies | companies (NEW — ADR-014 promoted to Phase 1) | Phase 1 (now) |
+| Leads | persons WHERE lifecycle_stage='lead' | 75K imported |
+| Contacts | persons WHERE lifecycle_stage IN ('contact','customer') | Phase 1 (now) |
+| Companies | companies (NEW table) | Phase 1 (now) |
 | Quotes | quotes | Phase 1 (now) |
 | Potentials | opportunities | Phase 1 |
 | Tasks | tasks | Exists |
@@ -41,6 +41,8 @@ This is the authoritative mapping of every Zoho module to its ELL system. Use th
 | Voice of the Customer | reply_intelligence (sentiment + classification) | Future |
 | New Leads | mining job results → auto-routed to users | Phase 2 |
 | My Jobs | mining_jobs | Exists |
+
+**Note:** Persons is the canonical entity. Lead/Contact/Customer are LIFECYCLE STAGES, not separate tables. State machine: lead → mql → sql → contact → customer. Convert = lifecycle_stage update + company_id assignment. This is the modern CRM model (HubSpot, Pipedrive). Zoho's lead/contact separation is legacy and unnecessary in ELL.
 
 ### ELIZA (System of Record + Intelligence)
 
@@ -98,23 +100,61 @@ This is the authoritative mapping of every Zoho module to its ELL system. Use th
 
 ---
 
+## ZOHO MIGRATION STRATEGY
+
+### Lead Data (selective migration)
+
+Zoho contains 585K leads. Most are dead data accumulated over years. Strategy:
+
+1. **75K already imported to LİFFY** — these are the active working portfolio
+2. **510K stay in Zoho as archive** — sales reps don't see them in LİFFY
+3. **New leads enter LİFFY directly** — via mining (auto-routed) or manual data entry form
+4. **Promotion path** — Zoho leads that respond, sign, or convert get migrated to LİFFY case-by-case
+5. **January 2027 cutoff** — when Zoho is decommissioned, remaining 510K archived or deleted
+
+This means LİFFY's `persons` table represents the active CRM, not a 1:1 copy of Zoho.
+
+### Contact Data
+Zoho 17,668 contacts. These are persons with lifecycle_stage='contact' in LİFFY (already in 75K imported).
+
+### Company Data
+Zoho ~17K companies. Migration: dedupe `affiliations.company_name` values → write to new `companies` table → update `affiliations.company_id` FK. One-time script.
+
+### Quote/Sales Contract Data
+Stays in Zoho currently. Read by ELIZA via existing Zoho sync. Quote creation moves to LİFFY in Phase 1. Sales Contract creation stays in ELIZA permanently (ADR-005). Full Zoho exit January 2027.
+
+---
+
 ## CRITICAL RULES (never violate)
 
 ### R1: Data Ownership
 Each table has exactly ONE owner system. Only the owner writes. Others may read.
-- ELIZA writes: contracts, contract_payments, users, permissions, audit_logs, products, expenses, invoices
-- LİFFY writes: persons, affiliations, companies, contacts, leads, opportunities, quotes, campaigns, sequences, email_events, action_items, lists, templates, sender_identities, tasks, meetings, call_logs
-- LEENA writes: expos, visitors, checkins, forms, terminals, expo_halls, expo_stands, expo_stand_cells, expo_floorplan_versions, expo_exhibitors, email_queue (visitor emails), catalogues
-- Shared reads: any system can SELECT from any table. Never INSERT/UPDATE/DELETE into another system's tables.
+
+**ELIZA writes:** contracts, contract_payments, users, permissions, audit_logs, products, expenses, invoices
+
+**LİFFY writes:** persons (canonical, includes leads/contacts via lifecycle_stage), affiliations, companies, opportunities, quotes, campaigns, sequences, email_events, action_items, lists, templates, sender_identities, tasks, meetings, call_logs, mining_jobs
+
+**LEENA writes:** expos, visitors, checkins, forms, terminals, expo_halls, expo_stands, expo_stand_cells, expo_floorplan_versions, expo_exhibitors, email_queue (visitor emails), catalogues
+
+**Shared reads:** any system can SELECT from any table. Never INSERT/UPDATE/DELETE into another system's tables.
 
 ### R2: ELIZA Writes Authority Data (ADR-005)
 ELIZA is the commercial system of record. It writes contracts, payments, and master pricing data (products). This is PERMANENT, not a transition arrangement.
 
 ### R3: Company Entity Now in Phase 1 (ADR-014 UPDATED)
-LİFFY uses `persons` + `affiliations` currently. Company entity migration is happening NOW (Phase 1) because Zoho replacement requires Company as first-class entity. Quote/Contact/Sales Contract flow is Company-centric.
-- Migration: persons → contacts, affiliations → contacts.company_id, new `companies` table
-- All new features (Quote, Opportunity) reference company_id directly
-- LEENA can have `expo_exhibitors` for floorplan stand assignment — will FK to LİFFY companies
+LİFFY uses `persons` + `affiliations` currently. Company entity migration is happening NOW (Phase 1) because Zoho replacement requires Company as first-class entity.
+
+**Migration plan:**
+- `persons` table STAYS — canonical entity for all people, no rename, no separate contacts table
+- `persons.lifecycle_stage` enum added: 'lead', 'mql', 'sql', 'contact', 'customer'
+- `companies` new table created
+- `affiliations.company_name` deduped and migrated to `companies` table
+- `affiliations.company_id` FK added pointing to companies
+- Quotes, opportunities, tasks reference both person_id and company_id
+
+**No separate `contacts` or `leads` tables.** Lifecycle stages are filters/views on the persons table.
+
+LEENA can have `expo_exhibitors` for floorplan stand assignment — will FK to LİFFY companies in Phase 2.
 
 ### R4: Hierarchical Data Visibility (ADR-015)
 All user-scoped data uses `reports_to` recursive CTE for visibility:
@@ -158,8 +198,8 @@ Never use these in code, UI, or documentation:
 
 Correct terms:
 - Company = legal entity (contract is with company)
-- Contact = person at a company (may change companies)
-- Lead = unqualified data (no relationship yet)
+- Contact = person at a company with lifecycle_stage='contact' or 'customer'
+- Lead = person at a company with lifecycle_stage='lead'
 - Sales Rep = employed salesperson (Bengü)
 - Sales Agent = external partner (Sinerji, Anka)
 - Expo = brand (SIEMA). Edition = yearly instance (SIEMA 2026)
@@ -181,7 +221,7 @@ Correct terms:
 | 009 | Sales adoption — Bengü pilot first | DECIDED |
 | 010 | Floorplan dual-layer (Master LEENA + Sales Copies LİFFY) | DECIDED |
 | 011 | Payment authority — CEO + Yaprak full, locals form-only | DECIDED |
-| 012 | Historical migration — full 2014-2027 data | DECIDED |
+| 012 | Historical migration — full 2014-2027 data (Sales Contracts only; Leads filtered) | DECIDED |
 | 013 | SaaS long-term option, not priority | DECIDED |
 | 014 | Company entity — UPDATED: now Phase 1 (was Phase 2) | UPDATED 2026-04-29 |
 | 015 | Hierarchical data visibility — reports_to + permissions JSON | DECIDED |
@@ -194,6 +234,7 @@ Full ADR files: `eliza/docs/decisions/`
 
 If you're about to:
 - Create a new table → check R1 (who owns it?)
+- Create a `contacts` or `leads` table → STOP (R3 — use persons.lifecycle_stage)
 - Write to another system's table → STOP (R1 violation)
 - Add FK constraint to company_id/contract_id → STOP if Phase 2 work, else proceed (R7)
 - Build a pipeline/kanban → STOP (R5)
