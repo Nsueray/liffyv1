@@ -2,13 +2,13 @@
 
 > This file exists in all three ELL repos (eliza, liffyv1, Leena_v401_monorepo).
 > It is the SAME file everywhere. If you update it, update all three copies.
-> Last updated: 2026-04-29 (v4 — added reference data tables)
+> Last updated: 2026-05-01 (v5.1 — sync worker timing corrected to Phase 1 end)
 
 ---
 
 ## What is ELL?
 
-ELL = ELIZA + LİFFY + LEENA. Three systems, one platform, shared PostgreSQL.
+ELL = ELIZA + LİFFY + LEENA. Three systems forming one platform.
 
 - **ELIZA** — Commercial system of record. Owns contracts, payments, approvals, intelligence, WhatsApp bot, CEO dashboard, master pricing data, **reference data (countries, sectors, currencies, languages)**.
 - **LİFFY** — Sales action engine + CRM. Owns leads, companies, contacts, quotes, campaigns, sequences, action items, outreach. SaaS-ready (ADR-002). Will replace Zoho CRM by Jan 2027 (ADR-008).
@@ -18,110 +18,59 @@ Repos: `eliza` (github.com/Nsueray/eliza), `liffyv1` (github.com/Nsueray/liffyv1
 
 ---
 
-## REFERENCE DATA TABLES (CRITICAL — read this first)
+## DATABASE ARCHITECTURE (CORRECTED — read this carefully)
 
-Reference data is the foundation of cross-system data quality. "Türkiye" vs "Turkey" vs "TR" inconsistencies poison the entire platform. All three systems read from the same canonical reference tables.
+**ELL has THREE separate PostgreSQL databases on Render.** Earlier versions of this document said "shared PostgreSQL" — that was incorrect.
 
-**Owner:** ELIZA writes, LİFFY and LEENA read only.
+| Database | Plan | Cost/mo | RAM | CPU | Storage | PG Version |
+|----------|------|---------|-----|-----|---------|------------|
+| eliza-db | Basic-256mb | $10.50 | 256 MB | 0.1 | 15 GB | 18 |
+| liffy-db | Basic-1gb | $23.50 | 1 GB | 0.5 | 15 GB | 17 |
+| leena_v401_db | Basic-1gb | $23.50 | 1 GB | 0.5 | 15 GB | 17 |
 
-### `core_countries`
-ISO 3166 standard. Canonical country list used everywhere.
+**Total: $57.50/month**. All in Oregon (US West).
 
-```sql
-CREATE TABLE core_countries (
-  code CHAR(2) PRIMARY KEY,           -- ISO 3166-1 alpha-2 (TR, NG, MA, KE)
-  code3 CHAR(3) NOT NULL UNIQUE,      -- ISO 3166-1 alpha-3 (TUR, NGA, MAR, KEN)
-  name_en VARCHAR(100) NOT NULL,      -- "Turkey", "Nigeria"
-  name_tr VARCHAR(100),               -- "Türkiye", "Nijerya"
-  name_fr VARCHAR(100),               -- "Turquie", "Nigéria"
-  region VARCHAR(50),                 -- "Africa", "MENA", "Europe", "Asia"
-  is_active BOOLEAN DEFAULT true
+**Implications:**
+- No cross-database JOIN possible
+- No cross-database FK constraints possible
+- Reference data must be REPLICATED across all three databases
+- LİFFY's `companies.country_code` is a "soft FK" — application-level validation only, references local liffy-db.core_countries (synced from eliza-db)
+
+**Future plan (Phase 3, after fair season):** Consolidate to single PostgreSQL instance with schema-level separation (`eliza.*`, `liffy.*`, `leena.*`). See ADR-018. Estimated savings: $34/month. Cannot do during fair season due to risk to LEENA fair operations.
+
+---
+
+## REFERENCE DATA SYNC STRATEGY
+
+Reference data tables (`core_countries`, `core_sectors`, `core_currencies`, `core_languages`) exist in ALL THREE databases with identical schema and identical content.
+
+**Master:** ELIZA writes (eliza-db is source of truth).
+**Replicas:** LİFFY and LEENA databases hold synced copies.
+
+**Sync mechanism — phased approach:**
+- **During Phase 1 (weeks 1-9):** MANUAL SYNC. When ELIZA admin adds/edits reference data, manually run the SQL on liffy-db and leena_v401_db. Reference data changes 1-2 times during Phase 1, dakikalık iş.
+- **End of Phase 1 (Week 9 or Observation Week):** Build automated sync worker. Cron job every 5-10 minutes, ELIZA worker writes to a `reference_sync_log`, LİFFY/LEENA workers pull and UPSERT.
+- **Phase 1.5 onwards:** Automated sync worker handles all updates.
+
+**Rationale for delaying automated sync:** Sync worker is non-trivial work (state tracking, error recovery, conflict resolution, monitoring, schema drift detection). Building it during Phase 1 would delay companies migration. Manual sync is acceptable for low change rate (5-10 changes per year).
+
+**Why replication, not API calls:**
+- LİFFY/LEENA tables FK (soft FK) to local copies — needs to be in same DB
+- Aggregation queries need JOIN with reference tables
+- Network latency unacceptable for hot paths
+- Reference data is small (~100 rows total) and rarely changes
+
+**Validation pattern (in application code):**
+```javascript
+// Before INSERT/UPDATE, validate FK against local DB
+const valid = await db.query(
+  `SELECT 1 FROM core_countries WHERE code = $1 AND is_active = true`,
+  [companyData.country_code]
 );
+if (!valid.rows.length) throw new Error(`Invalid country_code: ${companyData.country_code}`);
 ```
 
-Seed: full ISO 3166 list (~250 countries).
-
-### `core_sectors`
-Hierarchical industry classification. Parent-child relationships.
-
-```sql
-CREATE TABLE core_sectors (
-  id SERIAL PRIMARY KEY,
-  parent_id INTEGER REFERENCES core_sectors(id),
-  slug VARCHAR(100) UNIQUE NOT NULL,  -- "hvac", "interior-design", "home-decoration"
-  name_en VARCHAR(100) NOT NULL,
-  name_tr VARCHAR(100),
-  name_fr VARCHAR(100),
-  level INTEGER NOT NULL,             -- 1=top, 2=mid, 3=detail
-  display_order INTEGER DEFAULT 0,
-  is_active BOOLEAN DEFAULT true
-);
-```
-
-Example hierarchy:
-```
-HVAC & Refrigeration (level 1)
-├── Air Conditioning (level 2)
-├── Refrigeration (level 2)
-└── Ventilation (level 2)
-
-Furniture & Decoration (level 1)
-├── Interior Design (level 2)
-├── Home Decoration (level 2)
-├── Office Furniture (level 2)
-├── Kitchen & Bath (level 2)
-└── Lighting (level 2)
-
-Construction & Building (level 1)
-├── Building Materials (level 2)
-├── Construction Equipment (level 2)
-└── Architecture & Engineering (level 2)
-```
-
-Seed: Elan Expo's actual sectors (HVAC, Construction, Food Processing, Furniture, Ceramics, Water/Wastewater, Plastics, Electricity, etc.) — derived from current Zoho sector list, manually curated.
-
-### `core_currencies`
-Active currencies used in contracts, quotes, payments.
-
-```sql
-CREATE TABLE core_currencies (
-  code CHAR(3) PRIMARY KEY,           -- ISO 4217 (EUR, USD, TRY, NGN, MAD, KES, DZD, GHS)
-  name_en VARCHAR(50) NOT NULL,
-  symbol VARCHAR(5),                  -- €, $, ₺, ₦
-  is_active BOOLEAN DEFAULT true
-);
-```
-
-Seed: EUR, USD, TRY, NGN, MAD, KES, DZD, GHS (Elan Expo's operating currencies).
-
-### `core_languages`
-Languages used for communication, email templates, UI.
-
-```sql
-CREATE TABLE core_languages (
-  code CHAR(2) PRIMARY KEY,           -- ISO 639-1 (en, tr, fr, ar, es, de)
-  name_en VARCHAR(50) NOT NULL,
-  name_native VARCHAR(50)             -- "Türkçe", "Français", "العربية"
-);
-```
-
-Seed: en, tr, fr, ar (Elan Expo's primary communication languages).
-
-### Usage rules
-
-**Every text-typed country/sector/currency/language field is being deprecated.** New tables and migrations MUST use FK to `core_*` tables:
-
-- `companies.country_code` (CHAR(2) FK to core_countries.code)
-- `companies.sector_id` (INTEGER FK to core_sectors.id)
-- `persons.preferred_language_code` (CHAR(2) FK to core_languages.code)
-- `quotes.currency_code` (CHAR(3) FK to core_currencies.code)
-- `contracts.currency_code` (CHAR(3) FK to core_currencies.code)
-- `expos.country_code` (CHAR(2) FK to core_countries.code)
-
-Migration plan:
-- Old text fields kept temporarily during transition (e.g., `affiliations.industry` → `affiliations.sector_id` via mapping script)
-- After Phase 1 migration, text fields dropped
-- All UI dropdowns populated from `core_*` tables only
+**Sync lag tolerance (after automated sync goes live):** Up to 10 minutes. If a sales rep adds a brand-new country in ELIZA admin UI, LİFFY won't accept it until next sync cycle. Acceptable trade-off.
 
 ---
 
@@ -149,7 +98,7 @@ Migration plan:
 
 **Note:** Persons is the canonical entity. Lead/Contact/Customer are LIFECYCLE STAGES, not separate tables. State machine: lead → mql → sql → contact → customer. Convert = lifecycle_stage update + company_id assignment. Modern CRM model (HubSpot, Pipedrive). Zoho's lead/contact separation is legacy and unnecessary in ELL.
 
-### ELIZA (System of Record + Intelligence + Reference Data)
+### ELIZA (System of Record + Intelligence + Reference Data Master)
 
 | Zoho Module | ELIZA Equivalent | Notes |
 |-------------|------------------|-------|
@@ -162,19 +111,26 @@ Migration plan:
 | Sales Agents | users + permissions | ADR-015 hierarchy |
 | Products | products | Master pricing data — read by all systems, written only by ELIZA |
 | Product Groups | product_categories | Categories of products |
-| (NEW) Reference Data | core_countries, core_sectors, core_currencies, core_languages | Master ref data — read by all systems |
+| (NEW) Reference Data | core_countries, core_sectors, core_currencies, core_languages | Master ref data — synced to LİFFY and LEENA databases |
 
 ### LEENA (Operations + Events)
 
 | Zoho Module | LEENA Equivalent | Notes |
 |-------------|------------------|-------|
-| Expos | expos | **Master expo data — created here, read by ALL systems** |
+| Expos | expos | **Master expo data — created here, read by ALL systems via API or Zoho sync** |
 | Visitors | visitors | Visitor management |
 | Visits | visits | Visit tracking |
 | Catalogues | catalogues | Phase 2 |
 | Check in Logs | checkins | Existing |
 | Stand Leads | exhibitor_leads | Existing |
 | Member Companies | (linked to expos) | Future |
+
+### Cross-Database Read Strategy
+
+Since databases are separate, "read" patterns differ:
+- **Reference data:** Replicated locally (sync worker). Direct SQL access in own DB.
+- **Master data (Products, Expos):** Owner exposes API endpoints. Consumers cache or call API.
+- **Cross-system queries:** Currently done via Zoho sync into ELIZA dashboard. Phase 3 (after consolidation) will enable direct cross-schema JOINs.
 
 ### Not Migrated / Deprecated
 
@@ -188,26 +144,6 @@ Migration plan:
 | Google Ads | Out of ELL scope |
 | Data | Zoho-specific, not needed |
 | Services | Unclear scope, evaluate if/when needed |
-
-### Special Cases (Master Data — Cross-System Reads)
-
-**Reference Data (countries, sectors, currencies, languages):**
-- Owned by ELIZA (writes via migration scripts and admin UI)
-- Read by LİFFY and LEENA via SELECT only
-- Single source of truth for all dropdowns and FK references
-- See "REFERENCE DATA TABLES" section above
-
-**Products (master pricing data):**
-- Owned by ELIZA (writes)
-- Read by LİFFY (when creating Quotes — stand types, registration fees, agent commissions)
-- Read by LEENA (when displaying stand prices to exhibitors)
-- Single source of truth for pricing across all three systems
-
-**Expos (master expo data):**
-- Owned by LEENA (writes — Yaprak/operations creates the expo)
-- Read by LİFFY (Quote creation needs expo info)
-- Read by ELIZA (Contracts, dashboard, intelligence queries reference expo)
-- Single source of truth for expo definitions
 
 ---
 
@@ -243,15 +179,15 @@ Stays in Zoho currently. Read by ELIZA via existing Zoho sync. Quote creation mo
 ## CRITICAL RULES (never violate)
 
 ### R1: Data Ownership
-Each table has exactly ONE owner system. Only the owner writes. Others may read.
+Each table has exactly ONE owner system. Only the owner writes. Others may read (within their own DB).
 
-**ELIZA writes:** contracts, contract_payments, users, permissions, audit_logs, products, expenses, invoices, **core_countries, core_sectors, core_currencies, core_languages**
+**ELIZA writes (eliza-db):** contracts, contract_payments, users, permissions, audit_logs, products, expenses, invoices, **core_countries, core_sectors, core_currencies, core_languages (master)**
 
-**LİFFY writes:** persons (canonical, includes leads/contacts via lifecycle_stage), affiliations, companies, opportunities, quotes, campaigns, sequences, email_events, action_items, lists, templates, sender_identities, tasks, meetings, call_logs, mining_jobs
+**LİFFY writes (liffy-db):** persons (canonical, includes leads/contacts via lifecycle_stage), affiliations, companies, opportunities, quotes, campaigns, sequences, email_events, action_items, lists, templates, sender_identities, tasks, meetings, call_logs, mining_jobs
 
-**LEENA writes:** expos, visitors, checkins, forms, terminals, expo_halls, expo_stands, expo_stand_cells, expo_floorplan_versions, expo_exhibitors, email_queue (visitor emails), catalogues
+**LEENA writes (leena_v401_db):** expos, visitors, checkins, forms, terminals, expo_halls, expo_stands, expo_stand_cells, expo_floorplan_versions, expo_exhibitors, email_queue (visitor emails), catalogues
 
-**Shared reads:** any system can SELECT from any table. Never INSERT/UPDATE/DELETE into another system's tables.
+**Reference data special case:** core_* tables exist in ALL THREE databases. Only ELIZA writes to its master copy. Sync worker (built end of Phase 1) pushes to LİFFY and LEENA replicas. During Phase 1, manual sync. LİFFY/LEENA never write to their core_* tables directly.
 
 ### R2: ELIZA Writes Authority Data (ADR-005)
 ELIZA is the commercial system of record. It writes contracts, payments, master pricing data (products), and reference data (countries, sectors, currencies, languages). This is PERMANENT.
@@ -262,14 +198,14 @@ LİFFY uses `persons` + `affiliations` currently. Company entity migration is ha
 **Migration plan:**
 - `persons` table STAYS — canonical entity for all people, no rename, no separate contacts table
 - `persons.lifecycle_stage` enum added: 'lead', 'mql', 'sql', 'contact', 'customer'
-- `companies` new table created with FK to core_countries, core_sectors
+- `companies` new table created with soft FK to local liffy-db.core_countries, core_sectors
 - `affiliations.company_name` deduped and migrated to `companies` table
 - `affiliations.company_id` FK added pointing to companies
 - Quotes, opportunities, tasks reference both person_id and company_id
 
 **No separate `contacts` or `leads` tables.** Lifecycle stages are filters/views on the persons table.
 
-LEENA can have `expo_exhibitors` for floorplan stand assignment — will FK to LİFFY companies in Phase 2.
+LEENA can have `expo_exhibitors` for floorplan stand assignment — will FK to LİFFY companies in Phase 2 via API integration (not direct DB FK, since separate DBs).
 
 ### R4: Hierarchical Data Visibility (ADR-015)
 All user-scoped data uses `reports_to` recursive CTE for visibility:
@@ -278,7 +214,7 @@ All user-scoped data uses `reports_to` recursive CTE for visibility:
 - Sales Rep sees self + recursive team below
 - 4 roles: owner, manager, sales_rep, staff
 - Granular permissions via `permissions` JSONB on users table
-- This applies to ALL three systems (same users table)
+- Each system has its own users table; sync mechanism keeps them aligned
 
 ### R5: No Pipeline Kanban (Blueprint Forbidden Pattern)
 LİFFY does NOT have a pipeline/kanban board. Action Screen is the homepage. If pipeline_stages table exists, it stays in DB but is NOT visible in UI.
@@ -288,21 +224,21 @@ Sales reps NEVER create contracts directly.
 - LİFFY creates Quote (sales rep)
 - ELIZA approves Quote (authorized manager via WhatsApp or dashboard)
 - ELIZA creates Contract (AF number assigned)
-- LEENA reads Contract for exhibitor activation
+- LEENA reads Contract for exhibitor activation (via API, not direct DB read)
 This is the ONLY cross-system write flow.
 
 ### R7: Floorplan Ownership (ADR-007, ADR-010)
-Floorplan tables owned by LEENA. Master floorplan managed by project team (Yaprak). Sales copies (Phase 2) will be in LİFFY — per-prospect copies for sales presentations. `company_id` and `contract_id` on expo_stands are nullable FK — do NOT add FK constraints until Phase 2.
+Floorplan tables owned by LEENA. Master floorplan managed by project team (Yaprak). Sales copies (Phase 2) will be in LİFFY — per-prospect copies for sales presentations. `company_id` and `contract_id` on expo_stands are nullable soft FK — application-level validation only (cross-DB, no constraint possible).
 
-### R8: Separate Repos (ADR-002)
-Three separate repos. Do NOT merge into monorepo. Each system has its own API service:
-- ELIZA: eliza-api, eliza-dashboard (eliza.elanfairs.com), eliza-bot
-- LİFFY: liffy-api (api.liffy.app), liffy-ui (liffy.app), liffy-worker
-- LEENA: leena web service (leena.app), leena-email-worker
-Shared PostgreSQL database. Same JWT_SECRET across services.
+### R8: Separate Repos AND Separate Databases (ADR-002, ADR-017)
+Three separate repos AND three separate PostgreSQL databases. Each system has its own API service:
+- ELIZA: eliza-api, eliza-dashboard (eliza.elanfairs.com), eliza-bot — uses eliza-db
+- LİFFY: liffy-api (api.liffy.app), liffy-ui (liffy.app), liffy-worker — uses liffy-db
+- LEENA: leena web service (leena.app), leena-email-worker — uses leena_v401_db
+Same JWT_SECRET across services.
 
 ### R9: Reference Data is the Foundation
-NEW. All country, sector, currency, language fields MUST FK to core_* tables. No free-text fields for these. UI dropdowns populated from core_* tables only. This rule applies retroactively — old text fields will be migrated in Phase 1.
+All country, sector, currency, language fields MUST FK to core_* tables. No free-text fields for these. UI dropdowns populated from local DB's core_* tables only. Reference data is replicated across all three databases (manual during Phase 1, automated sync worker end of Phase 1). ELIZA is authoritative source.
 
 ---
 
@@ -313,6 +249,7 @@ Never use these in code, UI, or documentation:
 - ❌ "participant" → use "Visitor" or "Exhibitor"
 - ❌ "account" → use "Company"
 - ❌ "vendor" → use "Expo" or "Organizer"
+- ❌ "shared database" → use "shared platform with three databases" or "ELL platform"
 
 Correct terms:
 - Company = legal entity (contract is with company)
@@ -331,7 +268,7 @@ Correct terms:
 | 001 | ELIZA is commercial system of record | DECIDED |
 | 002 | LİFFY/LEENA SaaS-ready, separate repos | DECIDED |
 | 003 | Sales reps never create contracts (Quote→Contract) | DECIDED |
-| 004 | Shared database, schema-level ownership | DECIDED |
+| 004 | ~~Shared database, schema-level ownership~~ — SUPERSEDED by ADR-017 | SUPERSEDED |
 | 005 | ELIZA writes authority data (contracts, payments, products, reference data) — permanent | DECIDED |
 | 006 | Transient agents LİFFY-only access | DECIDED |
 | 007 | Floorplan owned by LEENA, consumed by LİFFY | DECIDED |
@@ -344,6 +281,8 @@ Correct terms:
 | 014 | Company entity — UPDATED: now Phase 1 (was Phase 2) | UPDATED 2026-04-29 |
 | 015 | Hierarchical data visibility — reports_to + permissions JSON | DECIDED |
 | 016 | Reference data tables (countries, sectors, currencies, languages) owned by ELIZA | DECIDED 2026-04-29 |
+| 017 | Per-system separate databases with reference data sync (manual during Phase 1, automated end of Phase 1) | DECIDED 2026-05-01 |
+| 018 | Future database consolidation to single instance — Phase 3 (after fair season) | PLANNED 2026-05-01 |
 
 Full ADR files: `eliza/docs/decisions/`
 
@@ -352,15 +291,18 @@ Full ADR files: `eliza/docs/decisions/`
 ## WHEN IN DOUBT
 
 If you're about to:
-- Create a new table → check R1 (who owns it?)
+- Create a new table → check R1 (who owns it? which DB?)
 - Create a `contacts` or `leads` table → STOP (R3 — use persons.lifecycle_stage)
-- Add a country/sector/currency/language as text field → STOP (R9 — use FK to core_*)
+- Add a country/sector/currency/language as text field → STOP (R9 — use FK to local core_*)
+- Add cross-database FK constraint → STOP (R8 — impossible across separate DBs)
 - Write to another system's table → STOP (R1 violation)
+- Write to core_* tables in LİFFY/LEENA → STOP (only ELIZA writes, sync worker pushes)
 - Add FK constraint to company_id/contract_id → STOP if Phase 2 work, else proceed (R7)
 - Build a pipeline/kanban → STOP (R5)
 - Let sales rep create a contract → STOP (R6)
 - Use "client/customer/account" → STOP (Glossary)
 - Add a feature that exists in Zoho → check Module Ownership Map first
+- Need data from another system → API call, NOT direct DB query (R8)
 
 Mark your message with **🔶 ELL onayı gerek** and tell the user to check with the ELIZA chat before proceeding.
 
@@ -368,7 +310,7 @@ Mark your message with **🔶 ELL onayı gerek** and tell the user to check with
 
 ## FILE STORAGE (temporary decision)
 No shared file storage yet. Current approach:
-- LEENA: Base64 → DB (banner images, small files)
+- LEENA: Base64 → DB (banner images, small files) — currently 9.31% of leena_v401_db
 - LİFFY: not needed yet
 - ELIZA: not needed yet
 When file storage needs grow (expo logos, exhibitor logos, catalogs, documents), a shared S3/Cloudinary solution will be implemented. ADR pending.
