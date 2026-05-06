@@ -1207,7 +1207,7 @@ router.get('/api/mining/jobs/:id/results/export', authRequired, validateJobId, a
 
     // Verify job ownership
     const jobRes = await db.query(
-      `SELECT id, target_url FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
+      `SELECT id FROM mining_jobs WHERE id = $1 AND organizer_id = $2`,
       [jobId, organizerId]
     );
     if (jobRes.rowCount === 0) {
