@@ -316,8 +316,45 @@ router.get('/export', authRequired, async (req, res) => {
 
     const whereClause = where.join(' AND ');
 
+    // Use CTEs to pre-aggregate engagement stats instead of correlated subqueries (75K+ persons)
     const dataRes = await db.query(
-      `SELECT
+      `WITH engagement AS (
+        SELECT
+          cr.email,
+          cr.organizer_id,
+          COUNT(*) AS campaigns_sent,
+          COUNT(CASE WHEN ce.event_type = 'open' THEN 1 END) AS opens,
+          COUNT(CASE WHEN ce.event_type = 'click' THEN 1 END) AS clicks,
+          COUNT(CASE WHEN ce.event_type = 'reply' THEN 1 END) AS replies,
+          COUNT(CASE WHEN ce.event_type = 'bounce' THEN 1 END) AS bounces
+        FROM campaign_recipients cr
+        LEFT JOIN campaign_events ce ON ce.recipient_id = cr.id
+        WHERE cr.organizer_id = $1
+        GROUP BY cr.email, cr.organizer_id
+      ),
+      last_camp AS (
+        SELECT DISTINCT ON (cr.email)
+          cr.email, cr.organizer_id, c.name AS last_campaign
+        FROM campaign_recipients cr
+        JOIN campaigns c ON c.id = cr.campaign_id
+        WHERE cr.organizer_id = $1
+        ORDER BY cr.email, cr.created_at DESC
+      ),
+      person_lists AS (
+        SELECT lm.person_id, STRING_AGG(DISTINCT l.name, ', ') AS lists
+        FROM list_members lm
+        JOIN lists l ON l.id = lm.list_id
+        WHERE l.organizer_id = $1 AND lm.person_id IS NOT NULL
+        GROUP BY lm.person_id
+      ),
+      person_intent AS (
+        SELECT DISTINCT ON (pi.person_id)
+          pi.person_id, pi.intent_type
+        FROM prospect_intents pi
+        WHERE pi.organizer_id = $1
+        ORDER BY pi.person_id, pi.created_at DESC
+      )
+      SELECT
         p.email,
         p.first_name,
         p.last_name,
@@ -333,17 +370,15 @@ router.get('/export', authRequired, async (req, res) => {
         p.verification_status,
         p.verified_at,
         p.created_at,
-        (SELECT COUNT(*) FROM campaign_recipients cr WHERE cr.email = p.email AND cr.organizer_id = p.organizer_id) AS campaigns_sent,
-        (SELECT COUNT(*) FROM campaign_events ce JOIN campaign_recipients cr2 ON cr2.id = ce.recipient_id WHERE cr2.email = p.email AND cr2.organizer_id = p.organizer_id AND ce.event_type = 'open') AS opens,
-        (SELECT COUNT(*) FROM campaign_events ce JOIN campaign_recipients cr2 ON cr2.id = ce.recipient_id WHERE cr2.email = p.email AND cr2.organizer_id = p.organizer_id AND ce.event_type = 'click') AS clicks,
-        (SELECT COUNT(*) FROM campaign_events ce JOIN campaign_recipients cr2 ON cr2.id = ce.recipient_id WHERE cr2.email = p.email AND cr2.organizer_id = p.organizer_id AND ce.event_type = 'reply') AS replies,
-        (SELECT COUNT(*) FROM campaign_events ce JOIN campaign_recipients cr2 ON cr2.id = ce.recipient_id WHERE cr2.email = p.email AND cr2.organizer_id = p.organizer_id AND ce.event_type = 'bounce') AS bounces,
-        (SELECT c.name FROM campaign_recipients cr3 JOIN campaigns c ON c.id = cr3.campaign_id WHERE cr3.email = p.email AND cr3.organizer_id = p.organizer_id ORDER BY cr3.created_at DESC LIMIT 1) AS last_campaign,
-        EXISTS (
-          SELECT 1 FROM prospect_intents pi WHERE pi.person_id = p.id AND pi.organizer_id = p.organizer_id
-        ) AS is_prospect,
-        (SELECT pi2.intent_type FROM prospect_intents pi2 WHERE pi2.person_id = p.id AND pi2.organizer_id = p.organizer_id ORDER BY pi2.created_at DESC LIMIT 1) AS latest_intent,
-        (SELECT STRING_AGG(DISTINCT l.name, ', ') FROM list_members lm JOIN lists l ON l.id = lm.list_id WHERE lm.person_id = p.id AND l.organizer_id = p.organizer_id) AS lists
+        COALESCE(e.campaigns_sent, 0) AS campaigns_sent,
+        COALESCE(e.opens, 0) AS opens,
+        COALESCE(e.clicks, 0) AS clicks,
+        COALESCE(e.replies, 0) AS replies,
+        COALESCE(e.bounces, 0) AS bounces,
+        lc.last_campaign,
+        pi.intent_type IS NOT NULL AS is_prospect,
+        pi.intent_type AS latest_intent,
+        pl.lists
       FROM persons p
       LEFT JOIN LATERAL (
         SELECT company_name, position, country_code, city, website, phone
@@ -352,6 +387,10 @@ router.get('/export', authRequired, async (req, res) => {
           AND (company_name IS NULL OR company_name NOT LIKE '%@%')
         ORDER BY created_at DESC LIMIT 1
       ) a ON true
+      LEFT JOIN engagement e ON e.email = p.email AND e.organizer_id = p.organizer_id
+      LEFT JOIN last_camp lc ON lc.email = p.email AND lc.organizer_id = p.organizer_id
+      LEFT JOIN person_lists pl ON pl.person_id = p.id
+      LEFT JOIN person_intent pi ON pi.person_id = p.id
       WHERE ${whereClause}
       ORDER BY p.created_at DESC`,
       params
