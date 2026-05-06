@@ -1270,8 +1270,8 @@ router.get('/api/mining/jobs/:id/results/export', authRequired, validateJobId, a
     res.setHeader('Content-Disposition', `attachment; filename="mining-results-${jobId}.${ext}"`);
     return res.send(buffer);
   } catch (err) {
-    console.error('GET /mining/jobs/:id/results/export error:', err);
-    return res.status(500).json({ error: 'Export failed' });
+    console.error('GET /mining/jobs/:id/results/export error:', err.message, err.stack);
+    return res.status(500).json({ error: `Export failed: ${err.message}` });
   }
 });
 
