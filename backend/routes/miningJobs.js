@@ -25,9 +25,10 @@ const storage = multer.diskStorage({
         cb(null, uniqueName);
     },
 });
+const MAX_UPLOAD_SIZE = 200 * 1024 * 1024; // 200 MB — Render proxy + DB hex encoding limits
 const upload = multer({
     storage: storage,
-    limits: { fileSize: 1024 * 1024 * 1024 } // 1GB Limit
+    limits: { fileSize: MAX_UPLOAD_SIZE }
 });
 
 /**
@@ -149,7 +150,17 @@ router.post('/api/mining/analyze-url', authRequired, async (req, res) => {
  * POST /api/mining/jobs
  * Hem JSON (URL) hem Multipart (Dosya) kabul eder
  */
-router.post('/api/mining/jobs', authRequired, upload.single('file'), async (req, res) => {
+router.post('/api/mining/jobs', authRequired, (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    if (err && err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({
+        error: `File too large (max ${MAX_UPLOAD_SIZE / 1024 / 1024} MB). For larger files, split the PDF into smaller parts or use the Local Miner.`
+      });
+    }
+    if (err) return res.status(400).json({ error: err.message });
+    next();
+  });
+}, async (req, res) => {
   try {
     const organizer_id = req.auth.organizer_id;
     const user_id = req.auth.user_id;
