@@ -28,6 +28,7 @@ async function analyzeUrl(url) {
     blocked: false,
     is_pdf: false,
     pdf_size_mb: 0,
+    pdf_too_large: false,
   };
 
   const badges = [];
@@ -67,10 +68,9 @@ async function analyzeUrl(url) {
           checks.pdf_size_mb = Math.round(contentLength / 1024 / 1024 * 10) / 10;
           badges.push(`PDF file (${checks.pdf_size_mb >= 1 ? checks.pdf_size_mb + 'MB' : Math.round(contentLength / 1024) + 'KB'})`);
 
-          if (contentLength > 500 * 1024 * 1024) {
-            warnings.push('Very large PDF — processing may be slow, consider splitting');
-          } else if (contentLength > 100 * 1024 * 1024) {
-            warnings.push('Large PDF — processing may take several minutes');
+          if (contentLength > 100 * 1024 * 1024) {
+            checks.pdf_too_large = true;
+            warnings.push(`PDF is ${checks.pdf_size_mb} MB — too large for URL mining (max 100 MB). Download the file and use File Upload on the Jobs tab instead.`);
           }
         } else {
           badges.push('PDF file (size unknown)');
@@ -246,6 +246,7 @@ function buildResult(checks, badges, warnings) {
   if (checks.table_count > 0) score += 10;
   if (checks.link_count > 50) score += 10;
 
+  if (checks.pdf_too_large) score = 5; // Force low — can't mine via URL
   if (checks.blocked) score -= 50;
   if (checks.login_required) score -= 30;
   if (checks.js_heavy) score -= 20;
@@ -258,7 +259,9 @@ function buildResult(checks, badges, warnings) {
 
   // Suggested miner
   let suggested_miner = 'playwrightMiner';
-  if (checks.is_pdf) {
+  if (checks.pdf_too_large) {
+    suggested_miner = 'File Upload (download PDF first, then upload on Jobs tab)';
+  } else if (checks.is_pdf) {
     suggested_miner = 'documentMiner (PDF)';
   } else if (checks.email_count > 5 && checks.table_count > 0) {
     suggested_miner = 'tableMiner / inlineContactMiner';

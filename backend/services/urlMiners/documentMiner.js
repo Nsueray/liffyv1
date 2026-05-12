@@ -281,8 +281,8 @@ class DocumentMiner {
             if (contentLength > 0) {
                 const sizeMB = (contentLength / 1024 / 1024).toFixed(1);
                 console.log(`[DocumentMiner] PDF size (HEAD): ${sizeMB} MB`);
-                if (contentLength > 200 * 1024 * 1024) {
-                    console.warn(`[DocumentMiner] Large PDF (${sizeMB} MB) — using disk-based processing`);
+                if (contentLength > 100 * 1024 * 1024) {
+                    throw new Error(`PDF too large (${sizeMB} MB). Maximum supported for URL mining: 100 MB. Download the file and use File Upload instead.`);
                 }
             }
         } catch (headErr) {
@@ -294,7 +294,7 @@ class DocumentMiner {
         try {
             const response = await axios.get(fullPdfUrl, {
                 responseType: 'stream',
-                timeout: 300000, // 5 min for large PDFs
+                timeout: 120000, // 2 min (PDFs > 100MB are rejected by size check above)
                 headers: { 'User-Agent': CONFIG.USER_AGENT },
             });
 

@@ -719,10 +719,10 @@ async function checkStaleJobs() {
     const staleRes = await db.query(`
       UPDATE mining_jobs
       SET status = 'failed',
-          error = 'Job timed out — stuck in running state for over 3 hours',
+          error = 'Job timed out — stuck in running state for over 1 hour',
           completed_at = NOW()
       WHERE status = 'running'
-        AND started_at < NOW() - INTERVAL '3 hours'
+        AND started_at < NOW() - INTERVAL '1 hour'
         AND (manual_required IS NULL OR manual_required = false)
       RETURNING id, name, input, organizer_id, started_at
     `);
