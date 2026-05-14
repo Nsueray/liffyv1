@@ -794,26 +794,41 @@ PDF mining uses a multi-method extraction cascade for tabular PDFs (exhibitor li
 
 ```
 documentMiner.mine(url)
-  → detect .pdf URL → download as binary
-  → fileMiner.processFile(buffer, 'download.pdf')
-    → Method 0: pdfplumber (Python) — table detection + structured extraction
-    → Method 0b: pdftotext -layout → columnar text parser (parseColumnarPdfText)
-    → Method 1: pdftotext / mutool / pdf-parse — raw text extraction
-    → Method 2: email-centric extraction (regex around emails)
-    → mergeContacts() — dedup by email, pick best fields
+  → detect .pdf URL → download to disk (stream)
+  → processFileIsolated(tempPath, 'download.pdf')     ← CHILD PROCESS (memory-safe)
+    → fork() with --max-old-space-size=1536
+    → fileMiner.processFile(buffer, 'download.pdf')
+      → Method 0: pdfplumber (Python) — table detection + structured extraction
+      → Method 0b: pdftotext -layout → columnar text parser (parseColumnarPdfText)
+      → Method 1: pdftotext / mutool / pdf-parse — raw text extraction
+      → Method 2: email-centric extraction (regex around emails)
+      → mergeContacts() — dedup by email, pick best fields
   → result.pdfContacts → flowOrchestrator (bypasses documentTextNormalizer)
   → aggregator → mining_results → persons + affiliations
 ```
+
+**Child Process Guard (OOM Protection):**
+All PDF processing runs in an isolated child process (`pdfProcessGuard.js` + `pdfChildWorker.js`).
+If a patolojik PDF causes OOM, only the child process dies — the main worker stays alive and marks the job as failed.
+
+Three paths are guarded:
+1. **documentMiner URL PDF** — `extractFromPdf()` uses `processFileIsolated()`
+2. **miningService URL PDF download** — `isPdfUrl()` path uses `processFileIsolated()`
+3. **miningService file upload PDF** — `processFilePdfIsolated()` writes buffer to disk, then uses `processFileIsolated()`
+
+Guard parameters: 1536MB memory limit, 5 minute timeout, SIGKILL/SIGSEGV detection with clear error messages.
 
 **Key components:**
 
 | Component | File | Role |
 |-----------|------|------|
+| `pdfProcessGuard.js` | `backend/services/pdfProcessGuard.js` | Fork wrapper — spawns child with memory limit, timeout, signal detection |
+| `pdfChildWorker.js` | `backend/services/pdfChildWorker.js` | Child process — receives temp path via IPC, runs fileMiner.processFile |
 | `pdfTableExtractor.py` | `backend/services/extractors/pdfTableExtractor.py` | Python pdfplumber script — detects tables, extracts headers + rows |
 | `tryPdfPlumber()` | `backend/services/fileMiner.js` | Calls Python script, parses JSON output |
 | `extractContactsFromTables()` | `backend/services/fileMiner.js` | Maps table headers to contact fields (email, company, phone, etc.) |
 | `parseColumnarPdfText()` | `backend/services/fileMiner.js` | Parses pdftotext `-layout` output with numbered entries (S/No), column detection |
-| `extractFromPdf()` | `backend/services/urlMiners/documentMiner.js` | Downloads PDF, delegates to fileMiner.processFile() |
+| `extractFromPdf()` | `backend/services/urlMiners/documentMiner.js` | Downloads PDF, delegates to processFileIsolated() |
 
 **pdfContacts pipeline bypass:**
 When documentMiner returns `pdfContacts` (pre-extracted contacts from fileMiner), the flowOrchestrator skips `documentTextNormalizer.normalize()` and uses the contacts directly. This bypass is applied in all 4 code paths:

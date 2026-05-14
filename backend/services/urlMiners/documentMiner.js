@@ -27,6 +27,9 @@ try {
     console.log('[DocumentMiner] fileMiner not available for PDF delegation');
 }
 
+// Import memory-safe PDF processing guard
+const { processFileIsolated } = require('../pdfProcessGuard');
+
 const CONFIG = {
     TIMEOUT: 30000,
     USER_AGENT: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
@@ -264,10 +267,6 @@ class DocumentMiner {
     async extractFromPdf(pdfUrl, baseUrl) {
         console.log(`[DocumentMiner] PDF delegation: ${pdfUrl}`);
 
-        if (!fileMiner) {
-            throw new Error('fileMiner module not available');
-        }
-
         const fullPdfUrl = pdfUrl.startsWith('http') ? pdfUrl : new URL(pdfUrl, baseUrl).href;
 
         // Check file size via HEAD request first
@@ -311,12 +310,10 @@ class DocumentMiner {
             const sizeMB = (stat.size / 1024 / 1024).toFixed(1);
             console.log(`[DocumentMiner] PDF downloaded to disk: ${sizeMB} MB (${tempPath})`);
 
-            // Read file into buffer for fileMiner (it needs buffer input)
-            // For very large files (>500MB), this may still use significant memory
-            // but at least we're not doubling it (axios arraybuffer + Buffer.from)
-            const buffer = await fs.promises.readFile(tempPath);
-
-            const fileResult = await fileMiner.processFile(buffer, 'download.pdf');
+            // Process PDF in isolated child process (memory-safe)
+            // If PDF causes OOM, only the child dies — worker stays alive
+            console.log(`[DocumentMiner] Processing PDF in isolated child process...`);
+            const fileResult = await processFileIsolated(tempPath, 'download.pdf');
 
             const result = {
                 text: '',

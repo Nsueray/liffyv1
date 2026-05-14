@@ -10,6 +10,7 @@
  */
 
 const { orchestrate: orchestrateFile } = require('./fileOrchestrator');
+const { processFileIsolated } = require('./pdfProcessGuard');
 const db = require('../db');
 const fs = require('fs');
 const path = require('path');
@@ -809,6 +810,46 @@ async function downloadPdfFromUrl(url, jobId) {
 }
 
 // ============================================
+// PDF ISOLATED PROCESSING (Memory-safe)
+// ============================================
+
+/**
+ * Process a PDF file upload in an isolated child process.
+ * Writes file_data to disk, runs fileMiner.processFile in child, returns result.
+ */
+async function processFilePdfIsolated(job) {
+    const tempPath = path.join(os.tmpdir(), `liffy_upload_${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`);
+
+    try {
+        // Write file_data buffer to disk
+        const buffer = Buffer.isBuffer(job.file_data)
+            ? job.file_data
+            : typeof job.file_data === 'string' && job.file_data.startsWith('\\x')
+                ? Buffer.from(job.file_data.slice(2), 'hex')
+                : Buffer.from(job.file_data);
+
+        await fs.promises.writeFile(tempPath, buffer);
+        const stat = await fs.promises.stat(tempPath);
+        console.log(`[MiningService] PDF written to temp: ${(stat.size / 1024 / 1024).toFixed(1)} MB`);
+
+        // Free the in-memory buffer now that it's on disk
+        job.file_data = null;
+
+        const filename = job.input || 'upload.pdf';
+        const fileResult = await processFileIsolated(tempPath, filename);
+
+        return {
+            status: 'SUCCESS',
+            contacts: fileResult.contacts || [],
+            emails: (fileResult.contacts || []).filter(c => c.email).map(c => c.email),
+            meta: { extraction_method: fileResult.stats?.extraction_method, source: 'pdf_upload_isolated' }
+        };
+    } finally {
+        try { await fs.promises.unlink(tempPath); } catch (_) {}
+    }
+}
+
+// ============================================
 // MAIN PROCESSOR
 // ============================================
 
@@ -821,8 +862,13 @@ async function processMiningJob(job) {
     console.log(`[MiningService] Processing job ${job.id}`);
     console.log(`[MiningService] Type: ${jobType}, Input: ${job.input}`);
 
-    // FILE JOBS → File Orchestrator
+    // FILE JOBS → File Orchestrator (PDF files use isolated child process)
     if (jobType === 'file') {
+        const ext = path.extname(job.input || '').toLowerCase();
+        if (ext === '.pdf' && job.file_data) {
+            console.log(`[MiningService] PDF file upload — routing to isolated child process`);
+            return processFilePdfIsolated(job);
+        }
         console.log(`[MiningService] Routing to File Orchestrator`);
         return orchestrateFile(job);
     }
@@ -838,22 +884,15 @@ async function processMiningJob(job) {
             try {
                 // Download PDF to temp file
                 tempFilePath = await downloadPdfFromUrl(job.input, job.id);
-                
-                // Read file into buffer for file_data
-                const fileBuffer = fs.readFileSync(tempFilePath);
-                console.log(`[MiningService] PDF loaded into buffer: ${fileBuffer.length} bytes`);
-                
+
                 // Extract filename from URL for extension detection
                 const urlObj = new URL(job.input);
                 const originalFilename = path.basename(urlObj.pathname) || 'downloaded.pdf';
-                
-                // Attach file_data to job for File Orchestrator
-                job.file_data = fileBuffer;
-                job.type = 'pdf';
-                job.input = originalFilename;
-                
-                const result = await orchestrateFile(job);
-                
+
+                // Process PDF in isolated child process (memory-safe)
+                console.log(`[MiningService] Processing PDF URL in isolated child process...`);
+                const fileResult = await processFileIsolated(tempFilePath, originalFilename);
+
                 // Cleanup temp file after processing
                 try {
                     fs.unlinkSync(tempFilePath);
@@ -861,8 +900,14 @@ async function processMiningJob(job) {
                 } catch (cleanupErr) {
                     console.log(`[MiningService] Temp file cleanup warning: ${cleanupErr.message}`);
                 }
-                
-                return result;
+
+                // Convert fileMiner result to miningService result format
+                return {
+                    status: 'SUCCESS',
+                    contacts: fileResult.contacts || [],
+                    emails: (fileResult.contacts || []).filter(c => c.email).map(c => c.email),
+                    meta: { extraction_method: fileResult.stats?.extraction_method, source: 'pdf_url_isolated' }
+                };
                 
             } catch (downloadErr) {
                 console.error(`[MiningService] PDF download failed: ${downloadErr.message}`);
