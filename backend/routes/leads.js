@@ -295,14 +295,15 @@ router.post('/import', authRequired, async (req, res) => {
         const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null;
 
         const personResult = await client.query(
-          `INSERT INTO persons (organizer_id, email, first_name, last_name)
-           VALUES ($1, $2, $3, $4)
+          `INSERT INTO persons (organizer_id, email, first_name, last_name, sales_owner_user_id)
+           VALUES ($1, $2, $3, $4, $5)
            ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
              first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
              last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
+             sales_owner_user_id = COALESCE(persons.sales_owner_user_id, EXCLUDED.sales_owner_user_id),
              updated_at = NOW()
            RETURNING id`,
-          [organizerId, email, firstName, lastName]
+          [organizerId, email, firstName, lastName, req.auth.user_id]
         );
         personsUpserted++;
         const personId = personResult.rows[0].id;

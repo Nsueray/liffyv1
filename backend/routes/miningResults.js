@@ -484,7 +484,7 @@ router.get('/api/mining/jobs/:id/results', authRequired, validateJobId, async (r
  * Process a single batch of mining results for import.
  * Called by the background processor within a transaction.
  */
-async function processImportBatch(client, batchRows, organizerId, jobId, tagsArray, listId, onRowProgress) {
+async function processImportBatch(client, batchRows, organizerId, jobId, tagsArray, listId, onRowProgress, userId) {
   let imported = 0, skipped = 0, duplicates = 0;
   let personsUpserted = 0, affiliationsUpserted = 0;
   const errors = [];
@@ -594,14 +594,15 @@ async function processImportBatch(client, batchRows, organizerId, jobId, tagsArr
       const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null;
 
       const personResult = await client.query(
-        `INSERT INTO persons (organizer_id, email, first_name, last_name)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO persons (organizer_id, email, first_name, last_name, sales_owner_user_id)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
            first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
            last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
+           sales_owner_user_id = COALESCE(persons.sales_owner_user_id, EXCLUDED.sales_owner_user_id),
            updated_at = NOW()
          RETURNING id`,
-        [organizerId, trimmedEmail, firstName, lastName]
+        [organizerId, trimmedEmail, firstName, lastName, userId || null]
       );
       personsUpserted++;
       const personId = personResult.rows[0].id;

@@ -209,7 +209,7 @@ const CSV_BATCH_SIZE = 200;
  * Background processor for large CSV uploads.
  * Processes rows in batches with per-batch transactions.
  */
-async function processCSVRowsInBackground(validRows, organizerId, listId, tags) {
+async function processCSVRowsInBackground(validRows, organizerId, listId, tags, userId) {
   let imported = 0, skipped = 0;
   const errors = [];
   let personsUpserted = 0, affiliationsUpserted = 0;
@@ -278,14 +278,15 @@ async function processCSVRowsInBackground(validRows, organizerId, listId, tags) 
             const lastName = row.last_name || (row.name && row.name.includes(' ') ? row.name.split(/\s+/).slice(1).join(' ') : null);
 
             const personResult = await client.query(
-              `INSERT INTO persons (organizer_id, email, first_name, last_name)
-               VALUES ($1, $2, $3, $4)
+              `INSERT INTO persons (organizer_id, email, first_name, last_name, sales_owner_user_id)
+               VALUES ($1, $2, $3, $4, $5)
                ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
                  first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
                  last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
+                 sales_owner_user_id = COALESCE(persons.sales_owner_user_id, EXCLUDED.sales_owner_user_id),
                  updated_at = NOW()
                RETURNING id`,
-              [organizerId, email, firstName || null, lastName || null]
+              [organizerId, email, firstName || null, lastName || null, userId || null]
             );
             personsUpserted++;
             const personId = personResult.rows[0].id;
@@ -469,7 +470,7 @@ router.post('/upload-csv', authRequired, upload.single('file'), async (req, res)
       });
 
       setImmediate(() => {
-        processCSVRowsInBackground(validRows, organizerId, newList.id, tags).catch(async (err) => {
+        processCSVRowsInBackground(validRows, organizerId, newList.id, tags, req.auth.user_id).catch(async (err) => {
           console.error(`[csv-import] FATAL: Unhandled rejection for list ${newList.id}:`, err.message);
           console.error(err.stack);
           try {
@@ -544,14 +545,15 @@ router.post('/upload-csv', authRequired, upload.single('file'), async (req, res)
           const lastName = row.last_name || (row.name && row.name.includes(' ') ? row.name.split(/\s+/).slice(1).join(' ') : null);
 
           const personResult = await client.query(
-            `INSERT INTO persons (organizer_id, email, first_name, last_name)
-             VALUES ($1, $2, $3, $4)
+            `INSERT INTO persons (organizer_id, email, first_name, last_name, sales_owner_user_id)
+             VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
                first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
                last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
+               sales_owner_user_id = COALESCE(persons.sales_owner_user_id, EXCLUDED.sales_owner_user_id),
                updated_at = NOW()
              RETURNING id`,
-            [organizerId, email, firstName || null, lastName || null]
+            [organizerId, email, firstName || null, lastName || null, req.auth.user_id]
           );
           personsUpserted++;
           const personId = personResult.rows[0].id;
