@@ -4,6 +4,7 @@ const db = require('../db');
 const jwt = require('jsonwebtoken');
 
 const { generateExport } = require('../utils/exportHelper');
+const { getHierarchicalScope } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -89,6 +90,10 @@ router.get('/', authRequired, async (req, res) => {
       )`);
     }
 
+    // User scope: sales_owner_user_id hierarchy (owner/admin sees all)
+    const scope = getHierarchicalScope(req, 'p.sales_owner_user_id', idx);
+    idx = scope.nextIndex;
+
     const whereClause = where.join(' AND ');
 
     // Count total
@@ -102,8 +107,8 @@ router.get('/', authRequired, async (req, res) => {
            AND (company_name IS NULL OR company_name NOT LIKE '%@%')
          ORDER BY created_at DESC LIMIT 1
        ) a ON true
-       WHERE ${whereClause}`,
-      params
+       WHERE ${whereClause} ${scope.sql}`,
+      [...params, ...scope.params]
     );
     const total = parseInt(countRes.rows[0].count, 10);
 
@@ -140,10 +145,10 @@ router.get('/', authRequired, async (req, res) => {
            AND (company_name IS NULL OR company_name NOT LIKE '%@%')
          ORDER BY created_at DESC LIMIT 1
        ) a ON true
-       WHERE ${whereClause}
+       WHERE ${whereClause} ${scope.sql}
        ORDER BY p.created_at DESC
        LIMIT $${idx} OFFSET $${idx + 1}`,
-      [...params, limit, offset]
+      [...params, ...scope.params, limit, offset]
     );
 
     res.json({
@@ -314,6 +319,10 @@ router.get('/export', authRequired, async (req, res) => {
       )`);
     }
 
+    // User scope: sales_owner_user_id hierarchy (owner/admin sees all)
+    const scope = getHierarchicalScope(req, 'p.sales_owner_user_id', idx);
+    idx = scope.nextIndex;
+
     const whereClause = where.join(' AND ');
 
     // Use CTEs to pre-aggregate engagement stats instead of correlated subqueries (75K+ persons)
@@ -391,9 +400,9 @@ router.get('/export', authRequired, async (req, res) => {
       LEFT JOIN last_camp lc ON lc.email = p.email AND lc.organizer_id = p.organizer_id
       LEFT JOIN person_lists pl ON pl.person_id = p.id
       LEFT JOIN person_intent pi ON pi.person_id = p.id
-      WHERE ${whereClause}
+      WHERE ${whereClause} ${scope.sql}
       ORDER BY p.created_at DESC`,
-      params
+      [...params, ...scope.params]
     );
 
     const rows = dataRes.rows.map(r => ({
@@ -448,6 +457,18 @@ router.get('/:id/campaigns', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
     const personId = req.params.id;
 
+    // Verify person exists and user has access via sales_owner hierarchy
+    const scope = getHierarchicalScope(req, 'p.sales_owner_user_id', 3);
+
+    const personCheck = await db.query(
+      `SELECT p.id FROM persons p WHERE p.id = $1 AND p.organizer_id = $2 ${scope.sql}`,
+      [personId, organizerId, ...scope.params]
+    );
+
+    if (personCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Person not found' });
+    }
+
     const result = await db.query(
       `SELECT c.id, c.name, c.status, c.created_at,
          COUNT(CASE WHEN ce.event_type = 'sent' THEN 1 END)::int AS sent,
@@ -477,11 +498,13 @@ router.get('/:id', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
     const personId = req.params.id;
 
+    const scope = getHierarchicalScope(req, 'p.sales_owner_user_id', 3);
+
     const personRes = await db.query(
       `SELECT id, email, first_name, last_name, verification_status, verified_at, created_at, updated_at
-       FROM persons
-       WHERE id = $1 AND organizer_id = $2`,
-      [personId, organizerId]
+       FROM persons p
+       WHERE p.id = $1 AND p.organizer_id = $2 ${scope.sql}`,
+      [personId, organizerId, ...scope.params]
     );
 
     if (personRes.rows.length === 0) {
@@ -554,10 +577,12 @@ router.get('/:id/affiliations', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
     const personId = req.params.id;
 
-    // Verify person exists
+    // Verify person exists and user has access via sales_owner hierarchy
+    const scope = getHierarchicalScope(req, 'p.sales_owner_user_id', 3);
+
     const personRes = await db.query(
-      `SELECT id FROM persons WHERE id = $1 AND organizer_id = $2`,
-      [personId, organizerId]
+      `SELECT p.id FROM persons p WHERE p.id = $1 AND p.organizer_id = $2 ${scope.sql}`,
+      [personId, organizerId, ...scope.params]
     );
 
     if (personRes.rows.length === 0) {

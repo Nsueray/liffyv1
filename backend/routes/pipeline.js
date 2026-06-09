@@ -14,7 +14,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { authRequired } = require('../middleware/auth');
-const { isPrivileged, getUserContext, canAccessRowHierarchical } = require('../middleware/userScope');
+const { isPrivileged, getUserContext, canAccessRowHierarchical, getHierarchicalScope } = require('../middleware/userScope');
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (v) => typeof v === 'string' && UUID_REGEX.test(v);
@@ -195,6 +195,9 @@ router.get('/api/pipeline/board', authRequired, async (req, res) => {
       return res.json({ stages: [], total_people: 0 });
     }
 
+    // User scope: persons.sales_owner_user_id hierarchy (owner/admin sees all)
+    const scope = getHierarchicalScope(req, 'p.sales_owner_user_id', 3);
+
     // Single query: for each stage, return up to `limit` most-recently-entered persons,
     // with their most recent affiliation (LATERAL) and latest activity (LATERAL).
     const q = `
@@ -214,6 +217,7 @@ router.get('/api/pipeline/board', authRequired, async (req, res) => {
         FROM persons p
         WHERE p.organizer_id = $1
           AND p.pipeline_stage_id IS NOT NULL
+          ${scope.sql}
       )
       SELECT
         r.id,
@@ -245,7 +249,7 @@ router.get('/api/pipeline/board', authRequired, async (req, res) => {
       WHERE r.rn <= $2
       ORDER BY r.pipeline_stage_id, r.pipeline_entered_at DESC NULLS LAST
     `;
-    const peopleRes = await db.query(q, [organizerId, limit]);
+    const peopleRes = await db.query(q, [organizerId, limit, ...scope.params]);
 
     // Also get exact count per stage (for when stage has > limit)
     // stage_count is already included in the window, but if a stage has 0 people

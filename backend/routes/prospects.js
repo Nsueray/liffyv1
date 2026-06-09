@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
+const { getHierarchicalScope } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -134,6 +135,10 @@ router.get('/api/prospects', authRequired, async (req, res) => {
       idx++;
     }
 
+    // User scope: persons.sales_owner_user_id hierarchy (owner/admin sees all)
+    const scope = getHierarchicalScope(req, 'p.sales_owner_user_id', idx);
+    idx = scope.nextIndex;
+
     const whereClause = where.join(' AND ');
 
     const countRes = await db.query(
@@ -145,8 +150,8 @@ router.get('/api/prospects', authRequired, async (req, res) => {
          ORDER BY created_at DESC LIMIT 1
        ) a ON true
        LEFT JOIN campaigns c ON c.id = pi.campaign_id
-       WHERE ${whereClause}`,
-      params
+       WHERE ${whereClause} ${scope.sql}`,
+      [...params, ...scope.params]
     );
     const total = parseInt(countRes.rows[0].count, 10);
 
@@ -175,13 +180,14 @@ router.get('/api/prospects', authRequired, async (req, res) => {
          LIMIT 1
        ) a ON true
        LEFT JOIN campaigns c ON c.id = pi.campaign_id
-       WHERE ${whereClause}
+       WHERE ${whereClause} ${scope.sql}
        ORDER BY pi.occurred_at DESC
        LIMIT $${idx} OFFSET $${idx + 1}`,
-      [...params, limit, offset]
+      [...params, ...scope.params, limit, offset]
     );
 
-    // Stats summary
+    // Stats summary (scoped to user's visible persons)
+    const statsScope = getHierarchicalScope(req, 'p.sales_owner_user_id', 2);
     const statsRes = await db.query(
       `SELECT
          COUNT(DISTINCT pi.person_id)::int AS total_prospects,
@@ -189,8 +195,9 @@ router.get('/api/prospects', authRequired, async (req, res) => {
          COUNT(*) FILTER (WHERE pi.intent_type = 'reply')::int AS replies,
          COUNT(*) FILTER (WHERE pi.intent_type = 'click_through')::int AS clicks
        FROM prospect_intents pi
-       WHERE pi.organizer_id = $1`,
-      [organizerId]
+       JOIN persons p ON p.id = pi.person_id
+       WHERE pi.organizer_id = $1 ${statsScope.sql}`,
+      [organizerId, ...statsScope.params]
     );
 
     res.json({

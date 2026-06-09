@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const jwt = require('jsonwebtoken');
+const { getHierarchicalScope } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -70,11 +71,15 @@ router.get('/', authRequired, async (req, res) => {
       paramIndex++;
     }
 
-    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+    // User scope: sales_owner_user_id hierarchy (owner/admin sees all)
+    const scope = getHierarchicalScope(req, 'sales_owner_user_id', paramIndex);
+    paramIndex = scope.nextIndex;
+
+    const whereClause = `WHERE ${conditions.join(' AND ')} ${scope.sql}`;
 
     const countResult = await db.query(
       `SELECT COUNT(*) FROM prospects ${whereClause}`,
-      params
+      [...params, ...scope.params]
     );
     const total = parseInt(countResult.rows[0].count, 10);
 
@@ -97,7 +102,7 @@ router.get('/', authRequired, async (req, res) => {
       ORDER BY created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
       `,
-      [...params, limit, offset]
+      [...params, ...scope.params, limit, offset]
     );
 
     res.json({

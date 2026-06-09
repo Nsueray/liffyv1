@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 const { authRequired } = require('../middleware/auth');
+const { getHierarchicalScope } = require('../middleware/userScope');
 
 /**
  * GET /api/companies
@@ -43,6 +44,10 @@ router.get('/', authRequired, async (req, res) => {
       paramIdx++;
     }
 
+    // User scope: persons.sales_owner_user_id hierarchy (owner/admin sees all)
+    const scope = getHierarchicalScope(req, 'p.sales_owner_user_id', paramIdx);
+    paramIdx = scope.nextIndex;
+
     const whereClause = where.join(' AND ');
 
     const havingClauses = [];
@@ -70,16 +75,16 @@ router.get('/', authRequired, async (req, res) => {
         SELECT LOWER(TRIM(a.company_name)) as company_key
         FROM affiliations a
         JOIN persons p ON p.id = a.person_id AND p.organizer_id = a.organizer_id
-        WHERE ${whereClause}
+        WHERE ${whereClause} ${scope.sql}
         GROUP BY LOWER(TRIM(a.company_name))
         ${havingSQL}
       ) sub
     `;
-    const countRes = await db.query(countSQL, params);
+    const countRes = await db.query(countSQL, [...params, ...scope.params]);
     const total = parseInt(countRes.rows[0].total);
 
     // Data query
-    const dataParams = [...params, limit, offset];
+    const dataParams = [...params, ...scope.params, limit, offset];
     const dataSQL = `
       SELECT
         LOWER(TRIM(a.company_name)) as company_key,
@@ -91,7 +96,7 @@ router.get('/', authRequired, async (req, res) => {
         MAX(a.created_at) as last_added
       FROM affiliations a
       JOIN persons p ON p.id = a.person_id AND p.organizer_id = a.organizer_id
-      WHERE ${whereClause}
+      WHERE ${whereClause} ${scope.sql}
       GROUP BY LOWER(TRIM(a.company_name))
       ${havingSQL}
       ORDER BY ${orderCol} ${sortOrder}
@@ -99,12 +104,14 @@ router.get('/', authRequired, async (req, res) => {
     `;
     const dataRes = await db.query(dataSQL, dataParams);
 
-    // Get industry list for filter dropdown
+    // Get industry list for filter dropdown (scoped to user's visible persons)
+    const indScope = getHierarchicalScope(req, 'p.sales_owner_user_id', 2);
     const industriesRes = await db.query(
-      `SELECT DISTINCT industry FROM affiliations
-       WHERE organizer_id = $1 AND industry IS NOT NULL AND TRIM(industry) != ''
-       ORDER BY industry`,
-      [organizerId]
+      `SELECT DISTINCT a.industry FROM affiliations a
+       JOIN persons p ON p.id = a.person_id AND p.organizer_id = a.organizer_id
+       WHERE a.organizer_id = $1 AND a.industry IS NOT NULL AND TRIM(a.industry) != '' ${indScope.sql}
+       ORDER BY a.industry`,
+      [organizerId, ...indScope.params]
     );
 
     res.json({
@@ -133,6 +140,8 @@ router.get('/:companyName/contacts', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'Company name is required' });
     }
 
+    const scope = getHierarchicalScope(req, 'p.sales_owner_user_id', 3);
+
     const result = await db.query(
       `SELECT
         p.id as person_id,
@@ -152,8 +161,9 @@ router.get('/:companyName/contacts', authRequired, async (req, res) => {
       JOIN persons p ON p.id = a.person_id AND p.organizer_id = a.organizer_id
       WHERE a.organizer_id = $1
         AND LOWER(TRIM(a.company_name)) = LOWER($2)
+        ${scope.sql}
       ORDER BY p.last_name, p.first_name, p.email`,
-      [organizerId, companyName]
+      [organizerId, companyName, ...scope.params]
     );
 
     res.json({
