@@ -610,6 +610,116 @@ router.get('/:id/affiliations', authRequired, async (req, res) => {
   }
 });
 
+// POST /api/persons — Create a single person (manual entry by salesperson)
+// sales_owner_user_id defaults to creating user. Optional override with hierarchy check.
+// ON CONFLICT: do NOT overwrite existing owner.
+router.post('/', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const userId = req.auth.user_id;
+    const { email, first_name, last_name, verification_status, sales_owner_user_id: requestedOwner } = req.body || {};
+
+    if (!email || typeof email !== 'string' || !email.includes('@')) {
+      return res.status(400).json({ error: 'Valid email is required' });
+    }
+    const trimmedEmail = email.trim().toLowerCase();
+
+    // Determine owner: explicit or default to creator
+    let ownerId = userId;
+    if (requestedOwner) {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidRegex.test(requestedOwner)) {
+        return res.status(400).json({ error: 'Invalid sales_owner_user_id format' });
+      }
+      // Verify target user exists and belongs to same organizer
+      const targetUser = await db.query(
+        `SELECT id FROM users WHERE id = $1 AND organizer_id = $2`,
+        [requestedOwner, organizerId]
+      );
+      if (targetUser.rows.length === 0) {
+        return res.status(400).json({ error: 'Target user not found in this organization' });
+      }
+      // Hierarchy check: can creator assign to this user?
+      if (!(await canAccessRowHierarchical(req, requestedOwner))) {
+        return res.status(403).json({ error: 'Bu kullanıcıya atama yetkiniz yok' });
+      }
+      ownerId = requestedOwner;
+    }
+
+    // Check if person already exists in this org
+    const existing = await db.query(
+      `SELECT id, email, first_name, last_name, sales_owner_user_id
+         FROM persons WHERE organizer_id = $1 AND LOWER(email) = $2 LIMIT 1`,
+      [organizerId, trimmedEmail]
+    );
+
+    if (existing.rows.length > 0) {
+      // Person exists — fill blanks but NEVER overwrite sales_owner_user_id
+      const person = existing.rows[0];
+      const sets = [];
+      const vals = [];
+      let idx = 1;
+
+      if (!person.first_name && first_name) {
+        sets.push(`first_name = $${idx++}`);
+        vals.push(first_name.trim());
+      }
+      if (!person.last_name && last_name) {
+        sets.push(`last_name = $${idx++}`);
+        vals.push(last_name.trim());
+      }
+      if (!person.sales_owner_user_id) {
+        sets.push(`sales_owner_user_id = $${idx++}`);
+        vals.push(ownerId);
+      }
+
+      if (sets.length > 0) {
+        sets.push(`updated_at = NOW()`);
+        vals.push(person.id, organizerId);
+        await db.query(
+          `UPDATE persons SET ${sets.join(', ')} WHERE id = $${idx++} AND organizer_id = $${idx}`,
+          vals
+        );
+      }
+
+      // Re-fetch updated record
+      const updated = await db.query(
+        `SELECT id, email, first_name, last_name, verification_status, sales_owner_user_id, created_at
+           FROM persons WHERE id = $1`,
+        [person.id]
+      );
+
+      return res.status(200).json({
+        person: updated.rows[0],
+        created: false,
+        message: person.sales_owner_user_id
+          ? 'Person already exists (owned by another user — ownership preserved)'
+          : 'Person already exists (ownership assigned to you)'
+      });
+    }
+
+    // New person — INSERT with resolved owner
+    const r = await db.query(
+      `INSERT INTO persons (organizer_id, email, first_name, last_name, verification_status, sales_owner_user_id)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, email, first_name, last_name, verification_status, sales_owner_user_id, created_at`,
+      [
+        organizerId,
+        trimmedEmail,
+        first_name ? first_name.trim() : null,
+        last_name ? last_name.trim() : null,
+        verification_status || 'unverified',
+        ownerId
+      ]
+    );
+
+    res.status(201).json({ person: r.rows[0], created: true });
+  } catch (err) {
+    console.error('POST /api/persons error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/persons/:id — Delete person and cascade affiliations
 // Access: owner + manager only. Scope: must have access to person's sales_owner_user_id.
 router.delete('/:id', authRequired, async (req, res) => {
