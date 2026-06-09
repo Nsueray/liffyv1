@@ -7,40 +7,13 @@
 
 const db = require('../db');
 const { processSequenceStep } = require('./sequenceService');
+const { getRemainingDailyLimit } = require('../utils/dailyLimit');
 
 const POLL_INTERVAL_MS = parseInt(process.env.SEQUENCE_POLL_INTERVAL_MS, 10) || 60000; // 60s
 const BATCH_SIZE = parseInt(process.env.SEQUENCE_BATCH_SIZE, 10) || 50;
 
 let intervalHandle = null;
 let isProcessing = false;
-
-// ---------------------------------------------------------------------------
-// checkDailyLimit — returns remaining sends for this user today
-// ---------------------------------------------------------------------------
-async function getRemainingDailyLimit(userId) {
-  if (!userId) return Infinity;
-
-  const limitRes = await db.query(
-    `SELECT daily_email_limit FROM users WHERE id = $1`,
-    [userId]
-  );
-  if (limitRes.rows.length === 0) return 0;
-  const limit = parseInt(limitRes.rows[0].daily_email_limit, 10);
-
-  const sentRes = await db.query(
-    `SELECT COUNT(*)::int AS count
-       FROM campaign_events ce
-       JOIN campaigns c ON c.id = ce.campaign_id
-      WHERE ce.event_type = 'sent'
-        AND ce.occurred_at >= CURRENT_DATE
-        AND ce.organizer_id = (SELECT organizer_id FROM users WHERE id = $1)
-        AND c.created_by_user_id = $1`,
-    [userId]
-  );
-  const sentToday = parseInt(sentRes.rows[0].count, 10);
-
-  return Math.max(0, limit - sentToday);
-}
 
 // ---------------------------------------------------------------------------
 // pollAndProcess — main polling loop

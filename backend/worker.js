@@ -18,6 +18,7 @@ const {
 // TEMPLATE PROCESSOR (shared — single source of truth)
 // ============================================================
 const { processTemplate, convertPlainTextToHtml } = require("./utils/templateProcessor");
+const { getRemainingDailyLimit } = require("./utils/dailyLimit");
 
 
 /* =========================================================
@@ -182,12 +183,24 @@ async function processSendingCampaigns() {
         continue; // Skip this campaign
       }
 
+      // Daily limit check per campaign owner — clamp batch size to remaining allowance
+      let batchLimit = EMAIL_BATCH_SIZE;
+      const ownerId = campaign.created_by_user_id;
+      if (ownerId) {
+        const remaining = await getRemainingDailyLimit(ownerId);
+        if (remaining <= 0) {
+          console.log(`[Campaign ${campaign.id}] Daily limit reached for user ${ownerId}, skipping batch`);
+          continue;
+        }
+        batchLimit = Math.min(EMAIL_BATCH_SIZE, remaining);
+      }
+
       const recipients = await client.query(`
         SELECT * FROM campaign_recipients
         WHERE campaign_id = $1 AND status='pending'
         LIMIT $2
         FOR UPDATE SKIP LOCKED
-      `, [campaign.id, EMAIL_BATCH_SIZE]);
+      `, [campaign.id, batchLimit]);
 
       console.log(`[Campaign ${campaign.id}] Processing ${recipients.rows.length} recipients (concurrency=${EMAIL_CONCURRENCY})`);
 
