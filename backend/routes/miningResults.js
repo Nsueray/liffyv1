@@ -680,7 +680,7 @@ async function processImportBatch(client, batchRows, organizerId, jobId, tagsArr
  * Processes mining results in batches of IMPORT_BATCH_SIZE with per-batch transactions.
  * Each batch commits independently so partial imports survive crashes.
  */
-async function processImportInBackground(jobId, organizerId, tagsArray, listId) {
+async function processImportInBackground(jobId, organizerId, tagsArray, listId, userId) {
   let totalImported = 0, totalSkipped = 0, totalDuplicates = 0;
   let totalPersonsUpserted = 0, totalAffiliationsUpserted = 0;
   const allErrors = [];
@@ -754,7 +754,7 @@ async function processImportInBackground(jobId, organizerId, tagsArray, listId) 
           }
         };
 
-        const result = await processImportBatch(client, batchRes.rows, organizerId, jobId, tagsArray, listId, onRowProgress);
+        const result = await processImportBatch(client, batchRes.rows, organizerId, jobId, tagsArray, listId, onRowProgress, userId);
         await client.query('COMMIT');
 
         totalImported += result.imported;
@@ -968,7 +968,7 @@ router.post('/api/mining/jobs/:id/import-all', authRequired, validateJobId, asyn
 
     // Launch background processing (non-blocking)
     setImmediate(() => {
-      processImportInBackground(jobId, organizerId, tagsArray, listId).catch(async (err) => {
+      processImportInBackground(jobId, organizerId, tagsArray, listId, req.auth.user_id).catch(async (err) => {
         console.error(`[import-all] FATAL: Unhandled rejection for job ${jobId}:`, err.message);
         console.error(err.stack);
         try {
