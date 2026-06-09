@@ -362,9 +362,9 @@ router.patch('/api/persons/:id/stage', authRequired, async (req, res) => {
     // Update person
     const updRes = await db.query(
       `UPDATE persons
-          SET pipeline_stage_id = $1,
-              pipeline_entered_at = CASE WHEN $1 IS NULL THEN NULL ELSE NOW() END,
-              pipeline_assigned_user_id = CASE WHEN $1 IS NULL THEN NULL ELSE $4 END
+          SET pipeline_stage_id = $1::uuid,
+              pipeline_entered_at = CASE WHEN $1::uuid IS NULL THEN NULL ELSE NOW() END,
+              pipeline_assigned_user_id = CASE WHEN $1::uuid IS NULL THEN NULL ELSE $4::uuid END
         WHERE id = $2 AND organizer_id = $3
         RETURNING id, pipeline_stage_id, pipeline_entered_at, pipeline_assigned_user_id`,
       [stage_id || null, id, organizerId, nextAssignee]
