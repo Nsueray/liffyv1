@@ -325,9 +325,9 @@ router.patch('/api/persons/:id/stage', authRequired, async (req, res) => {
       return res.status(400).json({ error: 'Invalid stage_id' });
     }
 
-    // Load current person (for from_stage + ownership check)
+    // Load current person (for from_stage + ownership + scope check)
     const personRes = await db.query(
-      `SELECT id, pipeline_stage_id, pipeline_assigned_user_id FROM persons
+      `SELECT id, pipeline_stage_id, pipeline_assigned_user_id, sales_owner_user_id FROM persons
         WHERE id = $1 AND organizer_id = $2 LIMIT 1`,
       [id, organizerId]
     );
@@ -336,8 +336,15 @@ router.patch('/api/persons/:id/stage', authRequired, async (req, res) => {
     }
     const fromStageId = personRes.rows[0].pipeline_stage_id;
     const currentAssignee = personRes.rows[0].pipeline_assigned_user_id;
+    const salesOwner = personRes.rows[0].sales_owner_user_id;
 
-    // Ownership enforcement for non-privileged users (managers can access team's)
+    // Scope enforcement: user must have access to this person's sales_owner_user_id
+    // (owner/admin always passes — canAccessRowHierarchical returns true for them)
+    if (salesOwner && !(await canAccessRowHierarchical(req, salesOwner))) {
+      return res.status(403).json({ error: 'You do not have access to this contact' });
+    }
+
+    // Assignee enforcement for non-privileged users (managers can access team's)
     if (currentAssignee && !(await canAccessRowHierarchical(req, currentAssignee))) {
       return res.status(403).json({ error: 'This contact is assigned to another user' });
     }

@@ -4,7 +4,7 @@ const db = require('../db');
 const jwt = require('jsonwebtoken');
 
 const { generateExport } = require('../utils/exportHelper');
-const { getHierarchicalScope } = require('../middleware/userScope');
+const { getHierarchicalScope, canAccessRowHierarchical } = require('../middleware/userScope');
 
 const JWT_SECRET = process.env.JWT_SECRET || "liffy_secret_key_change_me";
 
@@ -611,14 +611,22 @@ router.get('/:id/affiliations', authRequired, async (req, res) => {
 });
 
 // DELETE /api/persons/:id — Delete person and cascade affiliations
+// Access: owner + manager only. Scope: must have access to person's sales_owner_user_id.
 router.delete('/:id', authRequired, async (req, res) => {
   try {
     const organizerId = req.auth.organizer_id;
+    const userId = req.auth.user_id;
+    const role = req.auth.role;
     const personId = req.params.id;
+
+    // Role gate: only owner and manager can delete
+    if (role !== 'owner' && role !== 'admin' && role !== 'manager') {
+      return res.status(403).json({ error: 'Bu işlem için yetkiniz yok' });
+    }
 
     // Verify person exists
     const personRes = await db.query(
-      `SELECT id, email FROM persons WHERE id = $1 AND organizer_id = $2`,
+      `SELECT id, email, first_name, last_name, sales_owner_user_id FROM persons WHERE id = $1 AND organizer_id = $2`,
       [personId, organizerId]
     );
 
@@ -626,25 +634,52 @@ router.delete('/:id', authRequired, async (req, res) => {
       return res.status(404).json({ error: 'Person not found' });
     }
 
-    // Delete affiliations first (FK constraint)
+    const person = personRes.rows[0];
+
+    // Scope: must have hierarchical access to person's sales owner
+    if (person.sales_owner_user_id && !(await canAccessRowHierarchical(req, person.sales_owner_user_id))) {
+      return res.status(403).json({ error: 'Bu kişiye erişim yetkiniz yok' });
+    }
+
+    // Reason required
+    const reason = (req.body && req.body.reason || '').trim();
+    if (!reason) {
+      return res.status(400).json({ error: 'Silme sebebi zorunlu' });
+    }
+
+    // Cascade: contact_activities has ON DELETE CASCADE from persons,
+    // so we only need to delete non-cascading FKs manually.
+    // Delete affiliations (no cascade)
     await db.query(
       `DELETE FROM affiliations WHERE person_id = $1 AND organizer_id = $2`,
       [personId, organizerId]
     );
 
-    // Delete from zoho_push_log (FK constraint)
+    // Delete from zoho_push_log (no cascade)
     await db.query(
       `DELETE FROM zoho_push_log WHERE person_id = $1 AND organizer_id = $2`,
       [personId, organizerId]
     );
 
-    // Delete person
+    // Delete person (contact_activities cascade-deleted automatically)
     await db.query(
       `DELETE FROM persons WHERE id = $1 AND organizer_id = $2`,
       [personId, organizerId]
     );
 
-    res.json({ success: true, deleted_email: personRes.rows[0].email });
+    // Audit log: contact_activities has ON DELETE CASCADE so DB log is impossible
+    // after person deletion. Log to server console (persistent in Render logs).
+    console.log('[AUDIT] Person deleted:', JSON.stringify({
+      person_id: personId,
+      email: person.email,
+      first_name: person.first_name,
+      last_name: person.last_name,
+      deleted_by_user_id: userId,
+      reason,
+      timestamp: new Date().toISOString(),
+    }));
+
+    res.json({ success: true, deleted_email: person.email });
   } catch (err) {
     console.error('DELETE /api/persons/:id error:', err);
     res.status(500).json({ error: err.message });
