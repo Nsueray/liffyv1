@@ -501,7 +501,7 @@ router.get('/:id', authRequired, async (req, res) => {
     const scope = getHierarchicalScope(req, 'p.sales_owner_user_id', 3);
 
     const personRes = await db.query(
-      `SELECT id, email, first_name, last_name, verification_status, verified_at, created_at, updated_at
+      `SELECT id, email, first_name, last_name, verification_status, verified_at, sales_owner_user_id, created_at, updated_at
        FROM persons p
        WHERE p.id = $1 AND p.organizer_id = $2 ${scope.sql}`,
       [personId, organizerId, ...scope.params]
