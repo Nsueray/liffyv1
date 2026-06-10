@@ -36,6 +36,55 @@ function requirePrivileged(req, res, next) {
 }
 
 // -----------------------------------------------------------------------------
+// GET /api/users/assignable — scope-filtered user list for owner dropdowns.
+// Every role can call this. Returns only users the caller can assign to:
+//   owner/admin → all active users in org
+//   manager     → self + descendants (recursive reports_to CTE)
+//   sales_rep   → self only (no descendants)
+// Minimal fields: id, first_name, last_name, email, role.
+// -----------------------------------------------------------------------------
+router.get('/assignable', authRequired, async (req, res) => {
+  try {
+    const { userId, organizerId } = getUserContext(req);
+
+    if (isPrivileged(req)) {
+      // Owner/admin: all active users in org
+      const r = await db.query(
+        `SELECT id, first_name, last_name, email, role
+           FROM users
+          WHERE organizer_id = $1 AND is_active = true
+          ORDER BY
+            CASE role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 WHEN 'manager' THEN 2 ELSE 3 END,
+            first_name ASC, email ASC`,
+        [organizerId]
+      );
+      return res.json({ users: r.rows });
+    }
+
+    // Manager/rep: self + all descendants via recursive CTE
+    const r = await db.query(
+      `WITH RECURSIVE my_team AS (
+         SELECT id FROM users WHERE id = $1
+         UNION ALL
+         SELECT u.id FROM users u JOIN my_team t ON u.reports_to = t.id
+       )
+       SELECT u.id, u.first_name, u.last_name, u.email, u.role
+         FROM users u
+         JOIN my_team mt ON mt.id = u.id
+        WHERE u.organizer_id = $2 AND u.is_active = true
+        ORDER BY
+          CASE u.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 WHEN 'manager' THEN 2 ELSE 3 END,
+          u.first_name ASC, u.email ASC`,
+      [userId, organizerId]
+    );
+    res.json({ users: r.rows });
+  } catch (err) {
+    console.error('GET /api/users/assignable error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// -----------------------------------------------------------------------------
 // GET /api/users — list users in the current organizer
 // -----------------------------------------------------------------------------
 router.get('/', authRequired, requirePrivileged, async (req, res) => {
