@@ -998,7 +998,7 @@ class FlowOrchestrator {
 
                             if (dbResult.savedCount > 0) {
                                 await this.aggregator.triggerCanonicalAggregation(aiContacts, {
-                                    jobId, organizerId: job.organizer_id, sourceUrl: job.input
+                                    jobId, organizerId: job.organizer_id, sourceUrl: job.input, createdByUserId: job.created_by_user_id || null
                                 });
                             }
 
@@ -1044,7 +1044,7 @@ class FlowOrchestrator {
 
                                 if (dbResult.savedCount > 0) {
                                     await this.aggregator.triggerCanonicalAggregation(aiContacts, {
-                                        jobId, organizerId: job.organizer_id, sourceUrl: job.input
+                                        jobId, organizerId: job.organizer_id, sourceUrl: job.input, createdByUserId: job.created_by_user_id || null
                                     });
                                 }
 
@@ -1128,7 +1128,8 @@ class FlowOrchestrator {
                 flow2Result = await this.aggregator.aggregateV2([], {
                     jobId,
                     organizerId: job.organizer_id,
-                    sourceUrl: job.input
+                    sourceUrl: job.input,
+                    createdByUserId: job.created_by_user_id || null
                 });
             }
 
@@ -1689,7 +1690,8 @@ class FlowOrchestrator {
                         {
                             jobId,
                             organizerId: job.organizer_id,
-                            sourceUrl: job.input
+                            sourceUrl: job.input,
+                            createdByUserId: job.created_by_user_id || null
                         }
                     );
 
@@ -1793,7 +1795,8 @@ class FlowOrchestrator {
             {
                 jobId,
                 organizerId: job.organizer_id,
-                sourceUrl: job.input
+                sourceUrl: job.input,
+                createdByUserId: job.created_by_user_id || null
             }
         );
 
@@ -1842,7 +1845,8 @@ class FlowOrchestrator {
             return this.aggregator.aggregateV2([], {
                 jobId,
                 organizerId: job.organizer_id,
-                sourceUrl: job.input
+                sourceUrl: job.input,
+                createdByUserId: job.created_by_user_id || null
             });
         }
 
@@ -1916,7 +1920,8 @@ class FlowOrchestrator {
         const finalResult = await this.aggregator.aggregateV2(scraperResults, {
             jobId,
             organizerId: job.organizer_id,
-            sourceUrl: job.input
+            sourceUrl: job.input,
+            createdByUserId: job.created_by_user_id || null
         });
 
         return finalResult;

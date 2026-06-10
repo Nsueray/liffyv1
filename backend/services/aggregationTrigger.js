@@ -46,7 +46,7 @@ function isPersistEnabled() {
  * @param {Object} [options.metadata] - Additional context
  * @returns {Promise<Object>} Processing result
  */
-async function aggregate({ jobId, organizerId, normalizationResult, metadata = {} }) {
+async function aggregate({ jobId, organizerId, normalizationResult, metadata = {}, createdByUserId = null }) {
   if (!isEnabled()) {
     return { processed: false, reason: 'disabled', timestamp: new Date().toISOString() };
   }
@@ -79,7 +79,7 @@ async function aggregate({ jobId, organizerId, normalizationResult, metadata = {
     return { processed: true, persisted: true, persons: 0, affiliations: 0, timestamp: new Date().toISOString() };
   }
 
-  return await persistCandidates(jobId, organizerId, candidates, metadata);
+  return await persistCandidates(jobId, organizerId, candidates, metadata, createdByUserId);
 }
 
 /**
@@ -94,7 +94,7 @@ async function aggregate({ jobId, organizerId, normalizationResult, metadata = {
  *   - COALESCE preserves existing data, only fills NULLs or upgrades confidence
  *   - "same email + same company + new info = enrichment, not replacement"
  */
-async function persistCandidates(jobId, organizerId, candidates, metadata) {
+async function persistCandidates(jobId, organizerId, candidates, metadata, createdByUserId) {
   const client = await pool.connect();
   let personsUpserted = 0;
   let affiliationsUpserted = 0;
@@ -107,12 +107,13 @@ async function persistCandidates(jobId, organizerId, candidates, metadata) {
 
       // 1. UPSERT person
       const personRes = await client.query(`
-        INSERT INTO persons (organizer_id, email, first_name, last_name)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO persons (organizer_id, email, first_name, last_name, sales_owner_user_id)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (organizer_id, LOWER(email))
         DO UPDATE SET
           first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
           last_name  = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
+          sales_owner_user_id = COALESCE(persons.sales_owner_user_id, EXCLUDED.sales_owner_user_id),
           updated_at = NOW()
         RETURNING id
       `, [
@@ -120,6 +121,7 @@ async function persistCandidates(jobId, organizerId, candidates, metadata) {
         candidate.email.trim().toLowerCase(),
         candidate.first_name || null,
         candidate.last_name || null,
+        createdByUserId || null,
       ]);
 
       const personId = personRes.rows[0].id;

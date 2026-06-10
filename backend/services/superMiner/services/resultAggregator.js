@@ -841,6 +841,7 @@ class ResultAggregator {
                     source_url: jobContext.sourceUrl || null,
                     mining_mode: 'superminer',
                 },
+                createdByUserId: jobContext.createdByUserId || null,
             });
 
             console.log(`[Aggregator] Canonical aggregation done: ${normalizationResult.stats.candidates_produced} candidates`);

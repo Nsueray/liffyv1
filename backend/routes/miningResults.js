@@ -134,12 +134,12 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
     let jobRes;
     if (req.is_manual_miner) {
       jobRes = await client.query(
-        'SELECT id, organizer_id FROM public.mining_jobs WHERE id = $1',
+        'SELECT id, organizer_id, created_by_user_id FROM public.mining_jobs WHERE id = $1',
         [jobId]
       );
     } else {
       jobRes = await client.query(
-        'SELECT id, organizer_id FROM public.mining_jobs WHERE id = $1 AND organizer_id = $2',
+        'SELECT id, organizer_id, created_by_user_id FROM public.mining_jobs WHERE id = $1 AND organizer_id = $2',
         [jobId, req.auth.organizer_id]
       );
     }
@@ -320,6 +320,7 @@ router.post('/api/mining/jobs/:id/results', authRequiredOrManual, validateJobId,
             original_contact_count: emailContacts.length,
             source: req.is_manual_miner ? 'local_miner' : 'external_push',
           },
+          createdByUserId: job.created_by_user_id || null,
         });
 
         console.log(`[POST results] Canonical aggregation: ${normResult.stats?.candidates_produced || 0} candidates processed`);

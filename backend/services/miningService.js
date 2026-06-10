@@ -207,6 +207,7 @@ async function runShadowModeFromMergedResult(job, finalResult) {
                 source_url: job.input || null,
                 mining_mode: job.config?.mining_mode || 'full',
             },
+            createdByUserId: job.created_by_user_id || null,
         });
 
         console.log(`[SHADOW_MODE] Completed for job ${job.id}: ${normalizationResult.stats.candidates_produced} candidates`);
