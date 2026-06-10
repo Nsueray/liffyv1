@@ -720,6 +720,91 @@ router.post('/', authRequired, async (req, res) => {
   }
 });
 
+// PATCH /api/persons/:id/owner — Reassign sales_owner_user_id
+// Two-sided hierarchy check: caller must access current owner AND new owner.
+router.patch('/:id/owner', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const userId = req.auth.user_id;
+    const personId = req.params.id;
+    const { new_owner_user_id } = req.body || {};
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!new_owner_user_id || !uuidRegex.test(new_owner_user_id)) {
+      return res.status(400).json({ error: 'Geçerli bir new_owner_user_id zorunlu' });
+    }
+    if (!uuidRegex.test(personId)) {
+      return res.status(400).json({ error: 'Invalid person id' });
+    }
+
+    // Load person
+    const personRes = await db.query(
+      `SELECT id, email, first_name, last_name, sales_owner_user_id
+         FROM persons WHERE id = $1 AND organizer_id = $2 LIMIT 1`,
+      [personId, organizerId]
+    );
+    if (personRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Person not found' });
+    }
+    const person = personRes.rows[0];
+    const fromOwner = person.sales_owner_user_id;
+
+    // Check 1: caller can access current owner's scope
+    if (fromOwner && !(await canAccessRowHierarchical(req, fromOwner))) {
+      return res.status(403).json({ error: 'Bu kişiye erişim yetkiniz yok' });
+    }
+
+    // Check 2: caller can assign to new owner's scope
+    if (!(await canAccessRowHierarchical(req, new_owner_user_id))) {
+      return res.status(403).json({ error: 'Bu kullanıcıya atama yetkiniz yok' });
+    }
+
+    // Validate new owner exists in same org
+    const targetUser = await db.query(
+      `SELECT id, email, first_name, last_name FROM users WHERE id = $1 AND organizer_id = $2`,
+      [new_owner_user_id, organizerId]
+    );
+    if (targetUser.rows.length === 0) {
+      return res.status(400).json({ error: 'Hedef kullanıcı bu organizasyonda bulunamadı' });
+    }
+
+    // Update
+    const updRes = await db.query(
+      `UPDATE persons SET sales_owner_user_id = $1, updated_at = NOW()
+        WHERE id = $2 AND organizer_id = $3
+        RETURNING id, email, first_name, last_name, sales_owner_user_id`,
+      [new_owner_user_id, personId, organizerId]
+    );
+
+    // Activity log (best-effort)
+    try {
+      await db.query(
+        `INSERT INTO contact_activities
+           (organizer_id, person_id, user_id, activity_type, description, meta)
+         VALUES ($1, $2, $3, 'owner_change', $4, $5)`,
+        [
+          organizerId,
+          personId,
+          userId,
+          `Owner changed to ${[targetUser.rows[0].first_name, targetUser.rows[0].last_name].filter(Boolean).join(' ') || targetUser.rows[0].email}`,
+          JSON.stringify({
+            from_owner_user_id: fromOwner || null,
+            to_owner_user_id: new_owner_user_id,
+            changed_by_user_id: userId,
+          }),
+        ]
+      );
+    } catch (actErr) {
+      console.warn('[persons] owner_change activity insert failed:', actErr.message);
+    }
+
+    res.json({ person: updRes.rows[0] });
+  } catch (err) {
+    console.error('PATCH /api/persons/:id/owner error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/persons/:id — Delete person and cascade affiliations
 // Access: owner + manager only. Scope: must have access to person's sales_owner_user_id.
 router.delete('/:id', authRequired, async (req, res) => {
