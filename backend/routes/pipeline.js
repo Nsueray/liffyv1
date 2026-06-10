@@ -19,6 +19,11 @@ const { isPrivileged, getUserContext, canAccessRowHierarchical, getHierarchicalS
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const isUuid = (v) => typeof v === 'string' && UUID_REGEX.test(v);
 
+const LOST_REASONS = [
+  'company_defunct', 'no_trade_fairs', 'bad_contact_info', 'unreachable',
+  'not_interested', 'no_budget', 'competitor', 'wrong_profile', 'bad_timing', 'other',
+];
+
 // -----------------------------------------------------------------------------
 // Helper: stage ownership
 // -----------------------------------------------------------------------------
@@ -317,7 +322,7 @@ router.patch('/api/persons/:id/stage', authRequired, async (req, res) => {
     const organizerId = req.auth.organizer_id;
     const userId = req.auth.user_id;
     const { id } = req.params;
-    const { stage_id } = req.body || {};
+    const { stage_id, reason, reason_note } = req.body || {};
 
     if (!isUuid(id)) return res.status(400).json({ error: 'Invalid person id' });
     // stage_id may be null (to un-assign), otherwise must be a uuid owned by org
@@ -355,6 +360,17 @@ router.patch('/api/persons/:id/stage', authRequired, async (req, res) => {
       if (!toStage) return res.status(404).json({ error: 'Stage not found' });
     }
 
+    // Lost-stage validation: reason required
+    if (toStage && toStage.is_lost) {
+      const r = typeof reason === 'string' ? reason.trim() : '';
+      if (!r) return res.status(400).json({ error: 'Eleme sebebi zorunlu' });
+      if (!LOST_REASONS.includes(r)) return res.status(400).json({ error: `Geçersiz eleme sebebi: ${r}` });
+      if (r === 'other') {
+        const note = typeof reason_note === 'string' ? reason_note.trim() : '';
+        if (!note) return res.status(400).json({ error: '"Diğer" sebebi için açıklama zorunlu' });
+      }
+    }
+
     // Auto-assign: on first stage change, current user becomes the assignee.
     // Owner/admin leaves an existing assignee untouched; only fills NULLs.
     const nextAssignee = currentAssignee || userId;
@@ -390,12 +406,16 @@ router.patch('/api/persons/:id/stage', authRequired, async (req, res) => {
           organizerId,
           id,
           userId,
-          toStage ? `Moved to ${toStage.name}` : 'Removed from pipeline',
+          toStage
+            ? (toStage.is_lost && reason ? `Moved to ${toStage.name}: ${reason}` : `Moved to ${toStage.name}`)
+            : 'Removed from pipeline',
           JSON.stringify({
             from_stage: fromStageName,
             to_stage: toStage ? toStage.name : null,
             from_stage_id: fromStageId,
             to_stage_id: toStage ? toStage.id : null,
+            ...(toStage && toStage.is_lost && reason ? { reason } : {}),
+            ...(toStage && toStage.is_lost && reason === 'other' && reason_note ? { reason_note: reason_note.trim() } : {}),
           }),
         ]
       );
