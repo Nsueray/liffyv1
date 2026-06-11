@@ -294,16 +294,20 @@ router.post('/import', authRequired, async (req, res) => {
         const firstName = nameParts[0] || null;
         const lastName = nameParts.length > 1 ? nameParts.slice(1).join(' ') : null;
 
+        // source_mining_job_id: only set when lead originates from mining (source_type='mining' + valid UUID source_ref)
+        const miningJobId = (lead.source_type === 'mining' && lead.source_ref) ? lead.source_ref : null;
+
         const personResult = await client.query(
-          `INSERT INTO persons (organizer_id, email, first_name, last_name, sales_owner_user_id)
-           VALUES ($1, $2, $3, $4, $5)
+          `INSERT INTO persons (organizer_id, email, first_name, last_name, sales_owner_user_id, source_mining_job_id)
+           VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (organizer_id, LOWER(email)) DO UPDATE SET
              first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
              last_name = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
              sales_owner_user_id = COALESCE(persons.sales_owner_user_id, EXCLUDED.sales_owner_user_id),
+             source_mining_job_id = COALESCE(persons.source_mining_job_id, EXCLUDED.source_mining_job_id),
              updated_at = NOW()
            RETURNING id`,
-          [organizerId, email, firstName, lastName, req.auth.user_id]
+          [organizerId, email, firstName, lastName, req.auth.user_id, miningJobId]
         );
         personsUpserted++;
         const personId = personResult.rows[0].id;

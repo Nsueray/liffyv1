@@ -29,7 +29,7 @@ router.get('/', authRequired, async (req, res) => {
     const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 50));
     const offset = (page - 1) * limit;
 
-    const { search, verification_status, country, company, has_intent, industry } = req.query;
+    const { search, verification_status, country, company, has_intent, industry, mining_job_id } = req.query;
 
     let where = ['p.organizer_id = $1'];
     const params = [organizerId];
@@ -88,6 +88,12 @@ router.get('/', authRequired, async (req, res) => {
         SELECT 1 FROM prospect_intents pi
         WHERE pi.person_id = p.id AND pi.organizer_id = p.organizer_id
       )`);
+    }
+
+    if (mining_job_id && mining_job_id.trim()) {
+      where.push(`p.source_mining_job_id = $${idx}`);
+      params.push(mining_job_id.trim());
+      idx++;
     }
 
     // User scope: sales_owner_user_id hierarchy (owner/admin sees all)
@@ -269,7 +275,7 @@ router.get('/export', authRequired, async (req, res) => {
     }
 
     // Reuse same filter logic from GET /
-    const { search, verification_status, country, company, has_intent } = req.query;
+    const { search, verification_status, country, company, has_intent, mining_job_id } = req.query;
     let where = ['p.organizer_id = $1'];
     const params = [organizerId];
     let idx = 2;
@@ -317,6 +323,12 @@ router.get('/export', authRequired, async (req, res) => {
         SELECT 1 FROM prospect_intents pi
         WHERE pi.person_id = p.id AND pi.organizer_id = p.organizer_id
       )`);
+    }
+
+    if (mining_job_id && mining_job_id.trim()) {
+      where.push(`p.source_mining_job_id = $${idx}`);
+      params.push(mining_job_id.trim());
+      idx++;
     }
 
     // User scope: sales_owner_user_id hierarchy (owner/admin sees all)

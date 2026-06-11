@@ -107,13 +107,14 @@ async function persistCandidates(jobId, organizerId, candidates, metadata, creat
 
       // 1. UPSERT person
       const personRes = await client.query(`
-        INSERT INTO persons (organizer_id, email, first_name, last_name, sales_owner_user_id)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO persons (organizer_id, email, first_name, last_name, sales_owner_user_id, source_mining_job_id)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (organizer_id, LOWER(email))
         DO UPDATE SET
           first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), persons.first_name),
           last_name  = COALESCE(NULLIF(EXCLUDED.last_name, ''), persons.last_name),
           sales_owner_user_id = COALESCE(persons.sales_owner_user_id, EXCLUDED.sales_owner_user_id),
+          source_mining_job_id = COALESCE(persons.source_mining_job_id, EXCLUDED.source_mining_job_id),
           updated_at = NOW()
         RETURNING id
       `, [
@@ -122,6 +123,7 @@ async function persistCandidates(jobId, organizerId, candidates, metadata, creat
         candidate.first_name || null,
         candidate.last_name || null,
         createdByUserId || null,
+        jobId || null,
       ]);
 
       const personId = personRes.rows[0].id;
