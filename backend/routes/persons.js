@@ -720,6 +720,117 @@ router.post('/', authRequired, async (req, res) => {
   }
 });
 
+// PATCH /api/persons/bulk-owner — Bulk reassign sales_owner_user_id
+// Same two-sided hierarchy as single reassign, per-row check, single batch UPDATE.
+router.patch('/bulk-owner', authRequired, async (req, res) => {
+  try {
+    const organizerId = req.auth.organizer_id;
+    const userId = req.auth.user_id;
+    const { person_ids, new_owner_user_id } = req.body || {};
+
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+    if (!Array.isArray(person_ids) || person_ids.length === 0) {
+      return res.status(400).json({ error: 'person_ids array is required and must not be empty' });
+    }
+    if (!new_owner_user_id || !uuidRegex.test(new_owner_user_id)) {
+      return res.status(400).json({ error: 'Valid new_owner_user_id is required' });
+    }
+
+    // Validate new owner exists in same org (once, outside loop)
+    const targetUser = await db.query(
+      `SELECT id, email, first_name, last_name FROM users WHERE id = $1 AND organizer_id = $2`,
+      [new_owner_user_id, organizerId]
+    );
+    if (targetUser.rows.length === 0) {
+      return res.status(400).json({ error: 'Target user not found in this organization' });
+    }
+
+    // Check 2 (assign direction): caller can assign to new owner's scope (once)
+    if (!(await canAccessRowHierarchical(req, new_owner_user_id))) {
+      return res.status(403).json({ error: 'You do not have permission to assign to this user' });
+    }
+
+    // Load all requested persons in one query
+    const validIds = person_ids.filter(id => uuidRegex.test(id));
+    const personsRes = await db.query(
+      `SELECT id, sales_owner_user_id FROM persons
+        WHERE id = ANY($1) AND organizer_id = $2`,
+      [validIds, organizerId]
+    );
+    const foundMap = new Map(personsRes.rows.map(r => [r.id, r.sales_owner_user_id]));
+
+    // Per-row access check
+    const authorized = [];
+    const skipped = [];
+
+    for (const pid of validIds) {
+      if (!foundMap.has(pid)) {
+        skipped.push({ id: pid, reason: 'not_found' });
+        continue;
+      }
+      const fromOwner = foundMap.get(pid);
+      if (fromOwner && !(await canAccessRowHierarchical(req, fromOwner))) {
+        skipped.push({ id: pid, reason: 'no_access' });
+        continue;
+      }
+      authorized.push(pid);
+    }
+
+    // Also report invalid UUIDs that were filtered out
+    for (const pid of person_ids) {
+      if (!uuidRegex.test(pid)) {
+        skipped.push({ id: pid, reason: 'not_found' });
+      }
+    }
+
+    let updatedCount = 0;
+    if (authorized.length > 0) {
+      // Single batch UPDATE
+      const updRes = await db.query(
+        `UPDATE persons SET sales_owner_user_id = $1, updated_at = NOW()
+          WHERE id = ANY($2) AND organizer_id = $3`,
+        [new_owner_user_id, authorized, organizerId]
+      );
+      updatedCount = updRes.rowCount;
+
+      // Bulk summary log (single row, not per-person)
+      try {
+        const targetName = [targetUser.rows[0].first_name, targetUser.rows[0].last_name]
+          .filter(Boolean).join(' ') || targetUser.rows[0].email;
+        await db.query(
+          `INSERT INTO contact_activities
+             (organizer_id, person_id, user_id, activity_type, description, meta)
+           VALUES ($1, $2, $3, 'bulk_owner_change', $4, $5)`,
+          [
+            organizerId,
+            authorized[0],
+            userId,
+            `Bulk owner change: ${updatedCount} contacts assigned to ${targetName}`,
+            JSON.stringify({
+              to_owner_user_id: new_owner_user_id,
+              changed_by_user_id: userId,
+              affected_count: updatedCount,
+              affected_ids: authorized,
+            }),
+          ]
+        );
+      } catch (actErr) {
+        console.warn('[persons] bulk_owner_change activity insert failed:', actErr.message);
+      }
+    }
+
+    res.json({
+      updated_count: updatedCount,
+      updated_ids: authorized,
+      skipped,
+    });
+  } catch (err) {
+    console.error('PATCH /api/persons/bulk-owner error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // PATCH /api/persons/:id/owner — Reassign sales_owner_user_id
 // Two-sided hierarchy check: caller must access current owner AND new owner.
 router.patch('/:id/owner', authRequired, async (req, res) => {
