@@ -40,6 +40,7 @@ const timelineRouter = require('./routes/timeline');
 const contextRouter = require('./routes/context');
 const waitingRouter = require('./routes/waiting');
 const companiesRouter = require('./routes/companies');
+const quotesRouter = require('./routes/quotes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -98,6 +99,7 @@ app.use('/api/timeline', timelineRouter);
 app.use('/api/context', contextRouter);
 app.use('/api/waiting', waitingRouter);
 app.use('/api/companies', companiesRouter);
+app.use('/api/quotes', quotesRouter);
 app.use(webhooksRouter);
 app.use(statsRouter);
 
