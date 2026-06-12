@@ -626,7 +626,7 @@ router.get('/', authRequired, async (req, res) => {
       SELECT q.*, o.code AS office_code,
              e.name AS expo_name,
              p.first_name AS person_first_name, p.last_name AS person_last_name, p.email AS person_email,
-             u.first_name AS owner_first_name, u.last_name AS owner_last_name,
+             u.first_name AS owner_first_name, u.last_name AS owner_last_name, u.email AS owner_email,
              cr.first_name AS creator_first_name, cr.last_name AS creator_last_name
       FROM quotes q
       JOIN offices o ON o.id = q.office_id
