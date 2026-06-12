@@ -430,7 +430,7 @@ router.post('/', authRequired, async (req, res) => {
     const orgId = req.auth.organizer_id;
     const { userId } = getUserContext(req);
     const {
-      expo_id, company_id, person_id, office_id,
+      expo_id, company_name, person_id, office_id,
       currency, exchange_rate_to_eur, valid_until, notes,
       sales_owner_user_id, subject: customSubject,
       line_items,
@@ -438,7 +438,7 @@ router.post('/', authRequired, async (req, res) => {
 
     // Required fields
     if (!expo_id) return res.status(400).json({ error: 'expo_id is required' });
-    if (!company_id) return res.status(400).json({ error: 'company_id is required' });
+    if (!company_name || !company_name.trim()) return res.status(400).json({ error: 'company_name is required' });
 
     // Resolve office: explicit > user's office
     let resolvedOfficeId = office_id;
@@ -475,10 +475,7 @@ router.post('/', authRequired, async (req, res) => {
     if (expoRow.rows.length === 0) return res.status(404).json({ error: 'Expo not found' });
     const expo = expoRow.rows[0];
 
-    // Load company for subject generation
-    const companyRow = await db.query('SELECT name FROM companies WHERE id = $1 AND organizer_id = $2', [company_id, orgId]);
-    if (companyRow.rows.length === 0) return res.status(404).json({ error: 'Company not found' });
-    const company = companyRow.rows[0];
+    const trimmedCompanyName = company_name.trim();
 
     // Validate person if provided
     if (person_id) {
@@ -503,8 +500,8 @@ router.post('/', authRequired, async (req, res) => {
 
     // Generate subject: {Expo}-{Company}-{totalM2}SQM or {Expo}-{Company}
     const resolvedSubject = customSubject || (totalM2 > 0
-      ? `${expo.name}-${company.name}-${totalM2}SQM`
-      : `${expo.name}-${company.name}`);
+      ? `${expo.name}-${trimmedCompanyName}-${totalM2}SQM`
+      : `${expo.name}-${trimmedCompanyName}`);
 
     // Resolve valid_until: explicit > expo.payment_deadline
     const resolvedValidUntil = valid_until || expo.payment_deadline || null;
@@ -512,13 +509,13 @@ router.post('/', authRequired, async (req, res) => {
     // Insert quote
     const quoteRes = await db.query(`
       INSERT INTO quotes (
-        organizer_id, office_id, expo_id, company_id, person_id,
+        organizer_id, office_id, expo_id, company_name, person_id,
         sales_owner_user_id, subject, status, currency, exchange_rate_to_eur,
         valid_until, notes, created_by_user_id
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,'draft',$8,$9,$10,$11,$12)
       RETURNING *
     `, [
-      orgId, resolvedOfficeId, expo_id, company_id, person_id || null,
+      orgId, resolvedOfficeId, expo_id, trimmedCompanyName, person_id || null,
       resolvedOwner, resolvedSubject, resolvedCurrency, resolvedRate,
       resolvedValidUntil, notes || null, userId,
     ]);
@@ -586,7 +583,7 @@ router.get('/', authRequired, async (req, res) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 25));
     const offset = (page - 1) * limit;
 
-    const { status, expo_id, company_id, search } = req.query;
+    const { status, expo_id, company_name: filterCompany, search } = req.query;
 
     const where = ['q.organizer_id = $1'];
     const params = [orgId];
@@ -602,13 +599,13 @@ router.get('/', authRequired, async (req, res) => {
       params.push(expo_id);
       idx++;
     }
-    if (company_id) {
-      where.push(`q.company_id = $${idx}`);
-      params.push(company_id);
+    if (filterCompany) {
+      where.push(`q.company_name ILIKE $${idx}`);
+      params.push(`%${filterCompany}%`);
       idx++;
     }
     if (search && search.trim()) {
-      where.push(`(q.subject ILIKE $${idx} OR c.name ILIKE $${idx} OR CAST(q.af_sequence AS TEXT) LIKE $${idx})`);
+      where.push(`(q.subject ILIKE $${idx} OR q.company_name ILIKE $${idx} OR CAST(q.af_sequence AS TEXT) LIKE $${idx})`);
       params.push(`%${search.trim()}%`);
       idx++;
     }
@@ -621,20 +618,18 @@ router.get('/', authRequired, async (req, res) => {
 
     const countRes = await db.query(`
       SELECT COUNT(*) FROM quotes q
-      LEFT JOIN companies c ON c.id = q.company_id
       WHERE ${whereClause} ${scope.sql}
     `, [...params, ...scope.params]);
     const total = parseInt(countRes.rows[0].count, 10);
 
     const dataRes = await db.query(`
       SELECT q.*, o.code AS office_code,
-             c.name AS company_name, e.name AS expo_name,
+             e.name AS expo_name,
              p.first_name AS person_first_name, p.last_name AS person_last_name, p.email AS person_email,
              u.first_name AS owner_first_name, u.last_name AS owner_last_name,
              cr.first_name AS creator_first_name, cr.last_name AS creator_last_name
       FROM quotes q
       JOIN offices o ON o.id = q.office_id
-      LEFT JOIN companies c ON c.id = q.company_id
       LEFT JOIN expos e ON e.id = q.expo_id
       LEFT JOIN persons p ON p.id = q.person_id
       LEFT JOIN users u ON u.id = q.sales_owner_user_id
@@ -672,15 +667,13 @@ router.get('/:id', authRequired, async (req, res) => {
 
     // Load related data
     const items = await loadLineItems(quote.id);
-    const [companyRes, expoRes, personRes, ownerRes] = await Promise.all([
-      db.query('SELECT name, country_code FROM companies WHERE id = $1', [quote.company_id]),
+    const [expoRes, personRes, ownerRes] = await Promise.all([
       db.query('SELECT name, payment_deadline FROM expos WHERE id = $1', [quote.expo_id]),
       quote.person_id ? db.query('SELECT first_name, last_name, email FROM persons WHERE id = $1', [quote.person_id]) : { rows: [] },
       db.query('SELECT first_name, last_name, email FROM users WHERE id = $1', [quote.sales_owner_user_id]),
     ]);
 
     const enriched = enrichQuote(quote, items);
-    enriched.company = companyRes.rows[0] || null;
     enriched.expo = expoRes.rows[0] || null;
     enriched.person = personRes.rows[0] || null;
     enriched.sales_owner = ownerRes.rows[0] || null;
@@ -708,7 +701,7 @@ router.put('/:id', authRequired, async (req, res) => {
 
     const {
       subject, notes, valid_until, person_id,
-      sales_owner_user_id, office_id, expo_id, company_id,
+      sales_owner_user_id, office_id, expo_id, company_name: updCompanyName,
     } = req.body;
 
     // Build dynamic update
@@ -752,9 +745,9 @@ router.put('/:id', authRequired, async (req, res) => {
       params.push(expo_id);
       idx++;
     }
-    if (company_id && !isSentOrLater) {
-      sets.push(`company_id = $${idx}`);
-      params.push(company_id);
+    if (updCompanyName && !isSentOrLater) {
+      sets.push(`company_name = $${idx}`);
+      params.push(updCompanyName.trim());
       idx++;
     }
 
@@ -1062,7 +1055,7 @@ router.post('/:id/sign', authRequired, async (req, res) => {
     console.log('[QUOTE_SIGNED]', JSON.stringify({
       quote_id: updated.id,
       af_number: afNumber(updated),
-      company_id: updated.company_id,
+      company_name: updated.company_name,
       signed_at: updated.signed_at,
       signed_by_user_id: getUserContext(req).userId,
       timestamp: new Date().toISOString(),
